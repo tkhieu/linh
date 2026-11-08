@@ -1,15 +1,27 @@
 use std::sync::Mutex;
+use std::time::Instant;
 
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::platform::linux::logging;
 use crate::state::AppState;
+
+/// A pending prompt URL, plus the moment its URL was received (for
+/// `receive->prompt_shown` logging) and whether that log line has
+/// already been emitted for it.
+#[derive(Debug, Clone, PartialEq)]
+struct PendingPrompt {
+    url: String,
+    received_at: Instant,
+    shown_logged: bool,
+}
 
 /// The pure state machine behind the prompt window: at most one URL can
 /// be pending at a time. Kept free of any Tauri type so it is directly
 /// unit-testable.
 #[derive(Debug, Default, Clone, PartialEq)]
 struct PromptMachine {
-    pending_url: Option<String>,
+    pending: Option<PendingPrompt>,
 }
 
 /// The window-level side effect that matches a given pending state;
@@ -26,19 +38,38 @@ enum PromptAction {
 
 impl PromptMachine {
     /// Sets `url` pending, replacing any previous pending URL (the
-    /// latest `set_pending` always wins).
-    fn set_pending(&mut self, url: String) {
-        self.pending_url = Some(url);
+    /// latest `set_pending` always wins). The new pending URL has not
+    /// logged its "shown" event yet, even if the one it replaced had.
+    fn set_pending(&mut self, url: String, received_at: Instant) {
+        self.pending = Some(PendingPrompt {
+            url,
+            received_at,
+            shown_logged: false,
+        });
     }
 
     /// Clears the pending URL, if any, and returns it. Idempotent:
     /// taking from an already-empty machine is a safe no-op.
     fn take(&mut self) -> Option<String> {
-        self.pending_url.take()
+        self.pending.take().map(|p| p.url)
     }
 
-    fn peek(&self) -> Option<&String> {
-        self.pending_url.as_ref()
+    fn peek(&self) -> Option<&str> {
+        self.pending.as_ref().map(|p| p.url.as_str())
+    }
+
+    /// If there is a pending URL that hasn't logged its "shown" event
+    /// yet, marks it logged and returns the moment it was received, so
+    /// the caller can log `receive->prompt_shown` exactly once per
+    /// pending URL (only after the window has actually shown it).
+    /// Returns `None` if nothing is pending, or it was already logged.
+    fn mark_shown_logged(&mut self) -> Option<Instant> {
+        let pending = self.pending.as_mut()?;
+        if pending.shown_logged {
+            return None;
+        }
+        pending.shown_logged = true;
+        Some(pending.received_at)
     }
 }
 
@@ -74,13 +105,16 @@ impl PromptState {
 
     /// The currently pending URL, if any.
     pub fn pending_url(&self) -> Option<String> {
-        self.machine.lock().unwrap().peek().cloned()
+        self.machine.lock().unwrap().peek().map(str::to_string)
     }
 
     /// Sets `url` pending, replacing any previous pending URL, and
-    /// schedules a window reconcile.
-    pub fn show(&self, app: &AppHandle, url: String) {
-        self.machine.lock().unwrap().set_pending(url);
+    /// schedules a window reconcile. `received_at` is when the URL was
+    /// actually received (see [`crate::routing::route_url`]); once the
+    /// window has actually shown it, the reconcile logs
+    /// `receive->prompt_shown` timed from this moment.
+    pub fn show(&self, app: &AppHandle, url: String, received_at: Instant) {
+        self.machine.lock().unwrap().set_pending(url, received_at);
         schedule_reconcile(app);
     }
 
@@ -98,37 +132,65 @@ impl PromptState {
     /// `show`/`take_and_hide` directly) is what makes a reconcile that
     /// runs after a later one has already landed a no-op instead of a
     /// regression: it re-derives the action from whatever is true *now*.
-    fn reconcile(&self, app: &AppHandle) {
-        let pending = self.machine.lock().unwrap().peek().cloned();
-        apply(app, reconcile_action(pending));
+    ///
+    /// Logs `receive->prompt_shown` right after `window.show()` actually
+    /// succeeds, for the first successful show of that pending URL only
+    /// (a later reconcile that finds the same URL still pending does not
+    /// log again). Logs an error line instead if showing the window
+    /// fails.
+    fn reconcile(&self, app: &AppHandle, dirs: &crate::platform::linux::dirs::Dirs) {
+        let pending = self.machine.lock().unwrap().peek().map(str::to_string);
+        let Some(window) = app.get_webview_window("prompt") else {
+            logging::log_line(dirs, "failed to reconcile prompt window: window not found");
+            return;
+        };
+        match reconcile_action(pending) {
+            PromptAction::Show(url) => match window.show() {
+                Ok(()) => {
+                    let _ = window.set_focus();
+                    let _ = window.emit("prompt-url-changed", &url);
+                    if let Some(received_at) = self.machine.lock().unwrap().mark_shown_logged() {
+                        logging::log_line(
+                            dirs,
+                            &format!(
+                                "prompt shown for {url} (receive->prompt_shown {}ms)",
+                                received_at.elapsed().as_millis()
+                            ),
+                        );
+                    }
+                }
+                Err(err) => {
+                    logging::log_line(
+                        dirs,
+                        &format!("failed to show prompt window for {url}: {err}"),
+                    );
+                }
+            },
+            PromptAction::Hide => {
+                let _ = window.hide();
+            }
+        }
     }
 }
 
 /// Schedules [`PromptState::reconcile`] on Tauri's main thread (required
-/// for window operations). Looks the `AppState` back up from the cloned
+/// for window operations). Looks `AppState` back up from the cloned
 /// `AppHandle` inside the closure, rather than capturing `&PromptState`
 /// directly, since the closure must be `'static` and outlive this call.
+/// Logs an error line if scheduling itself fails.
 fn schedule_reconcile(app: &AppHandle) {
     let app_for_closure = app.clone();
-    let _ = app.run_on_main_thread(move || {
+    let result = app.run_on_main_thread(move || {
         if let Some(state) = app_for_closure.try_state::<AppState>() {
-            state.prompt.reconcile(&app_for_closure);
+            state.prompt.reconcile(&app_for_closure, &state.dirs);
         }
     });
-}
-
-fn apply(app: &AppHandle, action: PromptAction) {
-    let Some(window) = app.get_webview_window("prompt") else {
-        return;
-    };
-    match action {
-        PromptAction::Show(url) => {
-            let _ = window.show();
-            let _ = window.set_focus();
-            let _ = window.emit("prompt-url-changed", url);
-        }
-        PromptAction::Hide => {
-            let _ = window.hide();
+    if let Err(err) = result {
+        if let Some(state) = app.try_state::<AppState>() {
+            logging::log_line(
+                &state.dirs,
+                &format!("failed to schedule prompt reconcile: {err}"),
+            );
         }
     }
 }
@@ -141,16 +203,16 @@ mod tests {
     fn set_pending_twice_latest_wins() {
         let mut machine = PromptMachine::default();
 
-        machine.set_pending("https://a.example".to_string());
-        machine.set_pending("https://b.example".to_string());
+        machine.set_pending("https://a.example".to_string(), Instant::now());
+        machine.set_pending("https://b.example".to_string(), Instant::now());
 
-        assert_eq!(machine.peek(), Some(&"https://b.example".to_string()));
+        assert_eq!(machine.peek(), Some("https://b.example"));
     }
 
     #[test]
     fn take_clears_pending_and_returns_it() {
         let mut machine = PromptMachine::default();
-        machine.set_pending("https://a.example".to_string());
+        machine.set_pending("https://a.example".to_string(), Instant::now());
 
         let taken = machine.take();
 
@@ -161,13 +223,49 @@ mod tests {
     #[test]
     fn take_after_take_is_idempotent() {
         let mut machine = PromptMachine::default();
-        machine.set_pending("https://a.example".to_string());
+        machine.set_pending("https://a.example".to_string(), Instant::now());
 
         let first = machine.take();
         let second = machine.take();
 
         assert_eq!(first, Some("https://a.example".to_string()));
         assert_eq!(second, None);
+    }
+
+    #[test]
+    fn mark_shown_logged_returns_received_at_once_then_none() {
+        let mut machine = PromptMachine::default();
+        let received_at = Instant::now();
+        machine.set_pending("https://a.example".to_string(), received_at);
+
+        let first = machine.mark_shown_logged();
+        let second = machine.mark_shown_logged();
+
+        assert_eq!(first, Some(received_at));
+        assert_eq!(
+            second, None,
+            "must log the shown event only once per pending URL"
+        );
+    }
+
+    #[test]
+    fn mark_shown_logged_on_an_empty_machine_returns_none() {
+        let mut machine = PromptMachine::default();
+        assert_eq!(machine.mark_shown_logged(), None);
+    }
+
+    #[test]
+    fn set_pending_again_resets_shown_logged_for_the_new_url() {
+        let mut machine = PromptMachine::default();
+        machine.set_pending("https://a.example".to_string(), Instant::now());
+        assert!(machine.mark_shown_logged().is_some());
+
+        machine.set_pending("https://b.example".to_string(), Instant::now());
+
+        assert!(
+            machine.mark_shown_logged().is_some(),
+            "a newly-pending URL must be loggable again"
+        );
     }
 
     #[test]
@@ -190,13 +288,13 @@ mod tests {
         // last must reflect whatever the state actually is at that
         // moment, not the request that triggered it.
         let mut machine = PromptMachine::default();
-        machine.set_pending("https://a.example".to_string());
+        machine.set_pending("https://a.example".to_string(), Instant::now());
         machine.take(); // "hide" request's state change happens first here
 
         // The "show a" reconcile, running *after* the hide, must still
         // see the current (now-empty) state and decide to hide — not
         // replay a stale "show a" it was originally scheduled for.
-        let current = machine.peek().cloned();
+        let current = machine.peek().map(str::to_string);
         assert_eq!(reconcile_action(current), PromptAction::Hide);
     }
 }

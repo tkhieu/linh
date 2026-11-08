@@ -15,9 +15,11 @@ use crate::state::AppState;
 /// `main` for the first launch (so cold-start scanning/config-load time
 /// is counted honestly) or the moment the single-instance callback fired
 /// for a later launch — not when this function happens to run. Logs
-/// `receive->spawn` when a browser is spawned directly, or
-/// `receive->prompt_shown` when the prompt is shown instead (the time a
-/// human then spends choosing is not part of either).
+/// `receive->spawn` when a browser is spawned directly. When the prompt
+/// is shown instead, `receive->prompt_shown` is logged by
+/// [`crate::prompt_state::PromptState`]'s main-thread reconcile, right
+/// after the window actually shows (not here, at schedule time) — the
+/// time a human then spends choosing is not part of either.
 pub fn route_url(app: &AppHandle, state: &AppState, raw_url: &str, received_at: Instant) {
     let Some(url) = url_intake::filter_routable_url(raw_url) else {
         logging::log_line(
@@ -54,14 +56,7 @@ pub fn route_url(app: &AppHandle, state: &AppState, raw_url: &str, received_at: 
             }
         }
         Decision::Prompt => {
-            state.prompt.show(app, url.clone());
-            logging::log_line(
-                &state.dirs,
-                &format!(
-                    "prompt shown for {url} (receive->prompt_shown {}ms)",
-                    received_at.elapsed().as_millis()
-                ),
-            );
+            state.prompt.show(app, url, received_at);
         }
     }
 }

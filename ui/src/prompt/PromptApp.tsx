@@ -20,31 +20,42 @@ export function PromptApp() {
 
   useEffect(() => {
     let mounted = true
+    let unlisten: (() => void) | undefined
     mainRef.current?.focus()
 
-    // Registered before the initial fetch starts, so an event firing
-    // while that fetch is still pending is never missed.
-    const unlisten = listen<string>('prompt-url-changed', (event) => {
-      if (!mounted) return
-      urlSetByEventRef.current = true
-      setUrl(event.payload)
-      setSelected(0)
-      setError('')
-      mainRef.current?.focus()
-    })
+    async function run() {
+      // Awaited before the initial fetch starts, so an event firing
+      // while that fetch is in flight is never missed — listen()
+      // itself resolves asynchronously, so starting the fetch first
+      // would leave a real gap.
+      unlisten = await listen<string>('prompt-url-changed', (event) => {
+        if (!mounted) return
+        urlSetByEventRef.current = true
+        setUrl(event.payload)
+        setSelected(0)
+        setError('')
+        mainRef.current?.focus()
+      })
+      if (!mounted) {
+        unlisten()
+        return
+      }
 
-    Promise.all([getPromptUrl(), getConfig(), listBrowsers()]).then(([pending, config, browsers]) => {
-      if (!mounted) return
-      if (!urlSetByEventRef.current) setUrl(pending)
-      setTargets(visibleTargets(deriveTargets(browsers), config.shown_browsers))
-      mainRef.current?.focus()
-    }).catch((reason: unknown) => {
-      if (mounted) setError(String(reason))
-    })
+      try {
+        const [pending, config, browsers] = await Promise.all([getPromptUrl(), getConfig(), listBrowsers()])
+        if (!mounted) return
+        if (!urlSetByEventRef.current) setUrl(pending)
+        setTargets(visibleTargets(deriveTargets(browsers), config.shown_browsers))
+        mainRef.current?.focus()
+      } catch (reason) {
+        if (mounted) setError(String(reason))
+      }
+    }
+    void run()
 
     return () => {
       mounted = false
-      void unlisten.then((stop) => stop())
+      unlisten?.()
     }
   }, [])
 
