@@ -99,6 +99,11 @@ struct ExecToken {
 /// deprecated `%d %D %n %N %v %m` are dropped. If no URL code is present,
 /// `url` is appended as the final argument. `flags` (profile/private) are
 /// inserted immediately before wherever the URL argument ends up.
+///
+/// If the program is a known shell or script interpreter (see
+/// [`SHELL_INTERPRETERS`]) and the URL field code appears anywhere as a
+/// bare argument, the Exec is rejected outright: the attacker-controlled
+/// URL would otherwise be interpreted as code rather than passed as data.
 fn build_native_command(
     exec: &str,
     flags: &[String],
@@ -119,11 +124,22 @@ fn build_native_command(
         ));
     }
 
+    let remaining: Vec<ExecToken> = tokens.collect();
+    if is_shell_interpreter(&program)
+        && remaining
+            .iter()
+            .any(|token| matches!(bare_field_code(token), Some('u') | Some('U')))
+    {
+        return Err(LaunchError::InvalidExec(format!(
+            "Exec passes the URL field code to a shell/interpreter ({program}), which would execute attacker-controlled input"
+        )));
+    }
+
     let mut args: Vec<String> = Vec::new();
     let mut url_used = false;
     let mut url_arg_index: Option<usize> = None;
 
-    for token in tokens {
+    for token in remaining {
         if let Some(code) = bare_field_code(&token) {
             let produced = expand_field_code(code, browser, url, &mut url_used)?;
             if code == 'u' || code == 'U' {
@@ -157,6 +173,26 @@ fn build_native_command(
             Ok(LaunchCommand { program, args })
         }
     }
+}
+
+/// Program basenames that interpret their arguments as code rather than
+/// exec-ing a fixed binary. An `Exec=` line that hands the URL field code
+/// to one of these as a bare argument would let an attacker-controlled URL
+/// run as a shell command or script, so such Execs are rejected outright
+/// (`flatpak`, which only ever receives a fixed app id, is deliberately
+/// not in this list).
+const SHELL_INTERPRETERS: [&str; 14] = [
+    "sh", "bash", "dash", "zsh", "ksh", "fish", "csh", "tcsh", "env", "python", "python3", "perl",
+    "ruby", "node",
+];
+
+/// Whether `program`'s basename is a known shell or script interpreter.
+fn is_shell_interpreter(program: &str) -> bool {
+    let basename = std::path::Path::new(program)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(program);
+    SHELL_INTERPRETERS.contains(&basename)
 }
 
 /// If `token` is entirely unquoted and its full content is exactly `%`
@@ -882,6 +918,80 @@ mod tests {
             vec![
                 "Google Chrome".to_string(),
                 "https://example.com".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn bare_shell_exec_with_url_field_code_is_rejected() {
+        let err = build_launch_command(
+            &chromium_native("sh -c %u"),
+            &plain_target(),
+            "https://example.com",
+        )
+        .unwrap_err();
+        assert!(matches!(err, LaunchError::InvalidExec(_)));
+    }
+
+    #[test]
+    fn env_wrapped_shell_exec_with_url_field_code_is_rejected() {
+        let err = build_launch_command(
+            &chromium_native("/usr/bin/env sh -c %u"),
+            &plain_target(),
+            "https://example.com",
+        )
+        .unwrap_err();
+        assert!(matches!(err, LaunchError::InvalidExec(_)));
+    }
+
+    #[test]
+    fn bash_exec_with_url_field_code_is_rejected() {
+        let err = build_launch_command(
+            &chromium_native("bash -c %u"),
+            &plain_target(),
+            "https://example.com",
+        )
+        .unwrap_err();
+        assert!(matches!(err, LaunchError::InvalidExec(_)));
+    }
+
+    #[test]
+    fn shell_exec_without_url_field_code_is_not_rejected_by_shell_check() {
+        // sh is never reachable here without a field code in practice, but
+        // the shell-wrapper rejection should specifically require a URL
+        // field code, not reject every shell Exec unconditionally.
+        let cmd = build_launch_command(
+            &chromium_native("sh -c /usr/bin/app"),
+            &plain_target(),
+            "https://example.com",
+        )
+        .unwrap();
+        assert_eq!(cmd.program, "sh");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "-c".to_string(),
+                "/usr/bin/app".to_string(),
+                "https://example.com".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn flatpak_run_exec_is_not_treated_as_a_shell_wrapper() {
+        let cmd = build_launch_command(
+            &chromium_native("/usr/bin/flatpak run org.mozilla.firefox %u"),
+            &plain_target(),
+            "https://example.com",
+        )
+        .unwrap();
+        assert_eq!(cmd.program, "/usr/bin/flatpak");
+        assert_eq!(
+            cmd.args,
+            vec![
+                "run".to_string(),
+                "org.mozilla.firefox".to_string(),
+                "https://example.com".to_string(),
             ]
         );
     }
