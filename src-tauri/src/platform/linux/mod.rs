@@ -16,6 +16,7 @@ pub mod scan;
 pub mod url_intake;
 
 /// The desktop-entry id (without the `.desktop` suffix) that the RPM
-/// installs Linh under. Must match `src-tauri/templates/main.desktop`'s
-/// bundle output name, which CI verifies.
-pub const LINH_DESKTOP_ID: &str = "Linh";
+/// installs Linh under. Must match `tauri.conf.json`'s `productName`
+/// (the RPM bundler names the desktop file `<productName>.desktop`),
+/// which CI verifies.
+pub const LINH_DESKTOP_ID: &str = "linh";

@@ -106,13 +106,16 @@ jobs:
         run: |
           set -euo pipefail
           rpm="$(find target/release/bundle/rpm -name '*.rpm' | head -n1)"
-          desktop="$(rpm2cpio "$rpm" | cpio -i --to-stdout ./usr/share/applications/Linh.desktop 2>/dev/null)"
+          desktop="$(rpm2cpio "$rpm" | cpio -i --to-stdout ./usr/share/applications/linh.desktop 2>/dev/null)"
           echo "$desktop"
 
           fail() { echo "::error::$1"; exit 1; }
 
           exec_line="$(grep '^Exec=' <<< "$desktop")"
           [ "$exec_line" = "Exec=linh %u" ] || fail "expected exact line 'Exec=linh %u', got '$exec_line'"
+
+          name_line="$(grep '^Name=' <<< "$desktop")"
+          [ "$name_line" = "Name=Linh" ] || fail "expected exact line 'Name=Linh', got '$name_line'"
 
           categories_line="$(grep '^Categories=' <<< "$desktop")"
           IFS=';' read -ra categories <<< "${categories_line#Categories=}"

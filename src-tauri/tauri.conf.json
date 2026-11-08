@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Linh",
+  "productName": "linh",
   "version": "0.1.0",
   "identifier": "dev.tkhieu.linh",
   "build": {
