@@ -38,4 +38,12 @@ pub struct Browser {
     #[serde(default)]
     pub profiles: Vec<BrowserProfile>,
     pub supports_private: bool,
+    /// The `Icon=` value from the browser's `.desktop` file, if known.
+    /// Used to expand the `%i` field code (`--icon <value>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// The path to the browser's own `.desktop` file, if known. Used to
+    /// expand the `%k` field code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_file: Option<String>,
 }

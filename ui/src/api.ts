@@ -21,6 +21,8 @@ export interface Browser {
   install: InstallKind
   profiles: BrowserProfile[]
   supports_private: boolean
+  icon?: string
+  desktop_file?: string
 }
 
 export interface Target {
