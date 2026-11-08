@@ -35,7 +35,7 @@ Flatpak packaging, code signing, auto-update, product-definition non-goals.
 | 1 | `feat/scaffold-core` | claude_code | workspace root, `crates/linh-core/**`, `src-tauri/**` skeleton + `commands.rs` contract, `ui/**` skeleton, `.github/**` | — |
 | 2 | `feat/linux-backend` | claude_code | `src-tauri/**` | 1 merged |
 | 3 | `feat/ui` | codex | `ui/**` | 1 merged (parallel with 2) |
-| 4 | `docs/linux-decisions` | jacky (docs) | `docs/**` | — |
+| 4 | `docs/linux-decisions` | jacky (docs) | `docs/**`, `plans/**` | — |
 | 5 | Integration verification + final isolated review | jacky + reviewer | — | 2, 3 merged |
 
 Phase 1 freezes the Tauri command contract (names, argument and return types)
@@ -45,7 +45,7 @@ so phases 2 and 3 can run in parallel without touching each other's files.
 
 React + Vite + TypeScript with pnpm; CI in `fedora:44`; Chrome profile
 "regulator.ca" stands in for "Work" in manual tests; max 2 concurrent build agents
-(~5 GB free RAM); broken-config fallback = first detected browser; prompt
+(~5 GB free RAM); broken-config fallback = first detected browser (Primary is unreadable when the config is broken); prompt
 window centered (Wayland cannot position windows).
 
 ## Risks
