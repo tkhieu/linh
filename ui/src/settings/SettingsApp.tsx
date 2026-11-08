@@ -154,6 +154,9 @@ export function SettingsApp() {
   const primaryKey = config ? targetKey(config.primary) : ''
   const knownPrimary = targets.some(({ key }) => key === primaryKey)
   const openInKnown = draft?.openIn === 'prompt' || targets.some(({ key }) => key === draft?.openIn)
+  const staleShownBrowsers = config
+    ? config.shown_browsers.filter((key) => !targets.some((target) => target.key === key))
+    : []
 
   return (
     <main className="settings">
@@ -196,6 +199,12 @@ export function SettingsApp() {
               {label}
             </label>)}
             {targets.length === 0 && <p>No browsers detected.</p>}
+            {staleShownBrowsers.map((key) => <label key={key}>
+              <input type="checkbox" aria-label={`Show Not installed: ${key}`} checked onChange={() => {
+                updateConfig({ shown_browsers: config.shown_browsers.filter((item) => item !== key) })
+              }} />
+              {`Not installed: ${key}`}
+            </label>)}
           </div>
         </section>
         <section>

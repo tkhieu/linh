@@ -97,6 +97,19 @@ describe('SettingsApp', () => {
     })))
   })
 
+  it('lists a stale shown-browser key as removable and clears it on request', async () => {
+    api.getConfig.mockResolvedValue({ ...config, shown_browsers: ['retired-browser/Profile 9'] })
+    render(<SettingsApp />)
+    await screen.findByRole('heading', { name: 'Shown browsers' })
+    const staleCheckbox = screen.getByLabelText('Show Not installed: retired-browser/Profile 9')
+    expect(staleCheckbox).toBeChecked()
+    fireEvent.click(staleCheckbox)
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
+    await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
+      shown_browsers: [],
+    })))
+  })
+
   it('shows backend save errors', async () => {
     api.saveConfig.mockRejectedValue('Invalid rule')
     render(<SettingsApp />)

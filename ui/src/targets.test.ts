@@ -45,4 +45,9 @@ describe('browser targets', () => {
     expect(visibleTargets(targets, ['retired-browser/Profile 9', 'firefox#private']))
       .toEqual([targets[5]])
   })
+
+  it('falls back to all detected targets when every shown key is stale', () => {
+    const targets = deriveTargets([chrome, firefox])
+    expect(visibleTargets(targets, ['retired-browser/Profile 9'])).toEqual(targets)
+  })
 })
