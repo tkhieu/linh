@@ -105,8 +105,11 @@ fn build_native_command(
     url: &str,
     browser: &Browser,
 ) -> Result<LaunchCommand, LaunchError> {
+    if exec.trim().is_empty() {
+        return Err(LaunchError::InvalidExec("Exec is empty".to_string()));
+    }
     let unescaped = unescape_desktop_string(exec);
-    let mut tokens = tokenize_exec(&unescaped).into_iter();
+    let mut tokens = tokenize_exec(&unescaped)?.into_iter();
 
     let program_token = tokens.next().unwrap_or(ExecToken {
         content: String::new(),
@@ -295,8 +298,10 @@ fn unescape_desktop_string(raw: &str) -> String {
 
 /// Layer 2: tokenizes an (already desktop-string-unescaped) `Exec=` line
 /// into argv-style tokens, honoring double-quoted arguments (which may
-/// contain spaces) and backslash escapes inside them.
-fn tokenize_exec(exec: &str) -> Vec<ExecToken> {
+/// contain spaces) and backslash escapes inside them. Returns
+/// [`LaunchError::InvalidExec`] if a double-quoted argument is never
+/// closed.
+fn tokenize_exec(exec: &str) -> Result<Vec<ExecToken>, LaunchError> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut in_token = false;
@@ -318,9 +323,13 @@ fn tokenize_exec(exec: &str) -> Vec<ExecToken> {
             '"' => {
                 in_token = true;
                 quoted = true;
+                let mut closed = false;
                 while let Some(next) = chars.next() {
                     match next {
-                        '"' => break,
+                        '"' => {
+                            closed = true;
+                            break;
+                        }
                         '\\' => match chars.next() {
                             Some(escaped @ ('"' | '\\' | '$' | '`')) => current.push(escaped),
                             Some(other) => {
@@ -331,6 +340,11 @@ fn tokenize_exec(exec: &str) -> Vec<ExecToken> {
                         },
                         other => current.push(other),
                     }
+                }
+                if !closed {
+                    return Err(LaunchError::InvalidExec(
+                        "unmatched quote in Exec".to_string(),
+                    ));
                 }
             }
             '\\' => {
@@ -352,7 +366,7 @@ fn tokenize_exec(exec: &str) -> Vec<ExecToken> {
             quoted,
         });
     }
-    tokens
+    Ok(tokens)
 }
 
 #[cfg(test)]
@@ -727,6 +741,36 @@ mod tests {
     fn uppercase_f_field_code_is_rejected() {
         let err = build_launch_command(
             &chromium_native("/usr/bin/app %F"),
+            &plain_target(),
+            "https://example.com",
+        )
+        .unwrap_err();
+        assert!(matches!(err, LaunchError::InvalidExec(_)));
+    }
+
+    #[test]
+    fn empty_exec_is_rejected() {
+        let err =
+            build_launch_command(&chromium_native(""), &plain_target(), "https://example.com")
+                .unwrap_err();
+        assert!(matches!(err, LaunchError::InvalidExec(_)));
+    }
+
+    #[test]
+    fn whitespace_only_exec_is_rejected() {
+        let err = build_launch_command(
+            &chromium_native("   "),
+            &plain_target(),
+            "https://example.com",
+        )
+        .unwrap_err();
+        assert!(matches!(err, LaunchError::InvalidExec(_)));
+    }
+
+    #[test]
+    fn unmatched_quote_is_rejected() {
+        let err = build_launch_command(
+            &chromium_native(r#"/usr/bin/app "unterminated %u"#),
             &plain_target(),
             "https://example.com",
         )
