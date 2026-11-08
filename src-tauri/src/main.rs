@@ -6,13 +6,43 @@ mod routing;
 mod state;
 mod tray;
 
+use std::sync::Mutex;
 use std::time::Instant;
 
 use tauri::tray::TrayIconBuilder;
-use tauri::Manager;
+use tauri::{AppHandle, Manager};
 
 use platform::linux::url_intake;
 use state::AppState;
+
+/// Argv (with the moment it was received) queued by the single-instance
+/// callback when it fired before `setup` had `app.manage`d `AppState` yet
+/// — a real race between plugin registration and `setup` completing, not
+/// a hypothetical one. `setup` drains this once `AppState` is ready.
+#[derive(Debug, Default)]
+struct PendingLaunches(Vec<(Instant, Vec<String>)>);
+
+impl PendingLaunches {
+    fn enqueue(&mut self, received_at: Instant, args: Vec<String>) {
+        self.0.push((received_at, args));
+    }
+
+    /// Removes and returns every pending launch, oldest first.
+    fn drain(&mut self) -> Vec<(Instant, Vec<String>)> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+static PENDING_LAUNCHES: Mutex<PendingLaunches> = Mutex::new(PendingLaunches(Vec::new()));
+
+/// Routes `args`' first `http`/`https` URL (logged, timed from
+/// `received_at`), or shows the settings window if there is none.
+fn dispatch_launch(app: &AppHandle, state: &AppState, args: &[String], received_at: Instant) {
+    match url_intake::first_routable_url(args) {
+        Some(url) => routing::route_url(app, state, &url, received_at),
+        None => routing::show_and_focus(app, "settings"),
+    }
+}
 
 fn main() {
     // Captured before anything else so first-launch latency logging
@@ -25,10 +55,13 @@ fn main() {
             // The moment this already-running instance was actually
             // notified of the second launch's argv.
             let received_at = Instant::now();
-            let state = app.state::<AppState>();
-            match url_intake::first_routable_url(&args) {
-                Some(url) => routing::route_url(app, &state, &url, received_at),
-                None => routing::show_and_focus(app, "settings"),
+            match app.try_state::<AppState>() {
+                Some(state) => dispatch_launch(app, &state, &args, received_at),
+                // setup() hasn't finished managing AppState yet (the
+                // plugin can fire before setup completes); queue this
+                // launch and let setup() drain it once ready, rather
+                // than panicking and dropping the URL.
+                None => PENDING_LAUNCHES.lock().unwrap().enqueue(received_at, args),
             }
         }))
         .plugin(tauri_plugin_deep_link::init())
@@ -64,12 +97,12 @@ fn main() {
             // (the settings window stays hidden, Linh stays resident in
             // the tray); otherwise the settings window is shown.
             let args: Vec<String> = std::env::args().collect();
-            match url_intake::first_routable_url(args.iter().skip(1)) {
-                Some(url) => {
-                    let state_handle = app.state::<AppState>();
-                    routing::route_url(&app_handle, &state_handle, &url, process_start);
-                }
-                None => routing::show_and_focus(&app_handle, "settings"),
+            dispatch_launch(&app_handle, &state_handle, &args, process_start);
+
+            // Drain any relaunches that raced in before AppState was
+            // managed, in the order they arrived.
+            for (received_at, args) in PENDING_LAUNCHES.lock().unwrap().drain() {
+                dispatch_launch(&app_handle, &state_handle, &args, received_at);
             }
 
             Ok(())
@@ -89,7 +122,7 @@ fn main() {
         .expect("error while running linh");
 }
 
-fn handle_primary_pick(app: &tauri::AppHandle, index_str: &str) {
+fn handle_primary_pick(app: &AppHandle, index_str: &str) {
     let Ok(index) = index_str.parse::<usize>() else {
         return;
     };
@@ -106,4 +139,43 @@ fn handle_primary_pick(app: &tauri::AppHandle, index_str: &str) {
         return;
     }
     tray::sync_checked_state(&state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enqueue_before_ready_then_drain_preserves_order() {
+        let mut queue = PendingLaunches::default();
+
+        // Draining an empty queue (nothing enqueued yet, i.e. "ready
+        // from the start") yields nothing.
+        assert!(queue.drain().is_empty());
+
+        // Two launches race in while AppState isn't managed yet.
+        queue.enqueue(
+            Instant::now(),
+            vec!["linh".to_string(), "https://a.example".to_string()],
+        );
+        queue.enqueue(
+            Instant::now(),
+            vec!["linh".to_string(), "https://b.example".to_string()],
+        );
+
+        // Draining once AppState is ready returns both, oldest first.
+        let drained = queue.drain();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(
+            drained[0].1,
+            vec!["linh".to_string(), "https://a.example".to_string()]
+        );
+        assert_eq!(
+            drained[1].1,
+            vec!["linh".to_string(), "https://b.example".to_string()]
+        );
+
+        // The queue is now empty again.
+        assert!(queue.drain().is_empty());
+    }
 }
