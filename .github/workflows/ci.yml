@@ -9,6 +9,9 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -28,6 +31,7 @@ jobs:
             make \
             pkgconf-pkg-config \
             rpm-build \
+            cpio \
             file \
             git \
             curl \
@@ -96,6 +100,19 @@ jobs:
       - name: Build RPM bundle
         working-directory: src-tauri
         run: cargo tauri build --bundles rpm
+
+      - name: Verify .desktop file in RPM
+        run: |
+          set -euo pipefail
+          rpm="$(find target/release/bundle/rpm -name '*.rpm' | head -n1)"
+          desktop="$(rpm2cpio "$rpm" | cpio -i --to-stdout ./usr/share/applications/Linh.desktop 2>/dev/null)"
+          echo "$desktop"
+          for needle in 'Exec=linh %u' 'x-scheme-handler/http' 'x-scheme-handler/https' 'text/html' 'WebBrowser'; do
+            if ! grep -qF "$needle" <<< "$desktop"; then
+              echo "::error::.desktop missing expected content: $needle"
+              exit 1
+            fi
+          done
 
       - name: Upload RPM artifact
         uses: actions/upload-artifact@v4
