@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: fedora:44
+    steps:
+      - name: Install system dependencies
+        run: |
+          dnf install -y \
+            webkit2gtk4.1-devel \
+            gtk3-devel \
+            libappindicator-gtk3-devel \
+            librsvg2-devel \
+            libxdo-devel \
+            openssl-devel \
+            gcc \
+            gcc-c++ \
+            make \
+            pkgconf-pkg-config \
+            rpm-build \
+            cpio \
+            file \
+            git \
+            curl \
+            nodejs \
+            npm
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- -y --default-toolchain stable --profile minimal -c rustfmt,clippy
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install pnpm
+        run: npm install -g pnpm@12.11.2
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-fedora44-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-fedora44-
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ runner.os }}-${{ hashFiles('ui/pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: Install UI dependencies
+        working-directory: ui
+        run: pnpm install
+
+      - name: pnpm lint
+        working-directory: ui
+        run: pnpm lint
+
+      - name: pnpm typecheck
+        working-directory: ui
+        run: pnpm typecheck
+
+      - name: pnpm test
+        working-directory: ui
+        run: pnpm test
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version '^2' --locked
+
+      - name: Build RPM bundle
+        working-directory: src-tauri
+        run: cargo tauri build --bundles rpm
+
+      - name: Verify .desktop file in RPM
+        shell: bash
+        run: |
+          set -euo pipefail
+          rpm="$(find target/release/bundle/rpm -name '*.rpm' | head -n1)"
+          desktop="$(rpm2cpio "$rpm" | cpio -i --to-stdout ./usr/share/applications/Linh.desktop 2>/dev/null)"
+          echo "$desktop"
+
+          fail() { echo "::error::$1"; exit 1; }
+
+          exec_line="$(grep '^Exec=' <<< "$desktop")"
+          [ "$exec_line" = "Exec=linh %u" ] || fail "expected exact line 'Exec=linh %u', got '$exec_line'"
+
+          categories_line="$(grep '^Categories=' <<< "$desktop")"
+          IFS=';' read -ra categories <<< "${categories_line#Categories=}"
+          printf '%s\n' "${categories[@]}" | grep -qxF 'WebBrowser' \
+            || fail "Categories does not contain exact element 'WebBrowser': $categories_line"
+
+          mimetype_line="$(grep '^MimeType=' <<< "$desktop")"
+          IFS=';' read -ra mimetypes <<< "${mimetype_line#MimeType=}"
+          for needle in 'x-scheme-handler/http' 'x-scheme-handler/https' 'text/html'; do
+            printf '%s\n' "${mimetypes[@]}" | grep -qxF "$needle" \
+              || fail "MimeType does not contain exact element '$needle': $mimetype_line"
+          done
+
+      - name: Upload RPM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linh-rpm
+          path: target/release/bundle/rpm/*.rpm
+          if-no-files-found: error

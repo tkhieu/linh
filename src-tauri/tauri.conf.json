@@ -1,0 +1,70 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Linh",
+  "version": "0.1.0",
+  "identifier": "dev.tkhieu.linh",
+  "build": {
+    "beforeDevCommand": "pnpm --dir ui dev",
+    "beforeBuildCommand": "pnpm --dir ui build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../ui/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "settings",
+        "title": "Linh Settings",
+        "url": "settings.html",
+        "width": 720,
+        "height": 520,
+        "resizable": true,
+        "visible": true,
+        "decorations": true
+      },
+      {
+        "label": "prompt",
+        "title": "Linh",
+        "url": "prompt.html",
+        "width": 360,
+        "height": 220,
+        "resizable": false,
+        "decorations": false,
+        "visible": false,
+        "center": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true
+      }
+    ],
+    "trayIcon": {
+      "iconPath": "icons/32x32.png"
+    },
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["rpm"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png"],
+    "fileAssociations": [
+      {
+        "ext": ["html", "htm"],
+        "mimeType": "text/html",
+        "name": "HTML Document",
+        "role": "Viewer"
+      }
+    ],
+    "linux": {
+      "rpm": {
+        "desktopTemplate": "templates/main.desktop"
+      }
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["http", "https"]
+      }
+    }
+  }
+}
