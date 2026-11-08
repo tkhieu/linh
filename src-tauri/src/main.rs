@@ -15,25 +15,49 @@ use tauri::{AppHandle, Manager};
 use platform::linux::url_intake;
 use state::AppState;
 
-/// Argv (with the moment it was received) queued by the single-instance
-/// callback when it fired before `setup` had `app.manage`d `AppState` yet
-/// — a real race between plugin registration and `setup` completing, not
-/// a hypothetical one. `setup` drains this once `AppState` is ready.
-#[derive(Debug, Default)]
-struct PendingLaunches(Vec<(Instant, Vec<String>)>);
+/// Registry for launches (argv + the moment each was received) that race
+/// in via the single-instance callback before `setup` has `app.manage`d
+/// `AppState` yet. `Some(queue)` means "not ready": any launch must be
+/// queued rather than routed, since `AppState` may not be managed. `None`
+/// means "ready": `app.manage` has already run, so a launch can be
+/// routed directly via `try_state` without risking a panic.
+///
+/// The check ("are we ready?") and the enqueue must happen as one atomic
+/// step under the lock — checking `try_state()` and *then* enqueuing
+/// (two separate lock-free steps) leaves a window where `setup` marks
+/// the registry ready and drains it in between, permanently losing the
+/// URL. [`enqueue_if_pending`] and [`mark_ready`] below only ever run
+/// while holding `PENDING_LAUNCHES`'s lock, closing that window.
+static PENDING_LAUNCHES: Mutex<PendingRegistry> = Mutex::new(Some(Vec::new()));
 
-impl PendingLaunches {
-    fn enqueue(&mut self, received_at: Instant, args: Vec<String>) {
-        self.0.push((received_at, args));
-    }
+/// `None` once `setup` has `app.manage`d `AppState`; until then,
+/// `Some(queue)` of each queued launch's argv and receive timestamp.
+type PendingRegistry = Option<Vec<(Instant, Vec<String>)>>;
 
-    /// Removes and returns every pending launch, oldest first.
-    fn drain(&mut self) -> Vec<(Instant, Vec<String>)> {
-        std::mem::take(&mut self.0)
+/// If `registry` is still pending, queues `(received_at, args)` and
+/// returns `None`. If `registry` is already marked ready, hands `args`
+/// back unchanged so the caller can route it directly instead of queuing
+/// something that will now never be drained.
+fn enqueue_if_pending(
+    registry: &mut PendingRegistry,
+    received_at: Instant,
+    args: Vec<String>,
+) -> Option<Vec<String>> {
+    match registry {
+        Some(queue) => {
+            queue.push((received_at, args));
+            None
+        }
+        None => Some(args),
     }
 }
 
-static PENDING_LAUNCHES: Mutex<PendingLaunches> = Mutex::new(PendingLaunches(Vec::new()));
+/// Marks `registry` ready and returns whatever was queued, oldest first.
+/// Idempotent: calling it again once already ready returns an empty
+/// `Vec` rather than panicking.
+fn mark_ready(registry: &mut PendingRegistry) -> Vec<(Instant, Vec<String>)> {
+    registry.take().unwrap_or_default()
+}
 
 /// Routes `args`' first `http`/`https` URL (logged, timed from
 /// `received_at`), or shows the settings window if there is none.
@@ -55,13 +79,18 @@ fn main() {
             // The moment this already-running instance was actually
             // notified of the second launch's argv.
             let received_at = Instant::now();
-            match app.try_state::<AppState>() {
-                Some(state) => dispatch_launch(app, &state, &args, received_at),
-                // setup() hasn't finished managing AppState yet (the
-                // plugin can fire before setup completes); queue this
-                // launch and let setup() drain it once ready, rather
-                // than panicking and dropping the URL.
-                None => PENDING_LAUNCHES.lock().unwrap().enqueue(received_at, args),
+            let not_queued = {
+                let mut registry = PENDING_LAUNCHES.lock().unwrap();
+                enqueue_if_pending(&mut registry, received_at, args)
+            };
+            // `not_queued` is `Some(args)` only when the registry was
+            // already marked ready, which `setup` only does *after*
+            // `app.manage(AppState)` — so `try_state` is guaranteed to
+            // succeed here; the `if let` is defensive, not a silent drop.
+            if let Some(args) = not_queued {
+                if let Some(state) = app.try_state::<AppState>() {
+                    dispatch_launch(app, &state, &args, received_at);
+                }
             }
         }))
         .plugin(tauri_plugin_deep_link::init())
@@ -99,9 +128,11 @@ fn main() {
             let args: Vec<String> = std::env::args().collect();
             dispatch_launch(&app_handle, &state_handle, &args, process_start);
 
-            // Drain any relaunches that raced in before AppState was
-            // managed, in the order they arrived.
-            for (received_at, args) in PENDING_LAUNCHES.lock().unwrap().drain() {
+            // Mark the registry ready (AppState is now managed) and
+            // route whatever raced in before this point, oldest first.
+            // The lock is released before routing, which can be slow.
+            let queued = mark_ready(&mut PENDING_LAUNCHES.lock().unwrap());
+            for (received_at, args) in queued {
                 dispatch_launch(&app_handle, &state_handle, &args, received_at);
             }
 
@@ -146,36 +177,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn enqueue_before_ready_then_drain_preserves_order() {
-        let mut queue = PendingLaunches::default();
+    fn enqueue_while_pending_is_queued_not_handed_back() {
+        let mut registry: PendingRegistry = Some(Vec::new());
 
-        // Draining an empty queue (nothing enqueued yet, i.e. "ready
-        // from the start") yields nothing.
-        assert!(queue.drain().is_empty());
+        let result = enqueue_if_pending(&mut registry, Instant::now(), vec!["a".to_string()]);
 
-        // Two launches race in while AppState isn't managed yet.
-        queue.enqueue(
-            Instant::now(),
-            vec!["linh".to_string(), "https://a.example".to_string()],
-        );
-        queue.enqueue(
-            Instant::now(),
-            vec!["linh".to_string(), "https://b.example".to_string()],
-        );
+        assert!(result.is_none(), "must be queued, not handed back");
+        assert_eq!(registry.as_ref().unwrap().len(), 1);
+    }
 
-        // Draining once AppState is ready returns both, oldest first.
-        let drained = queue.drain();
+    #[test]
+    fn mark_ready_returns_queued_items_in_order() {
+        let mut registry: PendingRegistry = Some(Vec::new());
+        enqueue_if_pending(&mut registry, Instant::now(), vec!["first".to_string()]);
+        enqueue_if_pending(&mut registry, Instant::now(), vec!["second".to_string()]);
+
+        let drained = mark_ready(&mut registry);
+
         assert_eq!(drained.len(), 2);
-        assert_eq!(
-            drained[0].1,
-            vec!["linh".to_string(), "https://a.example".to_string()]
-        );
-        assert_eq!(
-            drained[1].1,
-            vec!["linh".to_string(), "https://b.example".to_string()]
-        );
+        assert_eq!(drained[0].1, vec!["first".to_string()]);
+        assert_eq!(drained[1].1, vec!["second".to_string()]);
+        assert!(registry.is_none(), "registry must be marked ready (None)");
+    }
 
-        // The queue is now empty again.
-        assert!(queue.drain().is_empty());
+    #[test]
+    fn mark_ready_on_an_empty_pending_registry_returns_nothing() {
+        let mut registry: PendingRegistry = Some(Vec::new());
+        assert!(mark_ready(&mut registry).is_empty());
+        assert!(registry.is_none());
+    }
+
+    #[test]
+    fn enqueue_after_ready_is_refused_so_caller_routes_directly() {
+        let mut registry: PendingRegistry = Some(Vec::new());
+        mark_ready(&mut registry); // registry is now ready (None).
+
+        let args = vec!["late".to_string()];
+        let handed_back = enqueue_if_pending(&mut registry, Instant::now(), args.clone());
+
+        assert_eq!(
+            handed_back,
+            Some(args),
+            "must hand args back for the caller to route, never silently drop them"
+        );
+    }
+
+    #[test]
+    fn mark_ready_is_idempotent_once_already_ready() {
+        let mut registry: PendingRegistry = None;
+        assert!(mark_ready(&mut registry).is_empty());
+        assert!(registry.is_none());
     }
 }
