@@ -21,6 +21,12 @@ pub struct AppState {
     /// used to update which one is checked without replacing the tray's
     /// menu object (unsupported once set, on Linux).
     pub primary_items: Mutex<Vec<CheckMenuItem<Wry>>>,
+    /// Serializes the whole "write the file, then update the in-memory
+    /// copy" sequence in [`AppState::persist_config`], so two concurrent
+    /// callers (the tray's click handler and a `save_config` command)
+    /// can never leave `config` and the on-disk file pointing at
+    /// different saves.
+    save_lock: Mutex<()>,
 }
 
 impl AppState {
@@ -56,6 +62,7 @@ impl AppState {
             pending_url: Mutex::new(None),
             primary_targets: Mutex::new(Vec::new()),
             primary_items: Mutex::new(Vec::new()),
+            save_lock: Mutex::new(()),
         }
     }
 
@@ -68,8 +75,11 @@ impl AppState {
     }
 
     /// Validates and atomically persists `config`, then updates the
-    /// in-memory copy on success.
+    /// in-memory copy on success. The whole sequence is serialized via
+    /// `save_lock` so the file and the in-memory copy can never end up
+    /// reflecting two different concurrent saves.
     pub fn persist_config(&self, config: Config) -> Result<(), String> {
+        let _guard = self.save_lock.lock().unwrap();
         app_config::save(&self.dirs.config_path(), &config)?;
         *self.config.lock().unwrap() = config;
         Ok(())

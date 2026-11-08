@@ -9,12 +9,16 @@ use crate::state::AppState;
 
 /// Decides where `raw_url` should go (per `linh_core::decide`, with Linux
 /// capabilities) and either spawns the target browser or shows the prompt
-/// window. Non-`http`/`https` URLs are ignored (logged). Logs the
-/// receive-to-spawn latency in milliseconds when a browser is actually
-/// spawned.
-pub fn route_url(app: &AppHandle, state: &AppState, raw_url: &str) {
-    let received_at = Instant::now();
-
+/// window. Non-`http`/`https` URLs are ignored (logged).
+///
+/// `received_at` is when the URL was actually received — the top of
+/// `main` for the first launch (so cold-start scanning/config-load time
+/// is counted honestly) or the moment the single-instance callback fired
+/// for a later launch — not when this function happens to run. Logs
+/// `receive->spawn` when a browser is spawned directly, or
+/// `receive->prompt_shown` when the prompt is shown instead (the time a
+/// human then spends choosing is not part of either).
+pub fn route_url(app: &AppHandle, state: &AppState, raw_url: &str, received_at: Instant) {
     let Some(url) = url_intake::filter_routable_url(raw_url) else {
         logging::log_line(
             &state.dirs,
@@ -43,15 +47,22 @@ pub fn route_url(app: &AppHandle, state: &AppState, raw_url: &str) {
                 logging::log_line(
                     &state.dirs,
                     &format!(
-                        "routed {url} -> {target:?} in {}ms",
+                        "routed {url} -> {target:?} (receive->spawn {}ms)",
                         received_at.elapsed().as_millis()
                     ),
                 );
             }
         }
         Decision::Prompt => {
-            *state.pending_url.lock().unwrap() = Some(url);
+            *state.pending_url.lock().unwrap() = Some(url.clone());
             show_and_focus(app, "prompt");
+            logging::log_line(
+                &state.dirs,
+                &format!(
+                    "prompt shown for {url} (receive->prompt_shown {}ms)",
+                    received_at.elapsed().as_millis()
+                ),
+            );
         }
     }
 }

@@ -10,8 +10,11 @@ pub struct Dirs {
     pub home: PathBuf,
     pub config_home: PathBuf,
     pub state_home: PathBuf,
-    /// `.desktop` directories to scan for browsers, in override order
-    /// (a later entry wins on a duplicate desktop id). Defaults to the
+    /// `.desktop` directories to scan for browsers, in override order:
+    /// system dirs first (lowest priority), then the user's Flatpak
+    /// exports, then the user's own `applications` dir (highest
+    /// priority) — a later entry wins on a duplicate desktop id, so a
+    /// user-level entry always overrides a system one. Defaults to the
     /// real system/XDG locations in [`Dirs::from_env`]; tests override
     /// this with temp-dir paths so no test ever reads the real
     /// `/usr/share/applications` or `$HOME`.
@@ -33,12 +36,16 @@ impl Dirs {
         let data_home = env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local/share"));
+        // Override precedence (later wins on a duplicate desktop id):
+        // system dirs lowest, then the user's own Flatpak exports, then
+        // the user's own `applications` dir highest — a user-level entry
+        // always overrides a system entry with the same id.
         let application_dirs = vec![
             PathBuf::from("/usr/share/applications"),
             PathBuf::from("/usr/local/share/applications"),
-            data_home.join("applications"),
             PathBuf::from("/var/lib/flatpak/exports/share/applications"),
             data_home.join("flatpak/exports/share/applications"),
+            data_home.join("applications"),
         ];
         Dirs {
             home,

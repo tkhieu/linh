@@ -1,10 +1,21 @@
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use linh_core::{Browser, Config, Target};
 
 use super::default_browser;
+
+/// Serializes every `save` call process-wide so two threads (e.g. the
+/// tray's click handler and a `save_config` command) never write
+/// overlapping temp files or race on which one's rename wins.
+static SAVE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Monotonic counter mixed into each temp file's name so two saves in
+/// the same process never collide even if their timing coincided.
+static TMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// How `load_or_init` resolved the on-disk config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,10 +56,13 @@ pub fn load_or_init(
     }
 }
 
-/// Validates `config` and writes it to `path` atomically (write to a
-/// sibling temp file, then rename over the target).
+/// Validates `config` and writes it to `path` atomically and serialized
+/// against any other concurrent `save` call: a uniquely-named sibling
+/// temp file is written, `fsync`ed, then renamed over the target while
+/// holding a process-wide lock.
 pub fn save(path: &Path, config: &Config) -> Result<(), String> {
     validate(config)?;
+    let _guard = SAVE_LOCK.lock().unwrap();
     write_atomic(path, config).map_err(|e| e.to_string())
 }
 
@@ -71,8 +85,14 @@ fn write_atomic(path: &Path, config: &Config) -> io::Result<()> {
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "config path has no parent"))?;
     fs::create_dir_all(parent)?;
-    let tmp_path = parent.join(format!("linh.toml.tmp-{}", std::process::id()));
-    fs::write(&tmp_path, data)?;
+
+    let unique = TMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = parent.join(format!("linh.toml.tmp-{}-{unique}", std::process::id()));
+    let mut file = fs::File::create(&tmp_path)?;
+    file.write_all(data.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+
     fs::rename(&tmp_path, path)
 }
 
@@ -235,6 +255,45 @@ mod tests {
         let (loaded, status) = load_or_init(&path, None, &[]);
         assert_eq!(status, ConfigStatus::Loaded);
         assert_eq!(loaded, config);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn concurrent_saves_leave_a_valid_file() {
+        let root = temp_root("concurrent");
+        let path = std::sync::Arc::new(root.join("linh.toml"));
+
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let config = Config {
+                        primary: Target {
+                            browser: format!("browser-{i}"),
+                            profile: None,
+                            private: false,
+                        },
+                        ..Config::default()
+                    };
+                    save(&path, &config)
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("thread panicked")
+                .expect("save failed");
+        }
+
+        // Whichever save landed last, the file on disk must parse as a
+        // complete, valid config — never truncated or interleaved from
+        // two concurrent writers.
+        let data = fs::read_to_string(&*path).expect("read final file");
+        let config = linh_core::parse_config(&data).expect("final file must parse");
+        assert!(config.primary.browser.starts_with("browser-"));
+
         fs::remove_dir_all(&root).ok();
     }
 }

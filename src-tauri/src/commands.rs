@@ -10,10 +10,12 @@
 //! Tauri itself and are invisible to the JS `invoke()` call, so adding them
 //! here does not change the contract the UI calls against.
 
+use std::time::Instant;
+
 use linh_core::{Browser, Config, PlatformCaps, Target};
 use tauri::{AppHandle, Manager, State};
 
-use crate::platform::linux::default_browser;
+use crate::platform::linux::{default_browser, logging};
 use crate::routing;
 use crate::state::AppState;
 use crate::tray;
@@ -65,8 +67,12 @@ pub fn get_prompt_url(state: State<AppState>) -> Option<String> {
 }
 
 /// The user picked `target` in the prompt window for the pending URL.
+/// Logs `choose->spawn`, timed from this call's entry (the moment the
+/// human made their choice) — the time spent waiting for that choice is
+/// deliberately not counted.
 #[tauri::command]
 pub fn prompt_choose(target: Target, state: State<AppState>, app: AppHandle) -> Result<(), String> {
+    let chosen_at = Instant::now();
     let url = state
         .pending_url
         .lock()
@@ -76,6 +82,19 @@ pub fn prompt_choose(target: Target, state: State<AppState>, app: AppHandle) -> 
     let result = routing::open_target(&state, &target, &url);
     if let Some(window) = app.get_webview_window("prompt") {
         let _ = window.hide();
+    }
+    match &result {
+        Ok(()) => logging::log_line(
+            &state.dirs,
+            &format!(
+                "prompt choice {url} -> {target:?} (choose->spawn {}ms)",
+                chosen_at.elapsed().as_millis()
+            ),
+        ),
+        Err(err) => logging::log_line(
+            &state.dirs,
+            &format!("failed to open {url} from prompt: {err}"),
+        ),
     }
     result
 }

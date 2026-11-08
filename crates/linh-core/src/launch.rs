@@ -105,9 +105,6 @@ fn build_native_command(
     url: &str,
     browser: &Browser,
 ) -> Result<LaunchCommand, LaunchError> {
-    if exec.trim().is_empty() {
-        return Err(LaunchError::InvalidExec("Exec is empty".to_string()));
-    }
     let unescaped = unescape_desktop_string(exec);
     let mut tokens = tokenize_exec(&unescaped)?.into_iter();
 
@@ -116,6 +113,11 @@ fn build_native_command(
         quoted: false,
     });
     let program = literal_token(&program_token)?;
+    if program.is_empty() {
+        return Err(LaunchError::InvalidExec(
+            "Exec has no program to run (empty after unescaping)".to_string(),
+        ));
+    }
 
     let mut args: Vec<String> = Vec::new();
     let mut url_used = false;
@@ -753,6 +755,33 @@ mod tests {
         let err =
             build_launch_command(&chromium_native(""), &plain_target(), "https://example.com")
                 .unwrap_err();
+        assert!(matches!(err, LaunchError::InvalidExec(_)));
+    }
+
+    #[test]
+    fn quoted_empty_exec_is_rejected() {
+        // Raw `Exec=""` is non-empty/non-whitespace as a *raw* string, but
+        // tokenizes to a single empty quoted program argument.
+        let err = build_launch_command(
+            &chromium_native("\"\""),
+            &plain_target(),
+            "https://example.com",
+        )
+        .unwrap_err();
+        assert!(matches!(err, LaunchError::InvalidExec(_)));
+    }
+
+    #[test]
+    fn escaped_whitespace_only_exec_is_rejected() {
+        // Raw `Exec=\s` is non-whitespace as a raw string, but the
+        // desktop-entry string escape unescapes it to a single space,
+        // which tokenizes to no program token at all.
+        let err = build_launch_command(
+            &chromium_native(r"\s"),
+            &plain_target(),
+            "https://example.com",
+        )
+        .unwrap_err();
         assert!(matches!(err, LaunchError::InvalidExec(_)));
     }
 

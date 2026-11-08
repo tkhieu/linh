@@ -16,7 +16,13 @@ pub struct DesktopEntry {
 }
 
 /// Parses the `[Desktop Entry]` group of a `.desktop` file. Returns `None`
-/// if the file cannot be read or has no `Exec=` key (nothing to launch).
+/// only if the file cannot be read. An entry with no `Exec=` key (`exec`
+/// defaults to an empty string) still parses successfully — this matters
+/// for `Hidden=true` tombstone entries, which commonly omit `Exec`
+/// entirely and must still occupy their desktop id so they can override a
+/// lower-priority, non-hidden entry with the same id (the empty `Exec`
+/// then excludes it from the browser list on its own, via
+/// `linh-core`'s `InvalidExec`, same as any other invalid `Exec`).
 /// Locale-suffixed keys (e.g. `Name[vi]=`) are ignored in favor of the
 /// unlocalized key.
 pub fn parse_desktop_file(path: &Path, id: &str) -> Option<DesktopEntry> {
@@ -70,11 +76,10 @@ pub fn parse_desktop_file(path: &Path, id: &str) -> Option<DesktopEntry> {
         }
     }
 
-    let exec = exec?;
     Some(DesktopEntry {
         id: id.to_string(),
         name: name.unwrap_or_else(|| id.to_string()),
-        exec,
+        exec: exec.unwrap_or_default(),
         icon,
         mime_types,
         hidden,
@@ -167,13 +172,34 @@ mod tests {
     }
 
     #[test]
-    fn missing_exec_returns_none() {
+    fn missing_exec_parses_with_empty_exec() {
         let dir =
             std::env::temp_dir().join(format!("linh-desktop-test-noexec-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = write_file(&dir, "foo.desktop", "[Desktop Entry]\nName=Foo\n");
-        assert!(parse_desktop_file(&path, "foo").is_none());
+        let entry = parse_desktop_file(&path, "foo").expect("parse");
+        assert_eq!(entry.exec, "");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hidden_tombstone_without_exec_still_parses() {
+        let dir = std::env::temp_dir().join(format!(
+            "linh-desktop-test-tombstone-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = write_file(&dir, "foo.desktop", "[Desktop Entry]\nHidden=true\n");
+        let entry = parse_desktop_file(&path, "foo").expect("parse");
+        assert!(entry.hidden);
+        assert_eq!(entry.exec, "");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unreadable_file_returns_none() {
+        let path = std::path::Path::new("/nonexistent/linh-desktop-test/foo.desktop");
+        assert!(parse_desktop_file(path, "foo").is_none());
     }
 
     #[test]

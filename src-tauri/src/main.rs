@@ -6,6 +6,8 @@ mod routing;
 mod state;
 mod tray;
 
+use std::time::Instant;
+
 use tauri::tray::TrayIconBuilder;
 use tauri::Manager;
 
@@ -13,19 +15,24 @@ use platform::linux::url_intake;
 use state::AppState;
 
 fn main() {
+    // Captured before anything else so first-launch latency logging
+    // honestly includes browser scanning and config load, not just the
+    // final routing decision.
+    let process_start = Instant::now();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            // A second launch hands its argv to this already-running
-            // instance via `args`. Route any http(s) URL in it; otherwise
-            // just surface the settings window.
+            // The moment this already-running instance was actually
+            // notified of the second launch's argv.
+            let received_at = Instant::now();
             let state = app.state::<AppState>();
             match url_intake::first_routable_url(&args) {
-                Some(url) => routing::route_url(app, &state, &url),
+                Some(url) => routing::route_url(app, &state, &url, received_at),
                 None => routing::show_and_focus(app, "settings"),
             }
         }))
         .plugin(tauri_plugin_deep_link::init())
-        .setup(|app| {
+        .setup(move |app| {
             let state = AppState::init();
             app.manage(state);
             let app_handle = app.handle().clone();
@@ -60,7 +67,7 @@ fn main() {
             match url_intake::first_routable_url(args.iter().skip(1)) {
                 Some(url) => {
                     let state_handle = app.state::<AppState>();
-                    routing::route_url(&app_handle, &state_handle, &url);
+                    routing::route_url(&app_handle, &state_handle, &url, process_start);
                 }
                 None => routing::show_and_focus(&app_handle, "settings"),
             }
