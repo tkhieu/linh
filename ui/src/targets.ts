@@ -6,9 +6,22 @@ export interface BrowserTarget {
   target: Target
 }
 
-/** An exact, collision-free identity for entries stored in shown_browsers. */
+/** Human-readable target identity used only by shown_browsers. */
 export function targetKey(target: Target): string {
-  return JSON.stringify([target.browser, target.profile ?? null, target.private])
+  return `${target.browser}${target.profile === undefined ? '' : `/${target.profile}`}${target.private ? '#private' : ''}`
+}
+
+export function parseTargetKey(key: string): Target | null {
+  const privateSuffix = '#private'
+  const suffixAt = key.indexOf(privateSuffix)
+  if (suffixAt !== -1 && suffixAt !== key.length - privateSuffix.length) return null
+  const isPrivate = suffixAt !== -1
+  const base = isPrivate ? key.slice(0, suffixAt) : key
+  const profileAt = base.indexOf('/')
+  if (!base || profileAt === 0 || profileAt === base.length - 1) return null
+  return profileAt === -1
+    ? { browser: base, private: isPrivate }
+    : { browser: base.slice(0, profileAt), profile: base.slice(profileAt + 1), private: isPrivate }
 }
 
 export function deriveTargets(browsers: Browser[]): BrowserTarget[] {
@@ -43,5 +56,10 @@ export function deriveTargets(browsers: Browser[]): BrowserTarget[] {
 }
 
 export function visibleTargets(targets: BrowserTarget[], shown: string[]): BrowserTarget[] {
-  return shown.length === 0 ? targets : targets.filter(({ key }) => shown.includes(key))
+  if (shown.length === 0) return targets
+  const selected = new Set(shown.flatMap((key) => {
+    const target = parseTargetKey(key)
+    return target ? [targetKey(target)] : []
+  }))
+  return targets.filter(({ key }) => selected.has(key))
 }

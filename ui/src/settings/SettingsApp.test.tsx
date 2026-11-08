@@ -85,6 +85,18 @@ describe('SettingsApp', () => {
     })))
   })
 
+  it('preserves a stale shown-browser key when another target is selected and saved', async () => {
+    api.getConfig.mockResolvedValue({ ...config, shown_browsers: ['retired-browser/Profile 9'] })
+    render(<SettingsApp />)
+    await screen.findByRole('heading', { name: 'Shown browsers' })
+    expect(screen.getByLabelText('Show Google Chrome — Work')).not.toBeChecked()
+    fireEvent.click(screen.getByLabelText('Show Google Chrome — Work'))
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
+    await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
+      shown_browsers: ['retired-browser/Profile 9', targetKey(work)],
+    })))
+  })
+
   it('shows backend save errors', async () => {
     api.saveConfig.mockRejectedValue('Invalid rule')
     render(<SettingsApp />)
