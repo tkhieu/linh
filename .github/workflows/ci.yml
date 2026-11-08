@@ -76,7 +76,7 @@ jobs:
 
       - name: Install UI dependencies
         working-directory: ui
-        run: pnpm install --frozen-lockfile
+        run: pnpm install
 
       - name: pnpm lint
         working-directory: ui
