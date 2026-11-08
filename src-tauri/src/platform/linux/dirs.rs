@@ -110,9 +110,22 @@ fn valid_absolute_path(val: Option<OsString>) -> Option<PathBuf> {
     path.is_absolute().then_some(path)
 }
 
+/// Removes duplicate paths, keeping each one at the position of its
+/// *last* occurrence (highest precedence) rather than its first, while
+/// preserving the relative order of the entries that remain. This matters
+/// when a custom `XDG_DATA_HOME` happens to equal a fixed system/default
+/// dir: the custom entry must still end up last (highest precedence),
+/// not silently dropped in favor of the earlier, lower-priority one.
 fn dedupe_preserving_order(paths: &mut Vec<PathBuf>) {
     let mut seen = HashSet::new();
-    paths.retain(|p| seen.insert(p.clone()));
+    let mut kept_reversed = Vec::with_capacity(paths.len());
+    for path in paths.drain(..).rev() {
+        if seen.insert(path.clone()) {
+            kept_reversed.push(path);
+        }
+    }
+    kept_reversed.reverse();
+    *paths = kept_reversed;
 }
 
 #[cfg(test)]
@@ -231,6 +244,79 @@ mod tests {
                 PathBuf::from("/var/lib/flatpak/exports/share/applications"),
                 PathBuf::from("/home/u/.local/share/flatpak/exports/share/applications"),
                 PathBuf::from("/home/u/.local/share/applications"),
+            ]
+        );
+    }
+
+    #[test]
+    fn xdg_data_home_equal_to_a_fixed_dir_keeps_its_highest_precedence() {
+        // XDG_DATA_HOME="/usr/share" makes the custom "applications" dir
+        // collide with the fixed, lowest-priority "/usr/share/applications"
+        // entry. The user explicitly set XDG_DATA_HOME, so that path must
+        // still end up *last* (highest precedence), appearing exactly
+        // once, not silently kept at its original lowest-priority spot.
+        let dirs = Dirs::resolve(Some(os("/home/u")), None, None, Some(os("/usr/share")));
+        let target = PathBuf::from("/usr/share/applications");
+        let occurrences = dirs
+            .application_dirs
+            .iter()
+            .filter(|p| *p == &target)
+            .count();
+        assert_eq!(occurrences, 1, "{target:?} must appear exactly once");
+        assert_eq!(
+            dirs.application_dirs.last(),
+            Some(&target),
+            "the custom XDG_DATA_HOME entry must be last (highest precedence)"
+        );
+        assert_eq!(
+            dirs.application_dirs,
+            vec![
+                PathBuf::from("/usr/local/share/applications"),
+                PathBuf::from("/var/lib/flatpak/exports/share/applications"),
+                PathBuf::from("/home/u/.local/share/flatpak/exports/share/applications"),
+                PathBuf::from("/home/u/.local/share/applications"),
+                PathBuf::from("/usr/share/flatpak/exports/share/applications"),
+                PathBuf::from("/usr/share/applications"),
+            ]
+        );
+    }
+
+    #[test]
+    fn xdg_data_home_equal_to_user_flatpak_export_parent_keeps_highest_precedence() {
+        // XDG_DATA_HOME="~/.local/share/flatpak/exports/share" makes its
+        // "applications" entry collide with the always-scanned default
+        // "~/.local/share/flatpak/exports/share/applications" entry. The
+        // explicit XDG_DATA_HOME setting must still win that path's
+        // position (last / highest precedence), appearing exactly once.
+        let dirs = Dirs::resolve(
+            Some(os("/home/u")),
+            None,
+            None,
+            Some(os("/home/u/.local/share/flatpak/exports/share")),
+        );
+        let target = PathBuf::from("/home/u/.local/share/flatpak/exports/share/applications");
+        let occurrences = dirs
+            .application_dirs
+            .iter()
+            .filter(|p| *p == &target)
+            .count();
+        assert_eq!(occurrences, 1, "{target:?} must appear exactly once");
+        assert_eq!(
+            dirs.application_dirs.last(),
+            Some(&target),
+            "the custom XDG_DATA_HOME entry must be last (highest precedence)"
+        );
+        assert_eq!(
+            dirs.application_dirs,
+            vec![
+                PathBuf::from("/usr/share/applications"),
+                PathBuf::from("/usr/local/share/applications"),
+                PathBuf::from("/var/lib/flatpak/exports/share/applications"),
+                PathBuf::from("/home/u/.local/share/applications"),
+                PathBuf::from(
+                    "/home/u/.local/share/flatpak/exports/share/flatpak/exports/share/applications"
+                ),
+                PathBuf::from("/home/u/.local/share/flatpak/exports/share/applications"),
             ]
         );
     }
