@@ -13,7 +13,7 @@
 use std::time::Instant;
 
 use linh_core::{Browser, Config, PlatformCaps, Target};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 
 use crate::platform::linux::{default_browser, logging};
 use crate::routing;
@@ -63,26 +63,24 @@ pub fn set_default_browser() -> Result<(), String> {
 /// Returns the URL the prompt window is currently showing, if any.
 #[tauri::command]
 pub fn get_prompt_url(state: State<AppState>) -> Option<String> {
-    state.pending_url.lock().unwrap().clone()
+    state.prompt.pending_url()
 }
 
 /// The user picked `target` in the prompt window for the pending URL.
-/// Logs `choose->spawn`, timed from this call's entry (the moment the
-/// human made their choice) — the time spent waiting for that choice is
+/// Taking the pending URL and hiding the prompt happen atomically (see
+/// [`crate::prompt_state::PromptState`]), so there's no window where the
+/// URL is gone but the prompt is still showing, or vice versa. Logs
+/// `choose->spawn`, timed from this call's entry (the moment the human
+/// made their choice) — the time spent waiting for that choice is
 /// deliberately not counted.
 #[tauri::command]
 pub fn prompt_choose(target: Target, state: State<AppState>, app: AppHandle) -> Result<(), String> {
     let chosen_at = Instant::now();
     let url = state
-        .pending_url
-        .lock()
-        .unwrap()
-        .take()
+        .prompt
+        .take_and_hide(&app)
         .ok_or_else(|| "no pending URL".to_string())?;
     let result = routing::open_target(&state, &target, &url);
-    if let Some(window) = app.get_webview_window("prompt") {
-        let _ = window.hide();
-    }
     match &result {
         Ok(()) => logging::log_line(
             &state.dirs,
@@ -100,12 +98,10 @@ pub fn prompt_choose(target: Target, state: State<AppState>, app: AppHandle) -> 
 }
 
 /// The user cancelled the prompt (e.g. pressed `Esc`); the pending URL is
-/// dropped without opening anything.
+/// dropped without opening anything. Clearing the URL and hiding the
+/// prompt happen atomically, same as [`prompt_choose`].
 #[tauri::command]
 pub fn prompt_cancel(state: State<AppState>, app: AppHandle) -> Result<(), String> {
-    *state.pending_url.lock().unwrap() = None;
-    if let Some(window) = app.get_webview_window("prompt") {
-        let _ = window.hide();
-    }
+    state.prompt.take_and_hide(&app);
     Ok(())
 }

@@ -2,6 +2,7 @@
 
 mod commands;
 mod platform;
+mod prompt_state;
 mod routing;
 mod state;
 mod tray;
@@ -52,11 +53,22 @@ fn enqueue_if_pending(
     }
 }
 
-/// Marks `registry` ready and returns whatever was queued, oldest first.
-/// Idempotent: calling it again once already ready returns an empty
-/// `Vec` rather than panicking.
-fn mark_ready(registry: &mut PendingRegistry) -> Vec<(Instant, Vec<String>)> {
-    registry.take().unwrap_or_default()
+/// Takes the queued launches out of `registry` for dispatching, leaving
+/// it `Some(vec![])` — still *not* ready. Call [`mark_ready`] only after
+/// every launch this returns has actually been dispatched, without ever
+/// releasing the registry's lock in between: a newer single-instance
+/// callback needs that same lock to enqueue or to check readiness, so
+/// holding it across the dispatch loop makes that callback wait until
+/// every older queued URL has been dispatched first — preserving
+/// arrival order, so the most recently dispatched one is left as the
+/// prompt's pending URL ("latest wins").
+fn drain_pending(registry: &mut PendingRegistry) -> Vec<(Instant, Vec<String>)> {
+    registry.as_mut().map(std::mem::take).unwrap_or_default()
+}
+
+/// Marks `registry` ready (`None`). Idempotent.
+fn mark_ready(registry: &mut PendingRegistry) {
+    *registry = None;
 }
 
 /// Routes `args`' first `http`/`https` URL (logged, timed from
@@ -128,12 +140,17 @@ fn main() {
             let args: Vec<String> = std::env::args().collect();
             dispatch_launch(&app_handle, &state_handle, &args, process_start);
 
-            // Mark the registry ready (AppState is now managed) and
-            // route whatever raced in before this point, oldest first.
-            // The lock is released before routing, which can be slow.
-            let queued = mark_ready(&mut PENDING_LAUNCHES.lock().unwrap());
-            for (received_at, args) in queued {
-                dispatch_launch(&app_handle, &state_handle, &args, received_at);
+            // Drain and dispatch whatever raced in before this point,
+            // oldest first, then mark the registry ready — all while
+            // holding its lock continuously, so a newer single-instance
+            // callback blocks (on the same lock) until these are fully
+            // dispatched rather than possibly racing ahead of them.
+            {
+                let mut registry = PENDING_LAUNCHES.lock().unwrap();
+                for (received_at, args) in drain_pending(&mut registry) {
+                    dispatch_launch(&app_handle, &state_handle, &args, received_at);
+                }
+                mark_ready(&mut registry);
             }
 
             Ok(())
@@ -163,9 +180,7 @@ fn handle_primary_pick(app: &AppHandle, index_str: &str) {
         return;
     };
 
-    let mut config = state.config.lock().unwrap().clone();
-    config.primary = target;
-    if let Err(err) = state.persist_config(config) {
+    if let Err(err) = state.update_config(|cfg| cfg.primary = target) {
         platform::linux::logging::log_line(&state.dirs, &format!("failed to save config: {err}"));
         return;
     }
@@ -187,24 +202,42 @@ mod tests {
     }
 
     #[test]
-    fn mark_ready_returns_queued_items_in_order() {
+    fn drain_pending_returns_queued_items_in_order_and_stays_not_ready() {
         let mut registry: PendingRegistry = Some(Vec::new());
         enqueue_if_pending(&mut registry, Instant::now(), vec!["first".to_string()]);
         enqueue_if_pending(&mut registry, Instant::now(), vec!["second".to_string()]);
 
-        let drained = mark_ready(&mut registry);
+        let drained = drain_pending(&mut registry);
 
         assert_eq!(drained.len(), 2);
         assert_eq!(drained[0].1, vec!["first".to_string()]);
         assert_eq!(drained[1].1, vec!["second".to_string()]);
-        assert!(registry.is_none(), "registry must be marked ready (None)");
+        // drain_pending alone must NOT mark the registry ready: a
+        // caller must still call mark_ready only after dispatching.
+        assert!(
+            registry.is_some(),
+            "registry must still be pending (Some) right after draining, before mark_ready"
+        );
+        assert!(registry.unwrap().is_empty());
     }
 
     #[test]
-    fn mark_ready_on_an_empty_pending_registry_returns_nothing() {
+    fn drain_pending_on_an_empty_pending_registry_returns_nothing() {
         let mut registry: PendingRegistry = Some(Vec::new());
-        assert!(mark_ready(&mut registry).is_empty());
-        assert!(registry.is_none());
+        assert!(drain_pending(&mut registry).is_empty());
+        assert!(registry.is_some());
+    }
+
+    #[test]
+    fn mark_ready_after_drain_marks_the_registry_ready() {
+        let mut registry: PendingRegistry = Some(Vec::new());
+        enqueue_if_pending(&mut registry, Instant::now(), vec!["first".to_string()]);
+
+        let drained = drain_pending(&mut registry);
+        assert_eq!(drained.len(), 1);
+        mark_ready(&mut registry);
+
+        assert!(registry.is_none(), "registry must be marked ready (None)");
     }
 
     #[test]
@@ -225,7 +258,7 @@ mod tests {
     #[test]
     fn mark_ready_is_idempotent_once_already_ready() {
         let mut registry: PendingRegistry = None;
-        assert!(mark_ready(&mut registry).is_empty());
+        mark_ready(&mut registry);
         assert!(registry.is_none());
     }
 }

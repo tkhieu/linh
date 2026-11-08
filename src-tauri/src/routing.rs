@@ -54,8 +54,7 @@ pub fn route_url(app: &AppHandle, state: &AppState, raw_url: &str, received_at: 
             }
         }
         Decision::Prompt => {
-            *state.pending_url.lock().unwrap() = Some(url.clone());
-            show_and_focus(app, "prompt");
+            state.prompt.show(app, url.clone());
             logging::log_line(
                 &state.dirs,
                 &format!(

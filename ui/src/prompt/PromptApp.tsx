@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { listen } from '@tauri-apps/api/event'
 import { getConfig, getPromptUrl, listBrowsers, promptCancel, promptChoose } from '../api'
 import type { BrowserTarget } from '../targets'
 import { deriveTargets, visibleTargets } from '../targets'
@@ -23,7 +24,23 @@ export function PromptApp() {
     }).catch((reason: unknown) => {
       if (mounted) setError(String(reason))
     })
-    return () => { mounted = false }
+
+    // A later launch can replace the pending URL while the prompt is
+    // already open (the backend's prompt state machine keeps "latest
+    // wins"); re-sync the displayed URL and reset the selection rather
+    // than relying on a fresh getPromptUrl() poll.
+    const unlisten = listen<string>('prompt-url-changed', (event) => {
+      if (!mounted) return
+      setUrl(event.payload)
+      setSelected(0)
+      setError('')
+      mainRef.current?.focus()
+    })
+
+    return () => {
+      mounted = false
+      void unlisten.then((stop) => stop())
+    }
   }, [])
 
   async function choose(index: number) {
