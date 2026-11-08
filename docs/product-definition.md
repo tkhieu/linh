@@ -142,3 +142,20 @@ Lần đầu chạy: onboarding 1 màn hình → "Make Linh the default browser"
 - Config: **TOML** — có comment, là định dạng chuẩn của hệ Rust; YAML bị loại vì
   dễ lỗi thụt lề / ép kiểu ngầm và crate `serde_yaml` đã ngừng bảo trì.
 - Repo `tkhieu/linh`, private, license proprietary.
+
+## 9. Linux (Fedora) — quyết định riêng (2026-11-08)
+
+Bản đầu tiên chỉ build cho **Fedora 44, GNOME trên Wayland**. macOS và Windows làm sau.
+
+- **Không dùng phím modifier trên Linux.** Wayland không cho app thường đọc trạng
+  thái bàn phím toàn hệ thống. Prompt chỉ hiện khi chế độ prompt là `always`
+  hoặc khi rule có đích là Prompt. Modifier `Ctrl` vẫn là mặc định cho Windows.
+- **Prompt hiện giữa màn hình**, vì Wayland không cho app đặt cửa sổ cạnh con trỏ.
+- **Tray icon qua AppIndicator.** GNOME cần extension
+  `gnome-shell-extension-appindicator` (`appindicatorsupport@rgcjonas.gmail.com`)
+  được bật; KDE hiện tray sẵn.
+- **Browser Flatpak** (vd. `org.mozilla.firefox`, `com.google.Chrome`) được phát
+  hiện và mở qua `flatpak run`, bên cạnh browser cài bằng RPM.
+- **Phân phối:** file `.rpm` build bởi CI trong container `fedora:44`; Flatpak để sau.
+- **Source app** vẫn tắt trên Linux như mục 8.
+- Kế hoạch triển khai: [plan](../plans/261108-1654-linh-fedora-mvp/plan.md).
