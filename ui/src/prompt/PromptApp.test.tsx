@@ -69,6 +69,31 @@ describe('PromptApp', () => {
     await waitFor(() => expect(api.promptChoose).toHaveBeenCalledWith({ browser: 'chrome', private: false }))
   })
 
+  it('does not let a stale initial getPromptUrl() overwrite a newer prompt-url-changed URL', async () => {
+    let resolveInitialUrl: ((value: string | null) => void) | undefined
+    api.getPromptUrl.mockImplementation(
+      () => new Promise<string | null>((resolve) => { resolveInitialUrl = resolve }),
+    )
+    api.getConfig.mockResolvedValue(config)
+
+    render(<PromptApp />)
+
+    // The event fires while the initial getPromptUrl() call is still
+    // pending.
+    emit('prompt-url-changed', 'https://example.com/new')
+    await screen.findByText('https://example.com/new')
+
+    // The initial load now resolves with a different, stale URL.
+    resolveInitialUrl?.('https://meet.google.com/abc')
+
+    // Wait for that load's `.then` to actually run (it also sets the
+    // target list, so a target button appearing proves it ran) before
+    // asserting the stale URL never took over.
+    await screen.findByRole('button', { name: /Firefox \(Private\)/ })
+    expect(screen.getByText('https://example.com/new')).toBeInTheDocument()
+    expect(screen.queryByText('https://meet.google.com/abc')).not.toBeInTheDocument()
+  })
+
   it('uses arrows and Enter to choose, and mouse click chooses', async () => {
     api.getConfig.mockResolvedValue(config)
     render(<PromptApp />)

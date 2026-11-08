@@ -12,29 +12,34 @@ export function PromptApp() {
   const [error, setError] = useState('')
   const mainRef = useRef<HTMLElement>(null)
   const choices = targets
+  // Set once a prompt-url-changed event has applied, so the initial
+  // getPromptUrl() result — which can resolve *after* a newer event,
+  // since it races the event listener's own async setup — never
+  // overwrites it with a stale URL.
+  const urlSetByEventRef = useRef(false)
 
   useEffect(() => {
     let mounted = true
     mainRef.current?.focus()
-    Promise.all([getPromptUrl(), getConfig(), listBrowsers()]).then(([pending, config, browsers]) => {
-      if (!mounted) return
-      setUrl(pending)
-      setTargets(visibleTargets(deriveTargets(browsers), config.shown_browsers))
-      mainRef.current?.focus()
-    }).catch((reason: unknown) => {
-      if (mounted) setError(String(reason))
-    })
 
-    // A later launch can replace the pending URL while the prompt is
-    // already open (the backend's prompt state machine keeps "latest
-    // wins"); re-sync the displayed URL and reset the selection rather
-    // than relying on a fresh getPromptUrl() poll.
+    // Registered before the initial fetch starts, so an event firing
+    // while that fetch is still pending is never missed.
     const unlisten = listen<string>('prompt-url-changed', (event) => {
       if (!mounted) return
+      urlSetByEventRef.current = true
       setUrl(event.payload)
       setSelected(0)
       setError('')
       mainRef.current?.focus()
+    })
+
+    Promise.all([getPromptUrl(), getConfig(), listBrowsers()]).then(([pending, config, browsers]) => {
+      if (!mounted) return
+      if (!urlSetByEventRef.current) setUrl(pending)
+      setTargets(visibleTargets(deriveTargets(browsers), config.shown_browsers))
+      mainRef.current?.focus()
+    }).catch((reason: unknown) => {
+      if (mounted) setError(String(reason))
     })
 
     return () => {
