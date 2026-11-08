@@ -6,70 +6,87 @@
 //! re-exported from `linh-core` and mirrored by hand in `ui/src/api.ts` —
 //! keep both in lockstep when this contract changes.
 //!
-//! Bodies here are stubs: they return sensible defaults (an empty list, the
-//! default config, `false`, `None`) or `Err("not implemented")`. Phase 2
-//! replaces the bodies with real platform logic; the signatures should not
-//! need to change.
+//! Extra parameters (`tauri::State`, `tauri::AppHandle`) are injected by
+//! Tauri itself and are invisible to the JS `invoke()` call, so adding them
+//! here does not change the contract the UI calls against.
 
 use linh_core::{Browser, Config, PlatformCaps, Target};
+use tauri::{AppHandle, Manager, State};
+
+use crate::platform::linux::default_browser;
+use crate::routing;
+use crate::state::AppState;
+use crate::tray;
 
 /// Lists the browsers detected on this system.
 #[tauri::command]
-pub fn list_browsers() -> Vec<Browser> {
-    Vec::new()
+pub fn list_browsers(state: State<AppState>) -> Vec<Browser> {
+    state.refresh_browsers()
 }
 
 /// Returns the current configuration (loaded from `linh.toml`, or the
 /// default config if none exists yet / it failed to parse).
 #[tauri::command]
-pub fn get_config() -> Config {
-    Config::default()
+pub fn get_config(state: State<AppState>) -> Config {
+    state.config.lock().unwrap().clone()
 }
 
 /// Persists `config` to `linh.toml`.
 #[tauri::command]
-pub fn save_config(config: Config) -> Result<(), String> {
-    let _ = config;
-    Err("not implemented".to_string())
+pub fn save_config(config: Config, state: State<AppState>) -> Result<(), String> {
+    state.persist_config(config)?;
+    tray::sync_checked_state(&state);
+    Ok(())
 }
 
 /// Returns this platform's routing capabilities (e.g. whether source-app
 /// rules are supported). Linux: `source_app_rules` is always `false`.
 #[tauri::command]
-pub fn get_platform_caps() -> PlatformCaps {
-    PlatformCaps {
-        source_app_rules: false,
-    }
+pub fn get_platform_caps(state: State<AppState>) -> PlatformCaps {
+    state.caps
 }
 
 /// Returns whether Linh is currently registered as the default browser.
 #[tauri::command]
 pub fn is_default_browser() -> bool {
-    false
+    default_browser::is_default_browser()
 }
 
 /// Registers Linh as the default browser for `http`/`https`.
 #[tauri::command]
 pub fn set_default_browser() -> Result<(), String> {
-    Err("not implemented".to_string())
+    default_browser::set_default_browser()
 }
 
 /// Returns the URL the prompt window is currently showing, if any.
 #[tauri::command]
-pub fn get_prompt_url() -> Option<String> {
-    None
+pub fn get_prompt_url(state: State<AppState>) -> Option<String> {
+    state.pending_url.lock().unwrap().clone()
 }
 
 /// The user picked `target` in the prompt window for the pending URL.
 #[tauri::command]
-pub fn prompt_choose(target: Target) -> Result<(), String> {
-    let _ = target;
-    Err("not implemented".to_string())
+pub fn prompt_choose(target: Target, state: State<AppState>, app: AppHandle) -> Result<(), String> {
+    let url = state
+        .pending_url
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or_else(|| "no pending URL".to_string())?;
+    let result = routing::open_target(&state, &target, &url);
+    if let Some(window) = app.get_webview_window("prompt") {
+        let _ = window.hide();
+    }
+    result
 }
 
 /// The user cancelled the prompt (e.g. pressed `Esc`); the pending URL is
 /// dropped without opening anything.
 #[tauri::command]
-pub fn prompt_cancel() -> Result<(), String> {
-    Err("not implemented".to_string())
+pub fn prompt_cancel(state: State<AppState>, app: AppHandle) -> Result<(), String> {
+    *state.pending_url.lock().unwrap() = None;
+    if let Some(window) = app.get_webview_window("prompt") {
+        let _ = window.hide();
+    }
+    Ok(())
 }
