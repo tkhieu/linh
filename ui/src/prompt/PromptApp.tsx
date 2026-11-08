@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { listen } from '@tauri-apps/api/event'
 import { getConfig, getPromptUrl, listBrowsers, promptCancel, promptChoose } from '../api'
 import type { BrowserTarget } from '../targets'
 import { deriveTargets, visibleTargets } from '../targets'
@@ -11,19 +12,51 @@ export function PromptApp() {
   const [error, setError] = useState('')
   const mainRef = useRef<HTMLElement>(null)
   const choices = targets
+  // Set once a prompt-url-changed event has applied, so the initial
+  // getPromptUrl() result — which can resolve *after* a newer event,
+  // since it races the event listener's own async setup — never
+  // overwrites it with a stale URL.
+  const urlSetByEventRef = useRef(false)
 
   useEffect(() => {
     let mounted = true
+    let unlisten: (() => void) | undefined
     mainRef.current?.focus()
-    Promise.all([getPromptUrl(), getConfig(), listBrowsers()]).then(([pending, config, browsers]) => {
-      if (!mounted) return
-      setUrl(pending)
-      setTargets(visibleTargets(deriveTargets(browsers), config.shown_browsers))
-      mainRef.current?.focus()
-    }).catch((reason: unknown) => {
-      if (mounted) setError(String(reason))
-    })
-    return () => { mounted = false }
+
+    async function run() {
+      // Awaited before the initial fetch starts, so an event firing
+      // while that fetch is in flight is never missed — listen()
+      // itself resolves asynchronously, so starting the fetch first
+      // would leave a real gap.
+      unlisten = await listen<string>('prompt-url-changed', (event) => {
+        if (!mounted) return
+        urlSetByEventRef.current = true
+        setUrl(event.payload)
+        setSelected(0)
+        setError('')
+        mainRef.current?.focus()
+      })
+      if (!mounted) {
+        unlisten()
+        return
+      }
+
+      try {
+        const [pending, config, browsers] = await Promise.all([getPromptUrl(), getConfig(), listBrowsers()])
+        if (!mounted) return
+        if (!urlSetByEventRef.current) setUrl(pending)
+        setTargets(visibleTargets(deriveTargets(browsers), config.shown_browsers))
+        mainRef.current?.focus()
+      } catch (reason) {
+        if (mounted) setError(String(reason))
+      }
+    }
+    void run()
+
+    return () => {
+      mounted = false
+      unlisten?.()
+    }
   }, [])
 
   async function choose(index: number) {
@@ -52,8 +85,22 @@ export function PromptApp() {
     }
   }
 
+  // Updated synchronously during render (not inside a useEffect), so it
+  // is guaranteed current by the time this render commits — no
+  // scheduling gap for the stable handler below to read a stale value
+  // through. choose/cancel close over url/choices/selected/busy fresh
+  // each render too, so refreshing them the same way keeps the handler
+  // decoupled from React's effect-scheduling timing entirely.
+  const latestRef = useRef({ url, choices, selected, choose, cancel })
+  latestRef.current = { url, choices, selected, choose, cancel }
+
+  // Attached exactly once, for the component's whole lifetime — never
+  // detached and re-attached on a later render, which previously left a
+  // narrow window where a keydown fired between unmounting the old
+  // listener and mounting the new one would be silently lost.
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
+      const { url, choices, selected, choose, cancel } = latestRef.current
       if (event.key === 'Escape') {
         event.preventDefault()
         void cancel()
@@ -72,7 +119,7 @@ export function PromptApp() {
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  })
+  }, [])
 
   return (
     <main className="prompt" ref={mainRef} tabIndex={-1}>

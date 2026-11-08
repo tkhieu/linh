@@ -10,8 +10,21 @@ const api = vi.hoisted(() => ({
 }))
 vi.mock('../api', () => api)
 
+const tauriEvent = vi.hoisted(() => ({ listen: vi.fn() }))
+vi.mock('@tauri-apps/api/event', () => tauriEvent)
+
+/** Invokes the handler the component registered for `event`, as the
+ * backend's real emit would. */
+function emit(event: string, payload: unknown) {
+  const handler = tauriEvent.listen.mock.calls.find(([name]) => name === event)?.[1] as
+    | ((event: { payload: unknown }) => void)
+    | undefined
+  handler?.({ payload })
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
+  tauriEvent.listen.mockResolvedValue(() => {})
   api.listBrowsers.mockResolvedValue([chrome, firefox])
   api.getConfig.mockResolvedValue({ ...config, shown_browsers: [targetKey(work)] })
   api.getPromptUrl.mockResolvedValue('https://meet.google.com/abc')
@@ -22,11 +35,61 @@ beforeEach(() => {
 describe('PromptApp', () => {
   it('shows the pending URL and chooses a shown target with 1 immediately', async () => {
     render(<PromptApp />)
-    await screen.findByText('https://meet.google.com/abc')
-    expect(screen.getByText('Google Chrome — Work')).toBeInTheDocument()
+    // Wait for the choice button itself (not just the URL text) so the
+    // async load has fully landed before the keydown fires below —
+    // otherwise the keydown can race ahead of `choices` being set.
+    await screen.findByRole('button', { name: /Google Chrome — Work/ })
+    expect(screen.getByText('https://meet.google.com/abc')).toBeInTheDocument()
     expect(screen.queryByText('Firefox')).not.toBeInTheDocument()
     fireEvent.keyDown(document, { key: '1' })
     await waitFor(() => expect(api.promptChoose).toHaveBeenCalledWith(work))
+  })
+
+  it('re-syncs the pending URL and resets selection when prompt-url-changed fires', async () => {
+    api.getConfig.mockResolvedValue(config)
+    render(<PromptApp />)
+    await screen.findByRole('button', { name: /Firefox \(Private\)/ })
+
+    // Move the selection away from the first choice before the event
+    // arrives, so resetting to 0 is actually observable.
+    fireEvent.keyDown(document, { key: 'ArrowDown' })
+    fireEvent.keyDown(document, { key: 'ArrowDown' })
+    await waitFor(() => expect(screen.getAllByRole('button')[2]).toHaveClass('selected'))
+
+    expect(tauriEvent.listen).toHaveBeenCalledWith('prompt-url-changed', expect.any(Function))
+    emit('prompt-url-changed', 'https://example.com/new')
+
+    await screen.findByText('https://example.com/new')
+    expect(screen.queryByText('https://meet.google.com/abc')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getAllByRole('button')[0]).toHaveClass('selected'))
+
+    fireEvent.keyDown(document, { key: 'Enter' })
+    await waitFor(() => expect(api.promptChoose).toHaveBeenCalledWith({ browser: 'chrome', private: false }))
+  })
+
+  it('does not let a stale initial getPromptUrl() overwrite a newer prompt-url-changed URL', async () => {
+    let resolveInitialUrl: ((value: string | null) => void) | undefined
+    api.getPromptUrl.mockImplementation(
+      () => new Promise<string | null>((resolve) => { resolveInitialUrl = resolve }),
+    )
+    api.getConfig.mockResolvedValue(config)
+
+    render(<PromptApp />)
+
+    // The event fires while the initial getPromptUrl() call is still
+    // pending.
+    emit('prompt-url-changed', 'https://example.com/new')
+    await screen.findByText('https://example.com/new')
+
+    // The initial load now resolves with a different, stale URL.
+    resolveInitialUrl?.('https://meet.google.com/abc')
+
+    // Wait for that load's `.then` to actually run (it also sets the
+    // target list, so a target button appearing proves it ran) before
+    // asserting the stale URL never took over.
+    await screen.findByRole('button', { name: /Firefox \(Private\)/ })
+    expect(screen.getByText('https://example.com/new')).toBeInTheDocument()
+    expect(screen.queryByText('https://meet.google.com/abc')).not.toBeInTheDocument()
   })
 
   it('uses arrows and Enter to choose, and mouse click chooses', async () => {

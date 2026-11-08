@@ -106,13 +106,18 @@ fn build_native_command(
     browser: &Browser,
 ) -> Result<LaunchCommand, LaunchError> {
     let unescaped = unescape_desktop_string(exec);
-    let mut tokens = tokenize_exec(&unescaped).into_iter();
+    let mut tokens = tokenize_exec(&unescaped)?.into_iter();
 
     let program_token = tokens.next().unwrap_or(ExecToken {
         content: String::new(),
         quoted: false,
     });
     let program = literal_token(&program_token)?;
+    if program.is_empty() {
+        return Err(LaunchError::InvalidExec(
+            "Exec has no program to run (empty after unescaping)".to_string(),
+        ));
+    }
 
     let mut args: Vec<String> = Vec::new();
     let mut url_used = false;
@@ -295,8 +300,10 @@ fn unescape_desktop_string(raw: &str) -> String {
 
 /// Layer 2: tokenizes an (already desktop-string-unescaped) `Exec=` line
 /// into argv-style tokens, honoring double-quoted arguments (which may
-/// contain spaces) and backslash escapes inside them.
-fn tokenize_exec(exec: &str) -> Vec<ExecToken> {
+/// contain spaces) and backslash escapes inside them. Returns
+/// [`LaunchError::InvalidExec`] if a double-quoted argument is never
+/// closed.
+fn tokenize_exec(exec: &str) -> Result<Vec<ExecToken>, LaunchError> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut in_token = false;
@@ -318,9 +325,13 @@ fn tokenize_exec(exec: &str) -> Vec<ExecToken> {
             '"' => {
                 in_token = true;
                 quoted = true;
+                let mut closed = false;
                 while let Some(next) = chars.next() {
                     match next {
-                        '"' => break,
+                        '"' => {
+                            closed = true;
+                            break;
+                        }
                         '\\' => match chars.next() {
                             Some(escaped @ ('"' | '\\' | '$' | '`')) => current.push(escaped),
                             Some(other) => {
@@ -331,6 +342,11 @@ fn tokenize_exec(exec: &str) -> Vec<ExecToken> {
                         },
                         other => current.push(other),
                     }
+                }
+                if !closed {
+                    return Err(LaunchError::InvalidExec(
+                        "unmatched quote in Exec".to_string(),
+                    ));
                 }
             }
             '\\' => {
@@ -352,7 +368,7 @@ fn tokenize_exec(exec: &str) -> Vec<ExecToken> {
             quoted,
         });
     }
-    tokens
+    Ok(tokens)
 }
 
 #[cfg(test)]
@@ -727,6 +743,63 @@ mod tests {
     fn uppercase_f_field_code_is_rejected() {
         let err = build_launch_command(
             &chromium_native("/usr/bin/app %F"),
+            &plain_target(),
+            "https://example.com",
+        )
+        .unwrap_err();
+        assert!(matches!(err, LaunchError::InvalidExec(_)));
+    }
+
+    #[test]
+    fn empty_exec_is_rejected() {
+        let err =
+            build_launch_command(&chromium_native(""), &plain_target(), "https://example.com")
+                .unwrap_err();
+        assert!(matches!(err, LaunchError::InvalidExec(_)));
+    }
+
+    #[test]
+    fn quoted_empty_exec_is_rejected() {
+        // Raw `Exec=""` is non-empty/non-whitespace as a *raw* string, but
+        // tokenizes to a single empty quoted program argument.
+        let err = build_launch_command(
+            &chromium_native("\"\""),
+            &plain_target(),
+            "https://example.com",
+        )
+        .unwrap_err();
+        assert!(matches!(err, LaunchError::InvalidExec(_)));
+    }
+
+    #[test]
+    fn escaped_whitespace_only_exec_is_rejected() {
+        // Raw `Exec=\s` is non-whitespace as a raw string, but the
+        // desktop-entry string escape unescapes it to a single space,
+        // which tokenizes to no program token at all.
+        let err = build_launch_command(
+            &chromium_native(r"\s"),
+            &plain_target(),
+            "https://example.com",
+        )
+        .unwrap_err();
+        assert!(matches!(err, LaunchError::InvalidExec(_)));
+    }
+
+    #[test]
+    fn whitespace_only_exec_is_rejected() {
+        let err = build_launch_command(
+            &chromium_native("   "),
+            &plain_target(),
+            "https://example.com",
+        )
+        .unwrap_err();
+        assert!(matches!(err, LaunchError::InvalidExec(_)));
+    }
+
+    #[test]
+    fn unmatched_quote_is_rejected() {
+        let err = build_launch_command(
+            &chromium_native(r#"/usr/bin/app "unterminated %u"#),
             &plain_target(),
             "https://example.com",
         )
