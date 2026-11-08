@@ -85,8 +85,22 @@ export function PromptApp() {
     }
   }
 
+  // Updated synchronously during render (not inside a useEffect), so it
+  // is guaranteed current by the time this render commits — no
+  // scheduling gap for the stable handler below to read a stale value
+  // through. choose/cancel close over url/choices/selected/busy fresh
+  // each render too, so refreshing them the same way keeps the handler
+  // decoupled from React's effect-scheduling timing entirely.
+  const latestRef = useRef({ url, choices, selected, choose, cancel })
+  latestRef.current = { url, choices, selected, choose, cancel }
+
+  // Attached exactly once, for the component's whole lifetime — never
+  // detached and re-attached on a later render, which previously left a
+  // narrow window where a keydown fired between unmounting the old
+  // listener and mounting the new one would be silently lost.
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
+      const { url, choices, selected, choose, cancel } = latestRef.current
       if (event.key === 'Escape') {
         event.preventDefault()
         void cancel()
@@ -105,7 +119,7 @@ export function PromptApp() {
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  })
+  }, [])
 
   return (
     <main className="prompt" ref={mainRef} tabIndex={-1}>

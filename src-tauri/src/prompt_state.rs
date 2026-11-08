@@ -58,14 +58,17 @@ impl PromptMachine {
         self.pending.as_ref().map(|p| p.url.as_str())
     }
 
-    /// If there is a pending URL that hasn't logged its "shown" event
-    /// yet, marks it logged and returns the moment it was received, so
-    /// the caller can log `receive->prompt_shown` exactly once per
-    /// pending URL (only after the window has actually shown it).
-    /// Returns `None` if nothing is pending, or it was already logged.
-    fn mark_shown_logged(&mut self) -> Option<Instant> {
+    /// If `shown_url` is *still* the pending URL (nothing else became
+    /// pending between whoever called `window.show()` for it and this
+    /// call) and it hasn't logged its "shown" event yet, marks it
+    /// logged and returns the moment it was received. Returns `None` —
+    /// marking and logging nothing — if a *different* URL is now
+    /// pending (that URL's own reconcile, which actually showed it,
+    /// will log it instead), if nothing is pending, or if `shown_url`
+    /// was already logged.
+    fn mark_shown_logged_for(&mut self, shown_url: &str) -> Option<Instant> {
         let pending = self.pending.as_mut()?;
-        if pending.shown_logged {
+        if pending.url != shown_url || pending.shown_logged {
             return None;
         }
         pending.shown_logged = true;
@@ -134,10 +137,15 @@ impl PromptState {
     /// regression: it re-derives the action from whatever is true *now*.
     ///
     /// Logs `receive->prompt_shown` right after `window.show()` actually
-    /// succeeds, for the first successful show of that pending URL only
-    /// (a later reconcile that finds the same URL still pending does not
-    /// log again). Logs an error line instead if showing the window
-    /// fails.
+    /// succeeds — but only if `url` (the one just shown) is *still* the
+    /// pending URL by the time the log check runs, and only once per
+    /// pending URL. If a different URL became pending while
+    /// `window.show()`/`set_focus()`/`emit()` were running (those are
+    /// real IPC calls, not instant), this reconcile must not log or mark
+    /// anything for it: the window currently shows stale content for
+    /// `url`, and the newly-pending URL's own, separately-scheduled
+    /// reconcile will show it and log it when it actually runs. Logs an
+    /// error line instead if showing the window fails.
     fn reconcile(&self, app: &AppHandle, dirs: &crate::platform::linux::dirs::Dirs) {
         let pending = self.machine.lock().unwrap().peek().map(str::to_string);
         let Some(window) = app.get_webview_window("prompt") else {
@@ -149,7 +157,9 @@ impl PromptState {
                 Ok(()) => {
                     let _ = window.set_focus();
                     let _ = window.emit("prompt-url-changed", &url);
-                    if let Some(received_at) = self.machine.lock().unwrap().mark_shown_logged() {
+                    if let Some(received_at) =
+                        self.machine.lock().unwrap().mark_shown_logged_for(&url)
+                    {
                         logging::log_line(
                             dirs,
                             &format!(
@@ -233,13 +243,13 @@ mod tests {
     }
 
     #[test]
-    fn mark_shown_logged_returns_received_at_once_then_none() {
+    fn mark_shown_logged_for_returns_received_at_once_then_none_for_the_same_url() {
         let mut machine = PromptMachine::default();
         let received_at = Instant::now();
         machine.set_pending("https://a.example".to_string(), received_at);
 
-        let first = machine.mark_shown_logged();
-        let second = machine.mark_shown_logged();
+        let first = machine.mark_shown_logged_for("https://a.example");
+        let second = machine.mark_shown_logged_for("https://a.example");
 
         assert_eq!(first, Some(received_at));
         assert_eq!(
@@ -249,22 +259,52 @@ mod tests {
     }
 
     #[test]
-    fn mark_shown_logged_on_an_empty_machine_returns_none() {
+    fn mark_shown_logged_for_on_an_empty_machine_returns_none() {
         let mut machine = PromptMachine::default();
-        assert_eq!(machine.mark_shown_logged(), None);
+        assert_eq!(machine.mark_shown_logged_for("https://a.example"), None);
     }
 
     #[test]
     fn set_pending_again_resets_shown_logged_for_the_new_url() {
         let mut machine = PromptMachine::default();
         machine.set_pending("https://a.example".to_string(), Instant::now());
-        assert!(machine.mark_shown_logged().is_some());
+        assert!(machine.mark_shown_logged_for("https://a.example").is_some());
 
         machine.set_pending("https://b.example".to_string(), Instant::now());
 
         assert!(
-            machine.mark_shown_logged().is_some(),
+            machine.mark_shown_logged_for("https://b.example").is_some(),
             "a newly-pending URL must be loggable again"
+        );
+    }
+
+    #[test]
+    fn mark_shown_logged_for_a_stale_url_does_nothing_and_does_not_block_the_new_one() {
+        // A's reconcile calls window.show() for "A", but before it gets
+        // to mark/log, "B" becomes pending (a later show() call raced
+        // in while A's window.show()/set_focus()/emit() — real IPC —
+        // were still running).
+        let mut machine = PromptMachine::default();
+        let a_received_at = Instant::now();
+        machine.set_pending("https://a.example".to_string(), a_received_at);
+        let b_received_at = Instant::now();
+        machine.set_pending("https://b.example".to_string(), b_received_at);
+
+        // A's reconcile tries to mark/log for the URL it actually
+        // showed ("A") — must be refused: the pending URL is "B" now.
+        let a_result = machine.mark_shown_logged_for("https://a.example");
+        assert_eq!(
+            a_result, None,
+            "must not mark or log for a URL that is no longer pending"
+        );
+
+        // B must still be fully loggable by its own, later reconcile —
+        // A's stale attempt must not have consumed or blocked it.
+        let b_result = machine.mark_shown_logged_for("https://b.example");
+        assert_eq!(
+            b_result,
+            Some(b_received_at),
+            "B's own reconcile must still be able to log it exactly once"
         );
     }
 

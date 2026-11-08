@@ -41,14 +41,8 @@ describe('PromptApp', () => {
     await screen.findByRole('button', { name: /Google Chrome — Work/ })
     expect(screen.getByText('https://meet.google.com/abc')).toBeInTheDocument()
     expect(screen.queryByText('Firefox')).not.toBeInTheDocument()
-    // Retried inside waitFor: the document keydown listener is
-    // (re-)attached by a no-deps useEffect, so there is a narrow but
-    // real window right after the button appears where firing once can
-    // land before it has (re-)attached; retrying converges regardless.
-    await waitFor(() => {
-      fireEvent.keyDown(document, { key: '1' })
-      expect(api.promptChoose).toHaveBeenCalledWith(work)
-    })
+    fireEvent.keyDown(document, { key: '1' })
+    await waitFor(() => expect(api.promptChoose).toHaveBeenCalledWith(work))
   })
 
   it('re-syncs the pending URL and resets selection when prompt-url-changed fires', async () => {
@@ -69,10 +63,8 @@ describe('PromptApp', () => {
     expect(screen.queryByText('https://meet.google.com/abc')).not.toBeInTheDocument()
     await waitFor(() => expect(screen.getAllByRole('button')[0]).toHaveClass('selected'))
 
-    await waitFor(() => {
-      fireEvent.keyDown(document, { key: 'Enter' })
-      expect(api.promptChoose).toHaveBeenCalledWith({ browser: 'chrome', private: false })
-    })
+    fireEvent.keyDown(document, { key: 'Enter' })
+    await waitFor(() => expect(api.promptChoose).toHaveBeenCalledWith({ browser: 'chrome', private: false }))
   })
 
   it('does not let a stale initial getPromptUrl() overwrite a newer prompt-url-changed URL', async () => {
@@ -104,14 +96,9 @@ describe('PromptApp', () => {
     api.getConfig.mockResolvedValue(config)
     render(<PromptApp />)
     await screen.findByRole('button', { name: /Firefox \(Private\)/ })
-    await waitFor(() => {
-      fireEvent.keyDown(document, { key: 'ArrowDown' })
-      expect(screen.getAllByRole('button')[1]).toHaveClass('selected')
-    })
-    await waitFor(() => {
-      fireEvent.keyDown(document, { key: 'Enter' })
-      expect(api.promptChoose).toHaveBeenCalledWith({ browser: 'chrome', private: true })
-    })
+    fireEvent.keyDown(document, { key: 'ArrowDown' })
+    fireEvent.keyDown(document, { key: 'Enter' })
+    await waitFor(() => expect(api.promptChoose).toHaveBeenCalledWith({ browser: 'chrome', private: true }))
     fireEvent.click(screen.getByRole('button', { name: /Firefox \(Private\)/ }))
     await waitFor(() => expect(api.promptChoose).toHaveBeenCalledWith({ browser: 'firefox', private: true }))
   })
@@ -124,19 +111,15 @@ describe('PromptApp', () => {
     api.getConfig.mockResolvedValue(config)
     render(<PromptApp />)
     await screen.findByRole('button', { name: /9 Browser 4/ })
-    await waitFor(() => {
-      fireEvent.keyDown(document, { key: '9' })
-      expect(api.promptChoose).toHaveBeenCalledWith({ browser: 'browser-4', private: false })
-    })
+    fireEvent.keyDown(document, { key: '9' })
+    await waitFor(() => expect(api.promptChoose).toHaveBeenCalledWith({ browser: 'browser-4', private: false }))
   })
 
   it('cancels with Escape', async () => {
     render(<PromptApp />)
     await screen.findByText('https://meet.google.com/abc')
-    await waitFor(() => {
-      fireEvent.keyDown(document, { key: 'Escape' })
-      expect(api.promptCancel).toHaveBeenCalledOnce()
-    })
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => expect(api.promptCancel).toHaveBeenCalledOnce())
   })
 
   it('handles a missing pending URL without choosing', async () => {
