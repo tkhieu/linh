@@ -23,6 +23,19 @@ export function PromptApp() {
     let unlisten: (() => void) | undefined
     mainRef.current?.focus()
 
+    // Re-fetches the browser/config-derived target list so a picker
+    // already on screen reflects the latest shown_browsers and
+    // installed browsers, not just what was true when it first loaded.
+    async function refreshTargets() {
+      try {
+        const [config, browsers] = await Promise.all([getConfig(), listBrowsers()])
+        if (!mounted) return
+        setTargets(visibleTargets(deriveTargets(browsers), config.shown_browsers))
+      } catch (reason) {
+        if (mounted) setError(String(reason))
+      }
+    }
+
     async function run() {
       // Awaited before the initial fetch starts, so an event firing
       // while that fetch is in flight is never missed — listen()
@@ -35,21 +48,24 @@ export function PromptApp() {
         setSelected(0)
         setError('')
         mainRef.current?.focus()
+        void refreshTargets()
       })
       if (!mounted) {
         unlisten()
         return
       }
 
-      try {
-        const [pending, config, browsers] = await Promise.all([getPromptUrl(), getConfig(), listBrowsers()])
-        if (!mounted) return
-        if (!urlSetByEventRef.current) setUrl(pending)
-        setTargets(visibleTargets(deriveTargets(browsers), config.shown_browsers))
-        mainRef.current?.focus()
-      } catch (reason) {
-        if (mounted) setError(String(reason))
-      }
+      const loadUrl = (async () => {
+        try {
+          const pending = await getPromptUrl()
+          if (!mounted) return
+          if (!urlSetByEventRef.current) setUrl(pending)
+          mainRef.current?.focus()
+        } catch (reason) {
+          if (mounted) setError(String(reason))
+        }
+      })()
+      await Promise.all([loadUrl, refreshTargets()])
     }
     void run()
 
