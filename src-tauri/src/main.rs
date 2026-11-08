@@ -18,14 +18,17 @@ fn main() {
         }))
         .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
-            let open_settings =
-                MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
+            let open_settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open_settings, &quit])?;
 
             TrayIconBuilder::new()
                 .menu(&menu)
-                .icon(app.default_window_icon().cloned().expect("app icon configured in tauri.conf.json"))
+                .icon(
+                    app.default_window_icon()
+                        .cloned()
+                        .expect("app icon configured in tauri.conf.json"),
+                )
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "settings" => {
                         if let Some(window) = app.get_webview_window("settings") {
