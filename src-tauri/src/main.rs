@@ -165,6 +165,8 @@ fn main() {
             commands::get_prompt_url,
             commands::prompt_choose,
             commands::prompt_cancel,
+            commands::list_presets,
+            commands::get_icon,
         ])
         .run(tauri::generate_context!())
         .expect("error while running linh");

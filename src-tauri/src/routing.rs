@@ -1,10 +1,10 @@
 use std::time::Instant;
 
-use linh_core::{Decision, Target};
+use linh_core::{AppTarget, Decision, LaunchCommand, Target};
 use tauri::{AppHandle, Manager};
 use url::Url;
 
-use crate::platform::linux::{launcher, logging, url_intake};
+use crate::platform::linux::{apps, launcher, logging, url_intake};
 use crate::state::AppState;
 
 /// Decides where `raw_url` should go (per `linh_core::decide`, with Linux
@@ -55,6 +55,19 @@ pub fn route_url(app: &AppHandle, state: &AppState, raw_url: &str, received_at: 
                 );
             }
         }
+        Decision::OpenApp(app_target) => {
+            if let Err(err) = open_app_target(state, &app_target, &url) {
+                logging::log_line(&state.dirs, &format!("failed to open {url}: {err}"));
+            } else {
+                logging::log_line(
+                    &state.dirs,
+                    &format!(
+                        "routed {url} -> app {app_target:?} (receive->spawn {}ms)",
+                        received_at.elapsed().as_millis()
+                    ),
+                );
+            }
+        }
         Decision::Prompt => {
             state.prompt.show(app, url, received_at);
         }
@@ -72,6 +85,46 @@ pub fn open_target(state: &AppState, target: &Target, url: &str) -> Result<(), S
     let cmd = linh_core::build_launch_command(browser, target, url).map_err(|e| e.to_string())?;
     drop(browsers);
     launcher::spawn_detached(&cmd).map_err(|e| e.to_string())
+}
+
+/// Resolves `app_target` for `url`: launches the app (never through a
+/// shell) when it's installed and `url` can be converted for it;
+/// otherwise — app not installed, URL not convertible, or the spawn
+/// itself fails — opens `app_target.fallback`, or `Config::primary` when
+/// there is no fallback, with the original (unconverted) `url`. Returns
+/// `Err` only if that fallback open also fails.
+pub fn open_app_target(state: &AppState, app_target: &AppTarget, url: &str) -> Result<(), String> {
+    if let Some(cmd) = resolve_app_launch(state, app_target, url) {
+        if launcher::spawn_detached(&cmd).is_ok() {
+            return Ok(());
+        }
+    }
+    let fallback = app_target
+        .fallback
+        .clone()
+        .unwrap_or_else(|| state.config.lock().unwrap().primary.clone());
+    open_target(state, &fallback, url)
+}
+
+/// Builds the launch command for `app_target.app`, or `None` if the URL
+/// isn't convertible for that app or the app isn't installed.
+fn resolve_app_launch(
+    state: &AppState,
+    app_target: &AppTarget,
+    url: &str,
+) -> Option<LaunchCommand> {
+    let launch_url = match app_target.app.as_str() {
+        "zoom" => linh_core::zoom_app_url(url)?,
+        "teams" => url.to_string(),
+        _ => return None,
+    };
+    let app = apps::find_app(&state.dirs, &app_target.app)?;
+    let dummy_target = Target {
+        browser: app_target.app.clone(),
+        profile: None,
+        private: false,
+    };
+    linh_core::build_launch_command(&app, &dummy_target, &launch_url).ok()
 }
 
 pub fn show_and_focus(app: &AppHandle, label: &str) {

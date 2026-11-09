@@ -1,8 +1,8 @@
 //! The Tauri command contract between the Rust backend and the UI.
 //!
 //! This file freezes the command *signatures* (names, argument and return
-//! types) so phase 2 (backend, owns the rest of `src-tauri/**`) and phase 3
-//! (UI, owns `ui/**`) can be built in parallel. The types below are
+//! types) so the backend (owns the rest of `src-tauri/**`) and the UI
+//! (owns `ui/**`) can be built in parallel. The types below are
 //! re-exported from `linh-core` and mirrored by hand in `ui/src/api.ts` —
 //! keep both in lockstep when this contract changes.
 //!
@@ -12,10 +12,10 @@
 
 use std::time::Instant;
 
-use linh_core::{Browser, Config, PlatformCaps, Target};
+use linh_core::{Browser, Config, PlatformCaps, Preset, Target};
 use tauri::{AppHandle, State};
 
-use crate::platform::linux::{default_browser, logging};
+use crate::platform::linux::{apps, default_browser, icons, logging};
 use crate::routing;
 use crate::state::AppState;
 use crate::tray;
@@ -104,4 +104,38 @@ pub fn prompt_choose(target: Target, state: State<AppState>, app: AppHandle) -> 
 pub fn prompt_cancel(state: State<AppState>, app: AppHandle) -> Result<(), String> {
     state.prompt.take_and_hide(&app);
     Ok(())
+}
+
+/// Lists the four built-in rule presets, with `app_installed` filled in
+/// against the apps currently detected on this system.
+#[tauri::command]
+pub fn list_presets(state: State<AppState>) -> Vec<Preset> {
+    linh_core::PRESET_DEFS
+        .iter()
+        .map(|def| Preset {
+            id: def.id.to_string(),
+            name: def.name.to_string(),
+            patterns: def.patterns.iter().map(|p| p.to_string()).collect(),
+            app: def.app.map(str::to_string),
+            app_installed: def
+                .app
+                .is_some_and(|app| apps::is_app_installed(&state.dirs, app)),
+        })
+        .collect()
+}
+
+/// Resolves `icon` (an absolute path, or a freedesktop icon name) to a
+/// `data:` URL, memoized for the rest of this session.
+#[tauri::command]
+pub fn get_icon(icon: String, state: State<AppState>) -> Option<String> {
+    if let Some(cached) = state.icon_cache.lock().unwrap().get(&icon) {
+        return cached.clone();
+    }
+    let result = icons::resolve_icon(&state.dirs, &icon);
+    state
+        .icon_cache
+        .lock()
+        .unwrap()
+        .insert(icon, result.clone());
+    result
 }

@@ -20,6 +20,28 @@ const FIREFOX_KEYWORDS: [&str; 3] = ["firefox", "librewolf", "zen"];
 /// line) any browser — native or Flatpak — whose `Exec=` line
 /// `linh-core` rejects.
 pub fn scan_browsers(dirs: &Dirs) -> Vec<Browser> {
+    scan_entries(dirs, |entry| {
+        entry
+            .mime_types
+            .iter()
+            .any(|m| m == "x-scheme-handler/http" || m == "x-scheme-handler/https")
+    })
+}
+
+/// Scans the same `.desktop` directories, with the same override
+/// precedence, hidden/self exclusion, and `Exec=` validation as
+/// [`scan_browsers`], for entries that declare `mime` (e.g.
+/// `x-scheme-handler/msteams`). Used for detecting non-browser desktop
+/// apps (Teams, Zoom) that Linh can hand a URL to; the result is a
+/// `Browser` value purely so `linh-core::build_launch_command` (which
+/// takes one) can be reused for launching them — these are never web
+/// browsers and must never be surfaced via [`scan_browsers`] / Linh's
+/// `list_browsers` command.
+pub fn scan_entries_for_mime(dirs: &Dirs, mime: &str) -> Vec<Browser> {
+    scan_entries(dirs, |entry| entry.mime_types.iter().any(|m| m == mime))
+}
+
+fn scan_entries(dirs: &Dirs, handles: impl Fn(&DesktopEntry) -> bool) -> Vec<Browser> {
     let mut by_id: HashMap<String, DesktopEntry> = HashMap::new();
 
     for dir in &dirs.application_dirs {
@@ -40,35 +62,25 @@ pub fn scan_browsers(dirs: &Dirs) -> Vec<Browser> {
         }
     }
 
-    let mut browsers: Vec<Browser> = by_id
+    let mut entries: Vec<Browser> = by_id
         .into_values()
-        .filter_map(|entry| build_browser(entry, dirs))
+        .filter(|entry| !entry.hidden && !is_self(&entry.id) && handles(entry))
+        .filter_map(|entry| finish_entry(entry, dirs))
         .collect();
-    browsers.sort_by(|a, b| a.id.cmp(&b.id));
-    browsers
+    entries.sort_by(|a, b| a.id.cmp(&b.id));
+    entries
 }
 
-fn build_browser(entry: DesktopEntry, dirs: &Dirs) -> Option<Browser> {
-    if entry.hidden || is_self(&entry.id) {
-        return None;
-    }
-    let handles_http = entry
-        .mime_types
-        .iter()
-        .any(|m| m == "x-scheme-handler/http" || m == "x-scheme-handler/https");
-    if !handles_http {
-        return None;
-    }
-
+fn finish_entry(entry: DesktopEntry, dirs: &Dirs) -> Option<Browser> {
     // Validate the raw `Exec=` line structurally for *every* entry,
     // native or Flatpak: an empty, unterminated-quote, or otherwise
-    // `linh-core`-rejected Exec excludes the browser either way, even
-    // though a Flatpak browser is ultimately launched via `flatpak run`
-    // rather than this Exec line.
+    // `linh-core`-rejected Exec excludes it either way, even though a
+    // Flatpak entry is ultimately launched via `flatpak run` rather than
+    // this Exec line.
     if let Err(err) = validate_exec(&entry) {
         log_line(
             dirs,
-            &format!("excluding browser '{}': invalid Exec: {err}", entry.id),
+            &format!("excluding '{}': invalid Exec: {err}", entry.id),
         );
         return None;
     }
@@ -340,6 +352,85 @@ mod tests {
         assert_eq!(browsers.len(), 1);
         assert_eq!(browsers[0].display_name, "Firefox (flatpak)");
         assert!(matches!(browsers[0].install, InstallKind::Flatpak { .. }));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scan_entries_for_mime_finds_non_browser_app() {
+        let root = temp_root("mime-app");
+        let apps = root.join("apps");
+        write_desktop(
+            &apps,
+            "com.github.IsmaelMartinez.teams_for_linux.desktop",
+            "[Desktop Entry]\nName=Teams for Linux\nExec=/usr/bin/teams-for-linux %U\nMimeType=x-scheme-handler/msteams;\n",
+        );
+        let apps_found =
+            scan_entries_for_mime(&test_dirs(&root, &[apps]), "x-scheme-handler/msteams");
+        assert_eq!(apps_found.len(), 1);
+        assert_eq!(apps_found[0].display_name, "Teams for Linux");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scan_entries_for_mime_ignores_non_matching_mime() {
+        let root = temp_root("mime-app-nomatch");
+        let apps = root.join("apps");
+        write_desktop(
+            &apps,
+            "google-chrome.desktop",
+            "[Desktop Entry]\nName=Google Chrome\nExec=/usr/bin/google-chrome-stable %U\nMimeType=x-scheme-handler/http;x-scheme-handler/https;\n",
+        );
+        let apps_found =
+            scan_entries_for_mime(&test_dirs(&root, &[apps]), "x-scheme-handler/msteams");
+        assert!(apps_found.is_empty());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scan_entries_for_mime_respects_hidden_and_self_exclusion() {
+        let root = temp_root("mime-app-hidden-self");
+        let apps = root.join("apps");
+        write_desktop(
+            &apps,
+            "hidden-teams.desktop",
+            "[Desktop Entry]\nName=Hidden Teams\nExec=/usr/bin/teams %U\nHidden=true\nMimeType=x-scheme-handler/msteams;\n",
+        );
+        write_desktop(
+            &apps,
+            "linh.desktop",
+            "[Desktop Entry]\nName=Linh\nExec=linh %u\nMimeType=x-scheme-handler/msteams;\n",
+        );
+        let apps_found =
+            scan_entries_for_mime(&test_dirs(&root, &[apps]), "x-scheme-handler/msteams");
+        assert!(apps_found.is_empty());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scan_entries_for_mime_finds_flatpak_teams_with_double_at_url_syntax() {
+        // Real Flatpak exports for URL-handling apps can emit an Exec
+        // line like `... @@u %U @@`: the `@@u`/`@@` tokens are literal
+        // (not field codes) and, since the entry resolves to a Flatpak
+        // install, are never even consulted at launch time (launching a
+        // Flatpak app only ever runs `flatpak run <app-id> ...`) — but
+        // the Exec line must still parse as valid so the entry isn't
+        // excluded, and the app id must still be extracted correctly.
+        let root = temp_root("mime-app-flatpak-atat");
+        let apps = root.join("apps");
+        write_desktop(
+            &apps,
+            "com.github.IsmaelMartinez.teams_for_linux.desktop",
+            "[Desktop Entry]\nName=Teams for Linux\nExec=/usr/bin/flatpak run --branch=stable --arch=x86_64 --command=teams-for-linux com.github.IsmaelMartinez.teams_for_linux @@u %U @@\nMimeType=x-scheme-handler/msteams;\n",
+        );
+        let apps_found =
+            scan_entries_for_mime(&test_dirs(&root, &[apps]), "x-scheme-handler/msteams");
+        assert_eq!(apps_found.len(), 1);
+        assert_eq!(
+            apps_found[0].install,
+            InstallKind::Flatpak {
+                app_id: "com.github.IsmaelMartinez.teams_for_linux".to_string()
+            }
+        );
         fs::remove_dir_all(&root).ok();
     }
 }

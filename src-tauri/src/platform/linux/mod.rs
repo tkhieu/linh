@@ -4,11 +4,13 @@
 //! filtering, process spawning, desktop notifications and logging.
 
 pub mod app_config;
+pub mod apps;
 pub mod browsers;
 pub mod chromium;
 pub mod default_browser;
 pub mod desktop;
 pub mod dirs;
+pub mod icons;
 pub mod launcher;
 pub mod logging;
 pub mod notify;
