@@ -25,9 +25,10 @@ Install Rust (via [rustup](https://rustup.rs)) and Node.js + pnpm, then:
 
 ```sh
 cargo install tauri-cli --version '^2' --locked   # once
-cd ui && pnpm install && cd ..
-cargo tauri dev            # run the app
-cargo tauri build --bundles rpm   # produce an installable .rpm
+pnpm --dir ui install
+cd src-tauri                      # run the Tauri CLI from here (as CI does)
+cargo tauri dev                   # run the app
+cargo tauri build --bundles rpm   # produce target/release/bundle/rpm/Linh-*.rpm
 ```
 
 ## Tests and checks
