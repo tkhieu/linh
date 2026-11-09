@@ -35,15 +35,29 @@ const EXTENSIONS: &[&str] = &["png", "svg"];
 /// the hicolor theme (every size, including `scalable`) in
 /// `~/.local/share/icons`, `/usr/share/icons`, the Flatpak export icon
 /// dirs, then flat `/usr/share/pixmaps`. Returns `None` if nothing is
-/// found, the file isn't a PNG/SVG by magic bytes (regardless of its
-/// extension), or it exceeds 512 KiB.
+/// found, every candidate found fails validation (not a PNG/SVG by
+/// magic bytes regardless of extension, or over 512 KiB — a later,
+/// valid candidate elsewhere is still tried rather than giving up), or
+/// (for a non-absolute `icon`) the name contains a path separator or
+/// `..`, which would otherwise let it escape these theme directories.
 pub fn resolve_icon(dirs: &Dirs, icon: &str) -> Option<String> {
-    let path = if Path::new(icon).is_absolute() {
-        PathBuf::from(icon)
-    } else {
-        find_icon_path(dirs, icon)?
-    };
-    read_as_data_url(&path)
+    let path = Path::new(icon);
+    if path.is_absolute() {
+        return read_as_data_url(path);
+    }
+    if !is_safe_icon_name(icon) {
+        return None;
+    }
+    find_icon_data_url(dirs, icon)
+}
+
+/// A freedesktop icon *name* must be a bare name, not a path: rejects
+/// anything containing `/`, `\`, or `..`, so a name can never be used to
+/// climb out of the theme directories [`find_icon_data_url`] joins it
+/// into (e.g. `../../../../etc/passwd`, or a `/`-separated absolute path
+/// disguised as a relative one).
+fn is_safe_icon_name(icon: &str) -> bool {
+    !icon.is_empty() && !icon.contains(['/', '\\']) && !icon.contains("..")
 }
 
 fn icon_theme_base_dirs(dirs: &Dirs) -> Vec<PathBuf> {
@@ -55,7 +69,13 @@ fn icon_theme_base_dirs(dirs: &Dirs) -> Vec<PathBuf> {
     ]
 }
 
-fn find_icon_path(dirs: &Dirs, icon: &str) -> Option<PathBuf> {
+/// Walks every base dir/size/category/extension combination, in order,
+/// returning the first candidate that both exists *and* passes
+/// [`read_as_data_url`]'s validation. A candidate that exists but is
+/// oversized or isn't actually a PNG/SVG does not end the search — it's
+/// skipped in favor of the next candidate, all the way through the
+/// flat `/usr/share/pixmaps` fallback.
+fn find_icon_data_url(dirs: &Dirs, icon: &str) -> Option<String> {
     for base in icon_theme_base_dirs(dirs) {
         let hicolor = base.join("hicolor");
         for size in ICON_SIZES {
@@ -66,7 +86,9 @@ fn find_icon_path(dirs: &Dirs, icon: &str) -> Option<PathBuf> {
                         .join(category)
                         .join(format!("{icon}.{ext}"));
                     if candidate.is_file() {
-                        return Some(candidate);
+                        if let Some(data_url) = read_as_data_url(&candidate) {
+                            return Some(data_url);
+                        }
                     }
                 }
             }
@@ -75,7 +97,9 @@ fn find_icon_path(dirs: &Dirs, icon: &str) -> Option<PathBuf> {
     for ext in EXTENSIONS {
         let candidate = PathBuf::from("/usr/share/pixmaps").join(format!("{icon}.{ext}"));
         if candidate.is_file() {
-            return Some(candidate);
+            if let Some(data_url) = read_as_data_url(&candidate) {
+                return Some(data_url);
+            }
         }
     }
     None
@@ -235,6 +259,95 @@ mod tests {
         let dirs = test_dirs(&root);
 
         assert_eq!(resolve_icon(&dirs, icon_path.to_str().unwrap()), None);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn non_absolute_icon_name_with_parent_dir_traversal_is_rejected() {
+        let root = temp_root("traversal-dotdot");
+        let dirs = test_dirs(&root);
+        // A file that a traversal *would* reach if the name weren't
+        // rejected outright — proves this isn't accidentally succeeding
+        // because the file simply doesn't exist.
+        let escape_target = root.join("secret.png");
+        write(&escape_target, &PNG_BYTES);
+
+        assert_eq!(resolve_icon(&dirs, "../../../../secret"), None);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn non_absolute_icon_name_with_forward_slash_is_rejected() {
+        let root = temp_root("traversal-slash");
+        let dirs = test_dirs(&root);
+        let nested = dirs
+            .home
+            .join(".local/share/icons/hicolor/48x48/apps/sub/nested.png");
+        write(&nested, &PNG_BYTES);
+
+        assert_eq!(resolve_icon(&dirs, "sub/nested"), None);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn non_absolute_icon_name_with_backslash_is_rejected() {
+        let root = temp_root("traversal-backslash");
+        let dirs = test_dirs(&root);
+        assert_eq!(resolve_icon(&dirs, r"sub\nested"), None);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn empty_icon_name_is_rejected() {
+        let root = temp_root("empty-name");
+        let dirs = test_dirs(&root);
+        assert_eq!(resolve_icon(&dirs, ""), None);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn skips_an_oversized_candidate_and_finds_a_later_valid_one() {
+        // "huge" exists at two sizes: an oversized one at 512x512 (tried
+        // first, since `ICON_SIZES` lists it before 48x48) and a valid
+        // one at 48x48. The oversized hit must not end the search.
+        let root = temp_root("skip-oversized");
+        let dirs = test_dirs(&root);
+        let oversized_path = dirs
+            .home
+            .join(".local/share/icons/hicolor/512x512/apps/huge.png");
+        let mut oversized_data = PNG_BYTES.to_vec();
+        oversized_data.extend(std::iter::repeat_n(0u8, MAX_ICON_BYTES as usize));
+        write(&oversized_path, &oversized_data);
+
+        let valid_path = dirs
+            .home
+            .join(".local/share/icons/hicolor/48x48/apps/huge.png");
+        write(&valid_path, &PNG_BYTES);
+
+        let result = resolve_icon(&dirs, "huge").expect("a later valid candidate must be found");
+        assert!(result.starts_with("data:image/png;base64,"));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn skips_a_candidate_with_invalid_magic_bytes_and_finds_a_later_valid_one() {
+        // "multi" exists at `scalable` (tried first) with content that
+        // isn't actually an SVG, and at 48x48 with a real PNG. The first,
+        // invalid hit must not end the search.
+        let root = temp_root("skip-invalid-magic");
+        let dirs = test_dirs(&root);
+        let bad_path = dirs
+            .home
+            .join(".local/share/icons/hicolor/scalable/apps/multi.svg");
+        write(&bad_path, b"this is not an svg file");
+
+        let valid_path = dirs
+            .home
+            .join(".local/share/icons/hicolor/48x48/apps/multi.png");
+        write(&valid_path, &PNG_BYTES);
+
+        let result = resolve_icon(&dirs, "multi").expect("a later valid candidate must be found");
+        assert!(result.starts_with("data:image/png;base64,"));
         fs::remove_dir_all(&root).ok();
     }
 }
