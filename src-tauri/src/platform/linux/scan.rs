@@ -226,7 +226,7 @@ mod tests {
         let apps = root.join("apps");
         write_desktop(
             &apps,
-            "Linh.desktop",
+            "linh.desktop",
             "[Desktop Entry]\nName=Linh\nExec=linh %u\nMimeType=x-scheme-handler/http;x-scheme-handler/https;\n",
         );
         let browsers = scan_browsers(&test_dirs(&root, &[apps]));

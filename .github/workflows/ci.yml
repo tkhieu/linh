@@ -99,20 +99,30 @@ jobs:
 
       - name: Build RPM bundle
         working-directory: src-tauri
-        run: cargo tauri build --bundles rpm
+        run: |
+          # The cargo cache above is keyed only on Cargo.lock, so a cache
+          # hit can restore a bundle directory left over from a previous
+          # run (e.g. built under an older productName). The bundler
+          # doesn't clean sibling files with a different name, so a stale
+          # .rpm here can make the next step pick the wrong file.
+          rm -rf ../target/release/bundle
+          cargo tauri build --bundles rpm
 
       - name: Verify .desktop file in RPM
         shell: bash
         run: |
           set -euo pipefail
           rpm="$(find target/release/bundle/rpm -name '*.rpm' | head -n1)"
-          desktop="$(rpm2cpio "$rpm" | cpio -i --to-stdout ./usr/share/applications/Linh.desktop 2>/dev/null)"
+          desktop="$(rpm2cpio "$rpm" | cpio -i --to-stdout ./usr/share/applications/linh.desktop 2>/dev/null)"
           echo "$desktop"
 
           fail() { echo "::error::$1"; exit 1; }
 
           exec_line="$(grep '^Exec=' <<< "$desktop")"
           [ "$exec_line" = "Exec=linh %u" ] || fail "expected exact line 'Exec=linh %u', got '$exec_line'"
+
+          name_line="$(grep '^Name=' <<< "$desktop")"
+          [ "$name_line" = "Name=Linh" ] || fail "expected exact line 'Name=Linh', got '$name_line'"
 
           categories_line="$(grep '^Categories=' <<< "$desktop")"
           IFS=';' read -ra categories <<< "${categories_line#Categories=}"

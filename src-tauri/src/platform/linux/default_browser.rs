@@ -29,8 +29,16 @@ pub fn current_default_browser_id() -> Option<String> {
 /// Whether `xdg-settings` currently reports Linh as the default browser.
 pub fn is_default_browser() -> bool {
     current_default_browser_id()
-        .map(|id| id.eq_ignore_ascii_case(&desktop_id()))
+        .map(|id| is_linh_desktop_id(&id))
         .unwrap_or(false)
+}
+
+/// Compares `id` (as reported by `xdg-settings get default-web-browser`)
+/// against Linh's own desktop id exactly, not case-insensitively:
+/// `xdg-settings` must report exactly `linh.desktop`, matching the
+/// lowercase filename the RPM installs it under.
+fn is_linh_desktop_id(id: &str) -> bool {
+    id == desktop_id()
 }
 
 /// Registers Linh as the default browser for `http`/`https`/`text/html`
@@ -91,6 +99,24 @@ pub fn matches_desktop_id(browser: &Browser, xdg_id: &str) -> bool {
 mod tests {
     use super::*;
     use linh_core::{BrowserFamily, InstallKind};
+
+    #[test]
+    fn exact_lowercase_desktop_id_matches() {
+        assert!(is_linh_desktop_id("linh.desktop"));
+    }
+
+    #[test]
+    fn differently_cased_desktop_id_does_not_match() {
+        // `is_default_browser` must compare exactly, not case-insensitively:
+        // `Linh.desktop` (the id used before the desktop file was renamed
+        // to lowercase) must not be treated as a match.
+        assert!(!is_linh_desktop_id("Linh.desktop"));
+    }
+
+    #[test]
+    fn unrelated_desktop_id_does_not_match() {
+        assert!(!is_linh_desktop_id("google-chrome.desktop"));
+    }
 
     fn browser(id: &str, desktop_file: Option<&str>) -> Browser {
         Browser {

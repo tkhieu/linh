@@ -61,5 +61,8 @@ export function visibleTargets(targets: BrowserTarget[], shown: string[]): Brows
     const target = parseTargetKey(key)
     return target ? [targetKey(target)] : []
   }))
-  return targets.filter(({ key }) => selected.has(key))
+  const filtered = targets.filter(({ key }) => selected.has(key))
+  // shown_browsers names only browsers that are no longer installed: show
+  // every detected target rather than an empty picker.
+  return filtered.length === 0 && targets.length > 0 ? targets : filtered
 }
