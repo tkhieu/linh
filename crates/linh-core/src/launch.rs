@@ -101,9 +101,11 @@ struct ExecToken {
 /// inserted immediately before wherever the URL argument ends up.
 ///
 /// If the program is a known shell or script interpreter (see
-/// [`SHELL_INTERPRETERS`]) and the URL field code appears anywhere as a
-/// bare argument, the Exec is rejected outright: the attacker-controlled
-/// URL would otherwise be interpreted as code rather than passed as data.
+/// [`SHELL_INTERPRETERS`]), the Exec is rejected outright, whether or not
+/// it has a URL field code: the URL is always passed to the interpreter
+/// one way or another (as a bare field-code argument, or, with no field
+/// code at all, appended as its last argv), which would let it be
+/// interpreted as code rather than passed as data.
 fn build_native_command(
     exec: &str,
     flags: &[String],
@@ -125,13 +127,9 @@ fn build_native_command(
     }
 
     let remaining: Vec<ExecToken> = tokens.collect();
-    if is_shell_interpreter(&program)
-        && remaining
-            .iter()
-            .any(|token| matches!(bare_field_code(token), Some('u') | Some('U')))
-    {
+    if is_shell_interpreter(&program) {
         return Err(LaunchError::InvalidExec(format!(
-            "Exec passes the URL field code to a shell/interpreter ({program}), which would execute attacker-controlled input"
+            "Exec runs a shell/interpreter ({program}), which would execute attacker-controlled input"
         )));
     }
 
@@ -956,25 +954,30 @@ mod tests {
     }
 
     #[test]
-    fn shell_exec_without_url_field_code_is_not_rejected_by_shell_check() {
-        // sh is never reachable here without a field code in practice, but
-        // the shell-wrapper rejection should specifically require a URL
-        // field code, not reject every shell Exec unconditionally.
-        let cmd = build_launch_command(
+    fn shell_exec_without_url_field_code_is_still_rejected() {
+        // Even with no %u/%U at all, the URL is appended as the
+        // interpreter's last argv (here, after "/usr/bin/app"), so it
+        // would still be handed to the shell rather than a fixed browser
+        // binary. The shell-wrapper rejection must not require a bare
+        // field code to fire.
+        let err = build_launch_command(
             &chromium_native("sh -c /usr/bin/app"),
             &plain_target(),
             "https://example.com",
         )
-        .unwrap();
-        assert_eq!(cmd.program, "sh");
-        assert_eq!(
-            cmd.args,
-            vec![
-                "-c".to_string(),
-                "/usr/bin/app".to_string(),
-                "https://example.com".to_string(),
-            ]
-        );
+        .unwrap_err();
+        assert!(matches!(err, LaunchError::InvalidExec(_)));
+    }
+
+    #[test]
+    fn bash_exec_without_url_field_code_is_rejected() {
+        let err = build_launch_command(
+            &chromium_native("bash -c foo"),
+            &plain_target(),
+            "https://example.com",
+        )
+        .unwrap_err();
+        assert!(matches!(err, LaunchError::InvalidExec(_)));
     }
 
     #[test]
