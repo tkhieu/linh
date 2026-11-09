@@ -99,7 +99,14 @@ jobs:
 
       - name: Build RPM bundle
         working-directory: src-tauri
-        run: cargo tauri build --bundles rpm
+        run: |
+          # The cargo cache above is keyed only on Cargo.lock, so a cache
+          # hit can restore a bundle directory left over from a previous
+          # run (e.g. built under an older productName). The bundler
+          # doesn't clean sibling files with a different name, so a stale
+          # .rpm here can make the next step pick the wrong file.
+          rm -rf ../target/release/bundle
+          cargo tauri build --bundles rpm
 
       - name: Verify .desktop file in RPM
         shell: bash
