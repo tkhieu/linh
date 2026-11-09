@@ -7,6 +7,7 @@ import { SettingsApp } from './SettingsApp'
 const api = vi.hoisted(() => ({
   listBrowsers: vi.fn(), getConfig: vi.fn(), saveConfig: vi.fn(),
   getPlatformCaps: vi.fn(), isDefaultBrowser: vi.fn(), setDefaultBrowser: vi.fn(),
+  listPresets: vi.fn(), getIcon: vi.fn(),
 }))
 vi.mock('../api', () => api)
 
@@ -17,7 +18,18 @@ beforeEach(() => {
   api.getPlatformCaps.mockResolvedValue({ source_app_rules: false })
   api.isDefaultBrowser.mockResolvedValue(true)
   api.saveConfig.mockResolvedValue(undefined)
+  api.getIcon.mockResolvedValue(null)
+  api.listPresets.mockResolvedValue([
+    { id: 'meet', name: 'Google Meet', patterns: ['meet.google.com'], app: null, app_installed: false },
+    { id: 'teams', name: 'Microsoft Teams', patterns: ['teams.microsoft.com/meet/*'], app: 'teams', app_installed: true },
+    { id: 'slack', name: 'Slack', patterns: ['*.slack.com/archives/*'], app: null, app_installed: false },
+    { id: 'zoom', name: 'Zoom', patterns: ['zoom.us/j/*'], app: 'zoom', app_installed: false },
+  ])
 })
+
+function openSection(name: 'Browsers' | 'Rules') {
+  fireEvent.click(screen.getByRole('button', { name }))
+}
 
 describe('SettingsApp', () => {
   it('shows onboarding and rechecks default status after registration', async () => {
@@ -39,10 +51,12 @@ describe('SettingsApp', () => {
 
   it('adds, edits, reorders, deletes rules, and saves target settings', async () => {
     render(<SettingsApp />)
-    await screen.findByRole('heading', { name: 'Rules' })
+    await screen.findByLabelText('Primary browser')
     fireEvent.change(screen.getByLabelText('Primary browser'), { target: { value: targetKey(work) } })
     fireEvent.change(screen.getByLabelText('Prompt mode'), { target: { value: 'always' } })
+    openSection('Browsers')
     fireEvent.click(screen.getByLabelText('Show Google Chrome — Work'))
+    openSection('Rules')
     fireEvent.click(screen.getByRole('button', { name: 'Add rule' }))
     fireEvent.change(screen.getByLabelText('Rule name'), { target: { value: 'Meet' } })
     fireEvent.change(screen.getByLabelText('URL patterns'), { target: { value: 'meet.google.com\n*.company.com' } })
@@ -73,6 +87,8 @@ describe('SettingsApp', () => {
       ...config, rules: [{ name: 'Slack', match: ['example.com'], source_apps: ['Slack'], open_in: 'prompt' }],
     })
     render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
     await screen.findByText('Slack')
     expect(screen.queryByLabelText('Source apps')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Edit Slack' }))
@@ -88,6 +104,8 @@ describe('SettingsApp', () => {
   it('preserves a stale shown-browser key when another target is selected and saved', async () => {
     api.getConfig.mockResolvedValue({ ...config, shown_browsers: ['retired-browser/Profile 9'] })
     render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Browsers')
     await screen.findByRole('heading', { name: 'Shown browsers' })
     expect(screen.getByLabelText('Show Google Chrome — Work')).not.toBeChecked()
     fireEvent.click(screen.getByLabelText('Show Google Chrome — Work'))
@@ -100,6 +118,8 @@ describe('SettingsApp', () => {
   it('lists a stale shown-browser key as removable and clears it on request', async () => {
     api.getConfig.mockResolvedValue({ ...config, shown_browsers: ['retired-browser/Profile 9'] })
     render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Browsers')
     await screen.findByRole('heading', { name: 'Shown browsers' })
     const staleCheckbox = screen.getByLabelText('Show Not installed: retired-browser/Profile 9')
     expect(staleCheckbox).toBeChecked()
@@ -113,8 +133,99 @@ describe('SettingsApp', () => {
   it('shows backend save errors', async () => {
     api.saveConfig.mockRejectedValue('Invalid rule')
     render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
     await screen.findByRole('heading', { name: 'Rules' })
     fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('Invalid rule')
+  })
+
+  it('navigates between General, Browsers, and Rules', async () => {
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    expect(screen.queryByRole('heading', { name: 'Rules' })).not.toBeInTheDocument()
+    openSection('Browsers')
+    expect(screen.getByRole('heading', { name: 'Shown browsers' })).toBeInTheDocument()
+    openSection('Rules')
+    expect(screen.getByRole('heading', { name: 'Rules' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Primary browser')).not.toBeInTheDocument()
+  })
+
+  it('adds a Meet preset with editable patterns and a browser profile', async () => {
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    fireEvent.click(screen.getByRole('button', { name: 'Add preset' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Google Meet' }))
+    expect(screen.getByLabelText('URL patterns')).toHaveValue('meet.google.com')
+    fireEvent.change(screen.getByLabelText('URL patterns'), { target: { value: 'meet.google.com\nmeet.example.com' } })
+    fireEvent.change(screen.getByLabelText('Open in'), { target: { value: targetKey(work) } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save rule' }))
+    expect(screen.getByText('meet')).toHaveClass('preset-badge')
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
+    await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith(expect.objectContaining({ rules: [
+      { name: 'Google Meet', preset: 'meet', match: ['meet.google.com', 'meet.example.com'], open_in: work },
+    ] })))
+  })
+
+  it('adds Teams with an app fallback and reports installation state', async () => {
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    fireEvent.click(screen.getByRole('button', { name: 'Add preset' }))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Microsoft Teams' }))
+    expect(screen.getByLabelText('Open in')).toHaveValue('app:teams')
+    expect(screen.getByText('App installed')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Fallback browser'), { target: { value: targetKey(work) } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save rule' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
+    await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith(expect.objectContaining({ rules: [
+      { name: 'Microsoft Teams', preset: 'teams', match: ['teams.microsoft.com/meet/*'], open_in: { app: 'teams', fallback: work } },
+    ] })))
+  })
+
+  it('shows the fallback message for an absent app and round-trips AppTarget on edit', async () => {
+    api.getConfig.mockResolvedValue({ ...config, rules: [
+      { name: 'Zoom calls', preset: 'zoom', match: ['zoom.us/j/*'], open_in: { app: 'zoom', fallback: work } },
+    ] })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Zoom calls' }))
+    expect(screen.getByLabelText('Open in')).toHaveValue('app:zoom')
+    expect(screen.getByLabelText('Fallback browser')).toHaveValue(targetKey(work))
+    expect(screen.getByText('App not found — links will open in the fallback browser')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Save rule' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
+    await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith(expect.objectContaining({ rules: [
+      { name: 'Zoom calls', preset: 'zoom', match: ['zoom.us/j/*'], open_in: { app: 'zoom', fallback: work } },
+    ] })))
+  })
+
+  it('keeps a hand-written app rule without preset metadata', async () => {
+    api.getConfig.mockResolvedValue({ ...config, rules: [
+      { name: 'Custom Teams', match: ['teams.example.com/*'], open_in: { app: 'teams', fallback: work } },
+    ] })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Custom Teams' }))
+    expect(screen.getByLabelText('Open in')).toHaveValue('app:teams')
+    fireEvent.click(screen.getByRole('button', { name: 'Save rule' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
+    await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith(expect.objectContaining({ rules: [
+      { name: 'Custom Teams', match: ['teams.example.com/*'], open_in: { app: 'teams', fallback: work } },
+    ] })))
+  })
+
+  it('renders browser icons and a placeholder for an unavailable icon', async () => {
+    api.listBrowsers.mockResolvedValue([{ ...chrome, icon: 'chrome-icon' }, { ...firefox, icon: 'missing' }])
+    api.getIcon.mockImplementation((icon: string) => Promise.resolve(icon === 'chrome-icon' ? 'data:image/png;base64,aGVsbG8=' : null))
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Browsers')
+    await waitFor(() => expect(document.querySelectorAll('.checklist img.browser-icon')).toHaveLength(4))
+    expect(screen.getAllByText('◎').length).toBeGreaterThan(0)
+    expect(api.getIcon).toHaveBeenCalledTimes(2)
   })
 })

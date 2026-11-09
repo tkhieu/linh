@@ -3,6 +3,11 @@ import { listen } from '@tauri-apps/api/event'
 import { getConfig, getPromptUrl, listBrowsers, promptCancel, promptChoose } from '../api'
 import type { BrowserTarget } from '../targets'
 import { deriveTargets, visibleTargets } from '../targets'
+import { BrowserIcon } from '../BrowserIcon'
+
+function urlHost(url: string): string {
+  try { return new URL(url).host } catch { return url }
+}
 
 export function PromptApp() {
   const [url, setUrl] = useState<string | null | undefined>(undefined)
@@ -151,10 +156,10 @@ export function PromptApp() {
       {url === undefined && !error && <p>Loading link…</p>}
       {url === null && <p>No link is waiting to be opened.</p>}
       {url && <>
-        <p className="pending-url" title={url}>{url}</p>
+        <div className="pending-url" title={url}><strong>{urlHost(url)}</strong><span>{url}</span></div>
         {choices.length === 0 && <p>No browser targets are available.</p>}
         <ol className="prompt-choices">
-          {choices.map(({ key, label }, index) => (
+          {choices.map(({ key, label, icon }, index) => (
             <li key={key}>
               <button
                 type="button"
@@ -164,14 +169,14 @@ export function PromptApp() {
                 onMouseEnter={() => setSelected(index)}
                 onClick={() => void choose(index)}
               >
-                {index < 9 && <kbd>{index + 1}</kbd>}<span>{label}</span>
+                {index < 9 && <kbd>{index + 1}</kbd>}<BrowserIcon icon={icon} /><span>{label}</span>
               </button>
             </li>
           ))}
         </ol>
       </>}
       {error && <p role="alert" className="error">{error}</p>}
-      <p className="hint">↑ ↓ to select · Enter to open · Esc to cancel</p>
+      <p className="hint prompt-shortcuts"><span>1–9 to open</span><span>↑ ↓ to select</span><span>Enter to open</span><span>Esc to cancel</span></p>
     </main>
   )
 }

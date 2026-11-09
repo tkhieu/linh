@@ -1,53 +1,74 @@
 :root {
-  font: 14px/1.45 system-ui, sans-serif;
-  color: #263238;
-  background: #f7f8fa;
+  color-scheme: light dark;
+  font: 14px/1.5 system-ui, sans-serif;
+  --bg: #f4f6f8; --surface: #fff; --text: #202b35; --muted: #5b6978;
+  --border: #d9e0e7; --control: #fff; --hover: #ebf2fb;
+  --accent: #285fa5; --accent-hover: #1f4c86; --accent-soft: #e7f0fd;
+  --danger: #a52b25; --success: #236d3e;
 }
-
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #191e25; --surface: #242b34; --text: #edf1f5; --muted: #b5c0ca;
+    --border: #404a56; --control: #2c3540; --hover: #34465d;
+    --accent: #8cb9ff; --accent-hover: #b0ceff; --accent-soft: #293f5d;
+    --danger: #ffaaa2; --success: #a7dfb7;
+  }
+}
 * { box-sizing: border-box; }
-body { margin: 0; }
+body { margin: 0; background: var(--bg); color: var(--text); }
 button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: default; opacity: .5; }
-button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid #3162ad; outline-offset: 2px; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 h1, h2, h3, p { margin: 0; }
-h1 { font-size: 1.55rem; }
-h2 { font-size: 1.1rem; }
+h1 { font-size: 1.65rem; letter-spacing: -.025em; }
+h2 { font-size: 1.15rem; }
 h3 { font-size: 1rem; }
-p { margin-top: .45rem; }
-.hint { color: #596873; font-size: .9rem; }
-.error { color: #a02c24; }
-.success { color: #216b3a; }
-
-.settings { max-width: 740px; margin: 0 auto; padding: 28px 24px 36px; }
-.settings > header { margin-bottom: 20px; }
-.settings section { background: #fff; border: 1px solid #dce1e6; border-radius: 10px; padding: 18px; margin-bottom: 16px; }
-.settings .banner { border-color: #9dbbe8; background: #edf4ff; }
-.settings label:not(.checklist label) { display: block; font-weight: 600; margin: 16px 0 5px; }
-.settings select, .settings input:not([type=checkbox]), .settings textarea { width: 100%; padding: 8px 10px; border: 1px solid #b8c2cb; border-radius: 6px; background: #fff; color: inherit; }
+p { margin-top: .5rem; }
+.hint { color: var(--muted); font-size: .9rem; }
+.error { color: var(--danger); }
+.success { color: var(--success); }
+.browser-icon { width: 22px; height: 22px; object-fit: contain; flex: 0 0 22px; }
+.browser-icon-placeholder { display: inline-grid; place-items: center; border-radius: 6px; background: var(--border); color: var(--muted); font-size: 20px; line-height: 1; }
+.settings { max-width: 780px; margin: 0 auto; padding: 32px 24px 40px; }
+.settings > header { margin-bottom: 24px; }
+.settings > header p { color: var(--muted); }
+.settings-tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border); margin-bottom: 22px; }
+.settings-tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 10px 16px; margin-bottom: -1px; background: transparent; color: var(--muted); font-weight: 600; }
+.settings-tabs button[aria-current=page] { border-bottom-color: var(--accent); color: var(--text); }
+.settings section { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 22px; margin-bottom: 16px; box-shadow: 0 3px 14px #0000000a; }
+.settings .banner { border-color: var(--accent); background: var(--accent-soft); }
+.settings label:not(.checklist label) { display: block; font-weight: 600; margin: 18px 0 6px; }
+.settings select, .settings input:not([type=checkbox]), .settings textarea { width: 100%; padding: 9px 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--control); color: var(--text); }
 .settings textarea { resize: vertical; }
-.settings button { border: 1px solid #aebdc9; border-radius: 6px; background: #fff; color: inherit; padding: 6px 10px; }
-.settings button:hover:not(:disabled) { background: #edf2f7; }
-.settings .primary-action, .settings .banner button { border-color: #315f9f; background: #315f9f; color: #fff; }
-.settings .primary-action:hover:not(:disabled), .settings .banner button:hover:not(:disabled) { background: #244d87; }
-.settings .banner button { margin-top: 12px; }
-.settings .checklist { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px 12px; margin-top: 12px; }
-.settings .checklist label { display: flex; align-items: center; gap: 8px; }
+.settings button { border: 1px solid var(--border); border-radius: 7px; background: var(--control); color: var(--text); padding: 7px 11px; }
+.settings button:hover:not(:disabled) { background: var(--hover); }
+.settings .primary-action, .settings .banner button { border-color: var(--accent); background: var(--accent); color: var(--bg); font-weight: 600; }
+.settings .primary-action:hover:not(:disabled), .settings .banner button:hover:not(:disabled) { background: var(--accent-hover); }
+.settings .banner button { margin-top: 14px; }
+.settings .target-select { display: flex; align-items: center; gap: 10px; }
+.settings .checklist { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 12px; margin-top: 16px; }
+.settings .checklist label { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; }
 .settings .section-heading, .settings .rule-actions, .settings .editor-actions, .settings footer { display: flex; align-items: center; gap: 8px; }
 .settings .section-heading { justify-content: space-between; }
-.settings .rules { padding: 0; margin: 12px 0 0; list-style: none; }
-.settings .rules li { display: flex; justify-content: space-between; gap: 12px; align-items: center; border-top: 1px solid #e7ebef; padding: 11px 0; }
-.settings .rules li p { color: #596873; overflow-wrap: anywhere; }
+.settings .rules { padding: 0; margin: 14px 0 0; list-style: none; }
+.settings .rules li { display: flex; justify-content: space-between; gap: 16px; align-items: center; border-top: 1px solid var(--border); padding: 15px 0; }
+.settings .rules li p { color: var(--muted); overflow-wrap: anywhere; }
 .settings .rule-actions { flex-shrink: 0; }
-.settings .rule-editor { border-top: 1px solid #dce1e6; padding-top: 16px; margin-top: 12px; }
-.settings .editor-actions { margin-top: 16px; }
-.settings footer { justify-content: flex-end; }
-
-.prompt { min-height: 100vh; padding: 20px; background: #fff; outline: none; }
-.prompt h1 { font-size: 1.2rem; }
-.prompt .pending-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #596873; }
-.prompt-choices { list-style: none; padding: 0; margin: 16px 0; max-height: 50vh; overflow-y: auto; }
-.prompt-choices li + li { margin-top: 4px; }
-.prompt-choices button { display: flex; align-items: center; width: 100%; gap: 12px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: inherit; padding: 9px; text-align: left; }
-.prompt-choices button:hover, .prompt-choices button.selected { background: #edf4ff; border-color: #b4cbed; }
-.prompt-choices kbd { display: inline-grid; place-items: center; width: 22px; height: 22px; border: 1px solid #aebdc9; border-radius: 4px; color: #596873; font: inherit; font-size: .85rem; }
+.settings .rule-editor { border-top: 1px solid var(--border); padding-top: 20px; margin-top: 16px; }
+.settings .editor-actions { margin-top: 18px; }
+.settings .preset-menu { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 0; }
+.settings .preset-badge { display: inline-block; margin-left: 5px; padding: 1px 7px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); font-size: .75rem; font-weight: 600; vertical-align: middle; }
+.settings .app-status { color: var(--muted); }
+.settings footer { justify-content: flex-end; margin-top: 20px; }
+.prompt { min-height: 100vh; padding: 24px; background: var(--surface); outline: none; }
+.prompt h1 { font-size: 1.3rem; }
+.prompt .pending-url { margin-top: 16px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg); overflow: hidden; }
+.prompt .pending-url strong, .prompt .pending-url span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prompt .pending-url span { color: var(--muted); font-size: .88rem; margin-top: 2px; }
+.prompt-choices { list-style: none; padding: 0; margin: 18px 0; max-height: 55vh; overflow-y: auto; }
+.prompt-choices li + li { margin-top: 6px; }
+.prompt-choices button { display: flex; align-items: center; width: 100%; gap: 14px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); color: var(--text); padding: 13px; text-align: left; font-weight: 600; }
+.prompt-choices button:hover, .prompt-choices button.selected { background: var(--accent-soft); border-color: var(--accent); }
+.prompt-choices kbd { display: inline-grid; place-items: center; width: 25px; height: 25px; border: 1px solid var(--border); border-radius: 5px; color: var(--muted); font: inherit; font-size: .85rem; }
+.prompt-shortcuts { display: flex; flex-wrap: wrap; gap: 6px 16px; border-top: 1px solid var(--border); padding-top: 13px; }

@@ -1,9 +1,14 @@
-import type { Browser, Target } from './api'
+import type { AppTarget, Browser, OpenIn, Target } from './api'
 
 export interface BrowserTarget {
   key: string
   label: string
   target: Target
+  icon?: string
+}
+
+export function isAppTarget(openIn: OpenIn): openIn is AppTarget {
+  return typeof openIn === 'object' && 'app' in openIn
 }
 
 /** Human-readable target identity used only by shown_browsers. */
@@ -27,11 +32,11 @@ export function parseTargetKey(key: string): Target | null {
 export function deriveTargets(browsers: Browser[]): BrowserTarget[] {
   const results: BrowserTarget[] = []
   const seen = new Set<string>()
-  const add = (target: Target, label: string) => {
+  const add = (target: Target, label: string, icon?: string) => {
     const key = targetKey(target)
     if (!seen.has(key)) {
       seen.add(key)
-      results.push({ key, label, target })
+      results.push({ key, label, target, icon })
     }
   }
 
@@ -46,9 +51,9 @@ export function deriveTargets(browsers: Browser[]): BrowserTarget[] {
       }
     }
     for (const variant of variants) {
-      add(variant.target, variant.label)
+      add(variant.target, variant.label, browser.icon)
       if (browser.supports_private) {
-        add({ ...variant.target, private: true }, `${variant.label} (Private)`)
+        add({ ...variant.target, private: true }, `${variant.label} (Private)`, browser.icon)
       }
     }
   }
