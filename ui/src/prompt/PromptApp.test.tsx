@@ -92,6 +92,34 @@ describe('PromptApp', () => {
     expect(screen.queryByText('https://meet.google.com/abc')).not.toBeInTheDocument()
   })
 
+  it('ignores a stale target refresh that resolves after a newer one', async () => {
+    let resolveInitialConfig: ((value: typeof config) => void) | undefined
+    let resolveInitialBrowsers: ((value: (typeof firefox)[]) => void) | undefined
+    api.getConfig
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveInitialConfig = resolve }))
+      .mockResolvedValueOnce({ ...config, shown_browsers: [] })
+    api.listBrowsers
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveInitialBrowsers = resolve }))
+      .mockResolvedValueOnce([firefox])
+
+    render(<PromptApp />)
+    await screen.findByText('https://meet.google.com/abc')
+
+    // The event triggers a second, newer refresh that resolves right away.
+    // (Exact text match: "Firefox" must not also match "Firefox (Private)".)
+    emit('prompt-url-changed', 'https://example.com/new')
+    await screen.findByText('Firefox')
+    expect(screen.queryByText('Google Chrome')).not.toBeInTheDocument()
+
+    // The initial (older) refresh now resolves after the newer one already
+    // landed; it must not overwrite the newer targets with its own.
+    resolveInitialConfig?.({ ...config, shown_browsers: [] })
+    resolveInitialBrowsers?.([chrome])
+
+    await waitFor(() => expect(screen.getByText('Firefox')).toBeInTheDocument())
+    expect(screen.queryByText('Google Chrome')).not.toBeInTheDocument()
+  })
+
   it('uses arrows and Enter to choose, and mouse click chooses', async () => {
     api.getConfig.mockResolvedValue(config)
     render(<PromptApp />)

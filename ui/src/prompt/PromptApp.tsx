@@ -23,16 +23,24 @@ export function PromptApp() {
     let unlisten: (() => void) | undefined
     mainRef.current?.focus()
 
+    // Refreshes can overlap (an event can fire again before the initial
+    // load's fetch resolves). Each call claims the next sequence number
+    // and only applies its result if it's still the most recently
+    // started one, so an older, slower fetch can never clobber a newer
+    // one's targets.
+    let latestTargetsRequest = 0
+
     // Re-fetches the browser/config-derived target list so a picker
     // already on screen reflects the latest shown_browsers and
     // installed browsers, not just what was true when it first loaded.
     async function refreshTargets() {
+      const requestId = ++latestTargetsRequest
       try {
         const [config, browsers] = await Promise.all([getConfig(), listBrowsers()])
-        if (!mounted) return
+        if (!mounted || requestId !== latestTargetsRequest) return
         setTargets(visibleTargets(deriveTargets(browsers), config.shown_browsers))
       } catch (reason) {
-        if (mounted) setError(String(reason))
+        if (mounted && requestId === latestTargetsRequest) setError(String(reason))
       }
     }
 
