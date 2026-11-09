@@ -1,6 +1,4 @@
-// Mirrors the Tauri command contract frozen in `src-tauri/src/commands.rs`.
-// Keep these types and wrappers in lockstep with that file: phases 2 (Rust
-// backend) and 3 (this UI) both build against this contract.
+// Mirrors the Tauri command contract frozen in the presets and UI polish plan.
 import { invoke } from '@tauri-apps/api/core'
 
 export type BrowserFamily = 'chromium' | 'firefox' | 'other'
@@ -31,13 +29,26 @@ export interface Target {
   private: boolean
 }
 
-/** Either `"prompt"` or a concrete `Target`. */
-export type OpenIn = 'prompt' | Target
+export interface AppTarget {
+  app: 'teams' | 'zoom'
+  fallback?: Target
+}
+
+export type OpenIn = 'prompt' | Target | AppTarget
+
+export interface Preset {
+  id: string
+  name: string
+  patterns: string[]
+  app?: string | null
+  app_installed: boolean
+}
 
 export type PromptMode = 'never' | 'always'
 
 export interface Rule {
   name: string
+  preset?: 'meet' | 'teams' | 'slack' | 'zoom'
   match: string[]
   source_apps?: string[]
   open_in: OpenIn
@@ -56,6 +67,14 @@ export interface PlatformCaps {
 
 export function listBrowsers(): Promise<Browser[]> {
   return invoke('list_browsers')
+}
+
+export function listPresets(): Promise<Preset[]> {
+  return invoke('list_presets')
+}
+
+export function getIcon(icon: string): Promise<string | null> {
+  return invoke('get_icon', { icon })
 }
 
 export function getConfig(): Promise<Config> {

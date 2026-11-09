@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { chrome, config, firefox, work } from '../test/fixtures'
 import { targetKey } from '../targets'
@@ -7,6 +7,7 @@ import { PromptApp } from './PromptApp'
 const api = vi.hoisted(() => ({
   listBrowsers: vi.fn(), getConfig: vi.fn(), getPromptUrl: vi.fn(),
   promptChoose: vi.fn(), promptCancel: vi.fn(),
+  getIcon: vi.fn(),
 }))
 vi.mock('../api', () => api)
 
@@ -30,6 +31,7 @@ beforeEach(() => {
   api.getPromptUrl.mockResolvedValue('https://meet.google.com/abc')
   api.promptChoose.mockResolvedValue(undefined)
   api.promptCancel.mockResolvedValue(undefined)
+  api.getIcon.mockResolvedValue(null)
 })
 
 describe('PromptApp', () => {
@@ -95,11 +97,13 @@ describe('PromptApp', () => {
   it('ignores a stale target refresh that resolves after a newer one', async () => {
     let resolveInitialConfig: ((value: typeof config) => void) | undefined
     let resolveInitialBrowsers: ((value: (typeof firefox)[]) => void) | undefined
+    let initialConfig: Promise<typeof config> | undefined
+    let initialBrowsers: Promise<(typeof firefox)[]> | undefined
     api.getConfig
-      .mockImplementationOnce(() => new Promise((resolve) => { resolveInitialConfig = resolve }))
+      .mockImplementationOnce(() => (initialConfig = new Promise((resolve) => { resolveInitialConfig = resolve })))
       .mockResolvedValueOnce({ ...config, shown_browsers: [] })
     api.listBrowsers
-      .mockImplementationOnce(() => new Promise((resolve) => { resolveInitialBrowsers = resolve }))
+      .mockImplementationOnce(() => (initialBrowsers = new Promise((resolve) => { resolveInitialBrowsers = resolve })))
       .mockResolvedValueOnce([firefox])
 
     render(<PromptApp />)
@@ -113,10 +117,13 @@ describe('PromptApp', () => {
 
     // The initial (older) refresh now resolves after the newer one already
     // landed; it must not overwrite the newer targets with its own.
-    resolveInitialConfig?.({ ...config, shown_browsers: [] })
-    resolveInitialBrowsers?.([chrome])
+    await act(async () => {
+      resolveInitialConfig?.({ ...config, shown_browsers: [] })
+      resolveInitialBrowsers?.([chrome])
+      await Promise.all([initialConfig, initialBrowsers])
+    })
 
-    await waitFor(() => expect(screen.getByText('Firefox')).toBeInTheDocument())
+    expect(screen.getByText('Firefox')).toBeInTheDocument()
     expect(screen.queryByText('Google Chrome')).not.toBeInTheDocument()
   })
 
@@ -156,5 +163,19 @@ describe('PromptApp', () => {
     expect(await screen.findByText('No link is waiting to be opened.')).toBeInTheDocument()
     fireEvent.keyDown(document, { key: '1' })
     expect(api.promptChoose).not.toHaveBeenCalled()
+  })
+
+  it('shows host, URL title, keyboard hints, icons, and placeholders', async () => {
+    api.listBrowsers.mockResolvedValue([{ ...chrome, icon: 'chrome-icon' }, { ...firefox, icon: 'missing' }])
+    api.getConfig.mockResolvedValue(config)
+    api.getIcon.mockImplementation((icon: string) => Promise.resolve(icon === 'chrome-icon' ? 'data:image/png;base64,aGVsbG8=' : null))
+    render(<PromptApp />)
+    await screen.findByRole('button', { name: /Firefox \(Private\)/ })
+    expect(screen.getByText('meet.google.com')).toBeInTheDocument()
+    expect(screen.getByText('https://meet.google.com/abc').parentElement).toHaveAttribute('title', 'https://meet.google.com/abc')
+    expect(screen.getByText('1–9 to open')).toBeInTheDocument()
+    await waitFor(() => expect(document.querySelectorAll('.prompt img.browser-icon')).toHaveLength(4))
+    expect(document.querySelectorAll('.prompt .browser-icon-placeholder')).toHaveLength(2)
+    expect(api.getIcon).toHaveBeenCalledTimes(2)
   })
 })

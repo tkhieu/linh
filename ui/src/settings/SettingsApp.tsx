@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
-import { getConfig, getPlatformCaps, isDefaultBrowser, listBrowsers, saveConfig, setDefaultBrowser } from '../api'
-import type { Browser, Config, OpenIn, PlatformCaps, Rule } from '../api'
-import { deriveTargets, targetKey } from '../targets'
+import { getConfig, getPlatformCaps, isDefaultBrowser, listBrowsers, listPresets, saveConfig, setDefaultBrowser } from '../api'
+import type { Browser, Config, OpenIn, PlatformCaps, Preset, Rule } from '../api'
+import { BrowserIcon } from '../BrowserIcon'
+import { deriveTargets, isAppTarget, targetKey } from '../targets'
 import type { BrowserTarget } from '../targets'
 
 interface RuleDraft {
@@ -10,9 +11,11 @@ interface RuleDraft {
   patterns: string
   sourceApps: string
   openIn: string
+  fallback: string
+  preset?: Rule['preset']
 }
 
-const emptyDraft: RuleDraft = { index: null, name: '', patterns: '', sourceApps: '', openIn: 'prompt' }
+const emptyDraft: RuleDraft = { index: null, name: '', patterns: '', sourceApps: '', openIn: 'prompt', fallback: '' }
 
 function lines(value: string): string[] {
   return value.split('\n').map((line) => line.trim()).filter(Boolean)
@@ -26,6 +29,10 @@ function targetOptions(targets: BrowserTarget[]) {
   return targets.map(({ key, label }) => <option key={key} value={key}>{label}</option>)
 }
 
+function presetId(id: string): Rule['preset'] {
+  return id === 'meet' || id === 'teams' || id === 'slack' || id === 'zoom' ? id : undefined
+}
+
 export function SettingsApp() {
   const [config, setConfig] = useState<Config | null>(null)
   const [browsers, setBrowsers] = useState<Browser[]>([])
@@ -36,6 +43,9 @@ export function SettingsApp() {
   const [saved, setSaved] = useState(false)
   const [busy, setBusy] = useState(false)
   const [draft, setDraft] = useState<RuleDraft | null>(null)
+  const [section, setSection] = useState<'general' | 'browsers' | 'rules'>('general')
+  const [presets, setPresets] = useState<Preset[]>([])
+  const [presetMenu, setPresetMenu] = useState(false)
   const targets = useMemo(() => deriveTargets(browsers), [browsers])
 
   async function reload() {
@@ -62,6 +72,13 @@ export function SettingsApp() {
     return () => { mounted = false }
   }, [])
 
+  useEffect(() => {
+    let active = true
+    listPresets().then((items) => { if (active) setPresets(items) })
+      .catch((reason: unknown) => { if (active) setError(errorMessage(reason)) })
+    return () => { active = false }
+  }, [])
+
   function updateConfig(patch: Partial<Config>) {
     setConfig((current) => current ? { ...current, ...patch } : current)
     setSaved(false)
@@ -77,8 +94,24 @@ export function SettingsApp() {
     setDraft({
       index, name: rule.name, patterns: rule.match.join('\n'),
       sourceApps: rule.source_apps?.join('\n') ?? '',
-      openIn: rule.open_in === 'prompt' ? 'prompt' : targetKey(rule.open_in),
+      openIn: rule.open_in === 'prompt' ? 'prompt' : isAppTarget(rule.open_in) ? `app:${rule.open_in.app}` : targetKey(rule.open_in),
+      fallback: isAppTarget(rule.open_in) && rule.open_in.fallback ? targetKey(rule.open_in.fallback) : '',
+      preset: rule.preset,
     })
+    setSection('rules')
+  }
+
+  function addPreset(preset: Preset) {
+    const id = presetId(preset.id)
+    if (!id) return
+    const app = preset.app === 'teams' || preset.app === 'zoom' ? preset.app : null
+    setDraft({
+      ...emptyDraft, name: preset.name, patterns: preset.patterns.join('\n'), preset: id,
+      openIn: app ? `app:${app}` : config?.primary ? targetKey(config.primary) : 'prompt',
+      fallback: app && config?.primary ? targetKey(config.primary) : '',
+    })
+    setPresetMenu(false)
+    setSection('rules')
   }
 
   function commitRule() {
@@ -90,12 +123,25 @@ export function SettingsApp() {
       return
     }
     const previous = draft.index === null ? undefined : config.rules[draft.index]
-    const openIn: OpenIn = draft.openIn === 'prompt'
-      ? 'prompt'
-      : targets.find(({ key }) => key === draft.openIn)?.target
-        ?? (previous?.open_in !== 'prompt' && previous?.open_in && targetKey(previous.open_in) === draft.openIn
-          ? previous.open_in : 'prompt')
+    const previousTarget = previous?.open_in !== 'prompt' && previous?.open_in && !isAppTarget(previous.open_in)
+      ? previous.open_in : undefined
+    const selectedTarget = targets.find(({ key }) => key === draft.openIn)?.target
+      ?? (targetKey(config.primary) === draft.openIn ? config.primary : undefined)
+      ?? (previousTarget && targetKey(previousTarget) === draft.openIn ? previousTarget : undefined)
+    const previousFallback = previous?.open_in !== 'prompt' && previous?.open_in && isAppTarget(previous.open_in)
+      ? previous.open_in.fallback : undefined
+    const fallback = targets.find(({ key }) => key === draft.fallback)?.target
+      ?? (targetKey(config.primary) === draft.fallback ? config.primary : undefined)
+      ?? (previousFallback && targetKey(previousFallback) === draft.fallback ? previousFallback : undefined)
+    if ((draft.preset === 'meet' || draft.preset === 'slack') && !selectedTarget) {
+      setError('Choose a browser target for this preset.')
+      return
+    }
+    const openIn: OpenIn = draft.openIn === 'app:teams' || draft.openIn === 'app:zoom'
+      ? { app: draft.openIn.slice(4) as 'teams' | 'zoom', ...(fallback ? { fallback } : {}) }
+      : draft.openIn === 'prompt' ? 'prompt' : selectedTarget ?? 'prompt'
     const rule: Rule = { ...previous, name, match, open_in: openIn }
+    if (draft.preset) rule.preset = draft.preset
     if (caps?.source_app_rules) {
       const sourceApps = lines(draft.sourceApps)
       if (sourceApps.length) rule.source_apps = sourceApps
@@ -153,7 +199,9 @@ export function SettingsApp() {
 
   const primaryKey = config ? targetKey(config.primary) : ''
   const knownPrimary = targets.some(({ key }) => key === primaryKey)
-  const openInKnown = draft?.openIn === 'prompt' || targets.some(({ key }) => key === draft?.openIn)
+  const openInKnown = draft?.openIn === 'prompt' || draft?.openIn.startsWith('app:') || targets.some(({ key }) => key === draft?.openIn)
+  const fallbackKnown = !draft?.fallback || targets.some(({ key }) => key === draft.fallback)
+  const appPreset = presets.find(({ app }) => app === draft?.openIn.slice(4))
   const staleShownBrowsers = config
     ? config.shown_browsers.filter((key) => !targets.some((target) => target.key === key))
     : []
@@ -161,7 +209,13 @@ export function SettingsApp() {
   return (
     <main className="settings">
       <header><h1>Linh Settings</h1><p>Choose where links open.</p></header>
-      {defaultBrowser === false && <section className="banner" aria-label="Default browser setup">
+      <nav className="settings-tabs" aria-label="Settings sections">
+        {(['general', 'browsers', 'rules'] as const).map((item) =>
+          <button key={item} type="button" aria-current={section === item ? 'page' : undefined} onClick={() => setSection(item)}>
+            {item[0].toUpperCase() + item.slice(1)}
+          </button>)}
+      </nav>
+      {section === 'general' && defaultBrowser === false && <section className="banner" aria-label="Default browser setup">
         <h2>Make Linh your default browser</h2>
         <p>Let Linh receive links from other apps so it can apply your rules.</p>
         <button type="button" disabled={busy} onClick={() => void makeDefault()}>Make Linh your default browser</button>
@@ -169,34 +223,35 @@ export function SettingsApp() {
       {defaultMessage && <p role="status" className="success">{defaultMessage}</p>}
       {error && <p role="alert" className="error">{error}</p>}
       {config && caps && <>
-        <section>
-          <h2>Routing</h2>
+        {section === 'general' && <section>
+          <h2>General</h2>
           <label htmlFor="primary">Primary browser</label>
+          <div className="target-select"><BrowserIcon icon={targets.find(({ key }) => key === primaryKey)?.icon} />
           <select id="primary" value={primaryKey} onChange={(event) => {
             const selected = targets.find(({ key }) => key === event.target.value)
             if (selected) updateConfig({ primary: selected.target })
           }}>
             {!knownPrimary && <option value={primaryKey}>Current browser (not detected)</option>}
             {targetOptions(targets)}
-          </select>
+          </select></div>
           <label htmlFor="prompt-mode">Prompt mode</label>
           <select id="prompt-mode" value={config.prompt_mode} onChange={(event) => updateConfig({ prompt_mode: event.target.value as Config['prompt_mode'] })}>
             <option value="never">Never</option>
             <option value="always">Always</option>
           </select>
           <p className="hint">Always shows the picker for every link. Linux has no modifier key mode.</p>
-        </section>
-        <section>
+        </section>}
+        {section === 'browsers' && <section>
           <h2>Shown browsers</h2>
           <p className="hint">Select the targets to show in the picker. No selection shows all targets.</p>
           <div className="checklist">
-            {targets.map(({ key, label }) => <label key={key}>
+            {targets.map(({ key, label, icon }) => <label key={key}>
               <input type="checkbox" aria-label={`Show ${label}`} checked={config.shown_browsers.includes(key)} onChange={(event) => {
                 updateConfig({ shown_browsers: event.target.checked
                   ? [...config.shown_browsers, key]
                   : config.shown_browsers.filter((item) => item !== key) })
               }} />
-              {label}
+              <BrowserIcon icon={icon} />{label}
             </label>)}
             {targets.length === 0 && <p>No browsers detected.</p>}
             {staleShownBrowsers.map((key) => <label key={key}>
@@ -206,14 +261,15 @@ export function SettingsApp() {
               {`Not installed: ${key}`}
             </label>)}
           </div>
-        </section>
-        <section>
-          <div className="section-heading"><h2>Rules</h2><button type="button" onClick={() => setDraft({ ...emptyDraft })}>Add rule</button></div>
+        </section>}
+        {section === 'rules' && <section>
+          <div className="section-heading"><h2>Rules</h2><div className="rule-actions"><button type="button" onClick={() => setDraft({ ...emptyDraft })}>Add rule</button><button type="button" aria-expanded={presetMenu} onClick={() => setPresetMenu(!presetMenu)}>Add preset</button></div></div>
+          {presetMenu && <div className="preset-menu" role="menu" aria-label="Presets">{presets.map((preset) => <button type="button" role="menuitem" key={preset.id} onClick={() => addPreset(preset)}>{preset.name}</button>)}</div>}
           <p className="hint">Rules are checked from top to bottom. The first match wins.</p>
           {!caps.source_app_rules && <p className="hint">Source app rules are unavailable on Linux. Existing source app values are kept when you save.</p>}
           <ol aria-label="Rules" className="rules">
             {config.rules.map((rule, index) => <li key={index}>
-              <div><h3>{rule.name}</h3><p>{rule.match.join(', ')}</p></div>
+              <div><h3>{rule.name}{rule.preset && <> <span className="preset-badge">{rule.preset}</span></>}</h3><p>{rule.match.join(', ')}</p></div>
               <div className="rule-actions">
                 <button type="button" aria-label={`Move ${rule.name} up`} disabled={index === 0} onClick={() => moveRule(index, -1)}>↑</button>
                 <button type="button" aria-label={`Move ${rule.name} down`} disabled={index === config.rules.length - 1} onClick={() => moveRule(index, 1)}>↓</button>
@@ -230,14 +286,30 @@ export function SettingsApp() {
             <textarea id="rule-patterns" rows={4} placeholder={'meet.google.com\n*.company.com'} value={draft.patterns} onChange={(event) => setDraft({ ...draft, patterns: event.target.value })} />
             {caps.source_app_rules && <><label htmlFor="source-apps">Source apps</label><textarea id="source-apps" rows={2} value={draft.sourceApps} onChange={(event) => setDraft({ ...draft, sourceApps: event.target.value })} /></>}
             <label htmlFor="rule-open-in">Open in</label>
+            <div className="target-select"><BrowserIcon icon={targets.find(({ key }) => key === draft.openIn)?.icon} />
             <select id="rule-open-in" value={draft.openIn} onChange={(event) => setDraft({ ...draft, openIn: event.target.value })}>
-              <option value="prompt">Prompt</option>
+              {!draft.preset && <option value="prompt">Prompt</option>}
+              {(!draft.preset || draft.preset === 'teams') && <option value="app:teams">Teams app</option>}
+              {(!draft.preset || draft.preset === 'zoom') && <option value="app:zoom">Zoom app</option>}
               {!openInKnown && <option value={draft.openIn}>Current target (not detected)</option>}
               {targetOptions(targets)}
-            </select>
+            </select></div>
+            {draft.openIn.startsWith('app:') && <>
+              <p className="app-status">{appPreset
+                ? (appPreset.app_installed ? 'App installed' : 'App not found — links will open in the fallback browser')
+                : 'App availability unavailable'}</p>
+              <label htmlFor="rule-fallback">Fallback browser</label>
+              <div className="target-select"><BrowserIcon icon={targets.find(({ key }) => key === draft.fallback)?.icon} />
+                <select id="rule-fallback" value={draft.fallback} onChange={(event) => setDraft({ ...draft, fallback: event.target.value })}>
+                  <option value="">Primary browser</option>
+                  {!fallbackKnown && <option value={draft.fallback}>Current target (not detected)</option>}
+                  {targetOptions(targets)}
+                </select>
+              </div>
+            </>}
             <div className="editor-actions"><button type="button" onClick={commitRule}>Save rule</button><button type="button" onClick={() => setDraft(null)}>Cancel</button></div>
           </div>}
-        </section>
+        </section>}
         <footer><button type="button" className="primary-action" disabled={busy} onClick={() => void save()}>Save settings</button>{saved && <span role="status">Settings saved.</span>}</footer>
       </>}
       {!config && !error && <p>Loading settings…</p>}
