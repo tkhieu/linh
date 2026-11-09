@@ -73,11 +73,12 @@ export function SettingsApp() {
   }, [])
 
   useEffect(() => {
+    if (section !== 'rules') return
     let active = true
     listPresets().then((items) => { if (active) setPresets(items) })
       .catch((reason: unknown) => { if (active) setError(errorMessage(reason)) })
     return () => { active = false }
-  }, [])
+  }, [section])
 
   function updateConfig(patch: Partial<Config>) {
     setConfig((current) => current ? { ...current, ...patch } : current)
@@ -133,10 +134,6 @@ export function SettingsApp() {
     const fallback = targets.find(({ key }) => key === draft.fallback)?.target
       ?? (targetKey(config.primary) === draft.fallback ? config.primary : undefined)
       ?? (previousFallback && targetKey(previousFallback) === draft.fallback ? previousFallback : undefined)
-    if ((draft.preset === 'meet' || draft.preset === 'slack') && !selectedTarget) {
-      setError('Choose a browser target for this preset.')
-      return
-    }
     const openIn: OpenIn = draft.openIn === 'app:teams' || draft.openIn === 'app:zoom'
       ? { app: draft.openIn.slice(4) as 'teams' | 'zoom', ...(fallback ? { fallback } : {}) }
       : draft.openIn === 'prompt' ? 'prompt' : selectedTarget ?? 'prompt'
@@ -288,9 +285,9 @@ export function SettingsApp() {
             <label htmlFor="rule-open-in">Open in</label>
             <div className="target-select"><BrowserIcon icon={targets.find(({ key }) => key === draft.openIn)?.icon} />
             <select id="rule-open-in" value={draft.openIn} onChange={(event) => setDraft({ ...draft, openIn: event.target.value })}>
-              {!draft.preset && <option value="prompt">Prompt</option>}
-              {(!draft.preset || draft.preset === 'teams') && <option value="app:teams">Teams app</option>}
-              {(!draft.preset || draft.preset === 'zoom') && <option value="app:zoom">Zoom app</option>}
+              <option value="prompt">Prompt</option>
+              <option value="app:teams">Teams app</option>
+              <option value="app:zoom">Zoom app</option>
               {!openInKnown && <option value={draft.openIn}>Current target (not detected)</option>}
               {targetOptions(targets)}
             </select></div>
