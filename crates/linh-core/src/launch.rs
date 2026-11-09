@@ -174,11 +174,13 @@ fn build_native_command(
 }
 
 /// Program basenames that interpret their arguments as code rather than
-/// exec-ing a fixed binary. An `Exec=` line that hands the URL field code
-/// to one of these as a bare argument would let an attacker-controlled URL
-/// run as a shell command or script, so such Execs are rejected outright
-/// (`flatpak`, which only ever receives a fixed app id, is deliberately
-/// not in this list).
+/// exec-ing a fixed binary. An `Exec=` line whose program is one of
+/// these is rejected outright, whether or not it uses a URL field code:
+/// the URL is always passed to the interpreter one way or another (as a
+/// bare field-code argument, or, with no field code at all, appended as
+/// the interpreter's last argv), which would let an attacker-controlled
+/// URL run as a shell command or script (`flatpak`, which only ever
+/// receives a fixed app id, is deliberately not in this list).
 const SHELL_INTERPRETERS: [&str; 14] = [
     "sh", "bash", "dash", "zsh", "ksh", "fish", "csh", "tcsh", "env", "python", "python3", "perl",
     "ruby", "node",

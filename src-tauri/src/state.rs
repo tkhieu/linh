@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use linh_core::{Browser, Config, PlatformCaps, Target};
@@ -22,6 +23,10 @@ pub struct AppState {
     /// used to update which one is checked without replacing the tray's
     /// menu object (unsupported once set, on Linux).
     pub primary_items: Mutex<Vec<CheckMenuItem<Wry>>>,
+    /// Memoizes `get_icon`'s result for an icon name/path already looked
+    /// up this session, keyed on the exact argument given (so an
+    /// absolute path and a theme name never collide).
+    pub icon_cache: Mutex<HashMap<String, Option<String>>>,
     /// Serializes every config save (whether a whole-config replacement
     /// from `save_config`, or an in-place `update_config` from the tray)
     /// so two concurrent callers can never leave the in-memory `config`
@@ -64,6 +69,7 @@ impl AppState {
             prompt: PromptState::new(),
             primary_targets: Mutex::new(Vec::new()),
             primary_items: Mutex::new(Vec::new()),
+            icon_cache: Mutex::new(HashMap::new()),
             save_lock: Mutex::new(()),
         }
     }
@@ -98,6 +104,28 @@ impl AppState {
     pub fn persist_config(&self, config: Config) -> Result<(), String> {
         self.update_config(move |current| *current = config)
     }
+
+    /// Builds a minimal `AppState` by hand (not `AppState::init()`, which
+    /// scans the real filesystem and shells out to `xdg-settings`), for
+    /// hermetic unit tests elsewhere in this crate that need a full
+    /// `AppState` (e.g. `routing`'s tests) rather than exercising pure
+    /// logic directly.
+    #[cfg(test)]
+    pub(crate) fn for_test(dirs: Dirs, config: Config, browsers: Vec<Browser>) -> Self {
+        AppState {
+            dirs,
+            caps: PlatformCaps {
+                source_app_rules: false,
+            },
+            config: Mutex::new(config),
+            browsers: Mutex::new(browsers),
+            prompt: PromptState::new(),
+            primary_targets: Mutex::new(Vec::new()),
+            primary_items: Mutex::new(Vec::new()),
+            icon_cache: Mutex::new(HashMap::new()),
+            save_lock: Mutex::new(()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -116,27 +144,19 @@ mod tests {
         root
     }
 
-    /// A minimal `AppState` pointed at a disposable temp dir, built by
-    /// hand (not `AppState::init()`, which scans the real filesystem and
-    /// shells out to `xdg-settings`) so these tests stay hermetic.
+    /// A minimal `AppState` pointed at a disposable temp dir, so these
+    /// tests stay hermetic.
     fn test_state(root: &std::path::Path) -> AppState {
-        AppState {
-            dirs: Dirs {
+        AppState::for_test(
+            Dirs {
                 home: root.join("home"),
                 config_home: root.join("home/.config"),
                 state_home: root.join("home/.local/state"),
                 application_dirs: Vec::new(),
             },
-            caps: PlatformCaps {
-                source_app_rules: false,
-            },
-            config: Mutex::new(Config::default()),
-            browsers: Mutex::new(Vec::new()),
-            prompt: PromptState::new(),
-            primary_targets: Mutex::new(Vec::new()),
-            primary_items: Mutex::new(Vec::new()),
-            save_lock: Mutex::new(()),
-        }
+            Config::default(),
+            Vec::new(),
+        )
     }
 
     fn target(browser: &str) -> Target {
@@ -156,6 +176,7 @@ mod tests {
             cfg.shown_browsers = vec!["chrome".to_string(), "firefox".to_string()];
             cfg.rules.push(Rule {
                 name: "work".to_string(),
+                preset: None,
                 match_patterns: vec!["company.com".to_string()],
                 source_apps: None,
                 open_in: OpenIn::Target(target("firefox")),

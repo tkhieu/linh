@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::config::{Config, OpenIn, PromptMode, Target};
+use crate::config::{AppTarget, Config, OpenIn, PromptMode, Target};
 use crate::matching::pattern_matches;
 
 /// Platform capabilities that affect routing decisions. On Linux,
@@ -15,6 +15,11 @@ pub struct PlatformCaps {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
     Open(Target),
+    /// Resolving this (is the app installed? is the URL convertible for
+    /// it? did it actually launch?) is platform-specific, so it's left
+    /// to the caller — `linh-core` only decides *that* the matching
+    /// rule's destination is an app, not how to open it.
+    OpenApp(AppTarget),
     Prompt,
 }
 
@@ -48,6 +53,7 @@ pub fn decide(config: &Config, url: &Url, caps: PlatformCaps) -> Decision {
             return match &rule.open_in {
                 OpenIn::Prompt => Decision::Prompt,
                 OpenIn::Target(target) => Decision::Open(target.clone()),
+                OpenIn::App(app_target) => Decision::OpenApp(app_target.clone()),
             };
         }
     }
@@ -71,6 +77,7 @@ mod tests {
     fn rule(name: &str, patterns: &[&str], open_in: OpenIn) -> Rule {
         Rule {
             name: name.to_string(),
+            preset: None,
             match_patterns: patterns.iter().map(|s| s.to_string()).collect(),
             source_apps: None,
             open_in,
@@ -132,6 +139,27 @@ mod tests {
             PlatformCaps::default(),
         );
         assert_eq!(decision, Decision::Open(config.primary));
+    }
+
+    #[test]
+    fn rule_can_resolve_to_an_app_target() {
+        let mut config = Config::default();
+        let app_target = AppTarget {
+            app: "teams".to_string(),
+            fallback: Some(target("google-chrome")),
+        };
+        config.rules.push(rule(
+            "teams",
+            &["teams.microsoft.com/l/meetup-join/*"],
+            OpenIn::App(app_target.clone()),
+        ));
+
+        let decision = decide(
+            &config,
+            &url("https://teams.microsoft.com/l/meetup-join/19%3aabc"),
+            PlatformCaps::default(),
+        );
+        assert_eq!(decision, Decision::OpenApp(app_target));
     }
 
     #[test]
