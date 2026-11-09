@@ -194,7 +194,7 @@ describe('SettingsApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Edit Zoom calls' }))
     expect(screen.getByLabelText('Open in')).toHaveValue('app:zoom')
     expect(screen.getByLabelText('Fallback browser')).toHaveValue(targetKey(work))
-    expect(screen.getByText('App not found — links will open in the fallback browser')).toBeInTheDocument()
+    expect(await screen.findByText('App not found — links will open in the fallback browser')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Save rule' }))
     fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
     await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith(expect.objectContaining({ rules: [
@@ -211,11 +211,62 @@ describe('SettingsApp', () => {
     openSection('Rules')
     fireEvent.click(screen.getByRole('button', { name: 'Edit Custom Teams' }))
     expect(screen.getByLabelText('Open in')).toHaveValue('app:teams')
+    expect(screen.getByLabelText('Fallback browser')).toHaveValue(targetKey(work))
     fireEvent.click(screen.getByRole('button', { name: 'Save rule' }))
     fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
     await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith(expect.objectContaining({ rules: [
       { name: 'Custom Teams', match: ['teams.example.com/*'], open_in: { app: 'teams', fallback: work } },
     ] })))
+  })
+
+  it('shows and preserves Prompt on a rule with Teams preset metadata', async () => {
+    const rule = { name: 'Ask for Teams', preset: 'teams' as const, match: ['teams.example.com/*'], open_in: 'prompt' as const }
+    api.getConfig.mockResolvedValue({ ...config, rules: [rule] })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Ask for Teams' }))
+    const destination = screen.getByLabelText('Open in')
+    expect(destination).toHaveValue('prompt')
+    expect(within(destination).getByRole('option', { name: 'Prompt' })).toBeInTheDocument()
+    expect(within(destination).getByRole('option', { name: 'Teams app' })).toBeInTheDocument()
+    expect(within(destination).getByRole('option', { name: 'Zoom app' })).toBeInTheDocument()
+    expect(within(destination).getByRole('option', { name: 'Google Chrome — Work' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Save rule' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
+    await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith(expect.objectContaining({ rules: [rule] })))
+  })
+
+  it('shows and preserves Zoom with fallback on a rule with Teams preset metadata', async () => {
+    const rule = { name: 'Zoom via Teams preset', preset: 'teams' as const, match: ['zoom.example.com/*'], open_in: { app: 'zoom' as const, fallback: work } }
+    api.getConfig.mockResolvedValue({ ...config, rules: [rule] })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Zoom via Teams preset' }))
+    expect(screen.getByLabelText('Open in')).toHaveValue('app:zoom')
+    expect(screen.getByLabelText('Fallback browser')).toHaveValue(targetKey(work))
+    fireEvent.click(screen.getByRole('button', { name: 'Save rule' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
+    await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith(expect.objectContaining({ rules: [rule] })))
+  })
+
+  it('refreshes app installation status each time Rules is opened', async () => {
+    const teams = { id: 'teams', name: 'Microsoft Teams', patterns: ['teams.microsoft.com/meet/*'], app: 'teams' }
+    api.listPresets.mockResolvedValueOnce([{ ...teams, app_installed: true }])
+      .mockResolvedValueOnce([{ ...teams, app_installed: false }])
+    api.getConfig.mockResolvedValue({ ...config, rules: [
+      { name: 'Teams links', preset: 'teams', match: ['teams.example.com/*'], open_in: { app: 'teams' } },
+    ] })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Teams links' }))
+    expect(await screen.findByText('App installed')).toBeInTheDocument()
+    openSection('Browsers')
+    openSection('Rules')
+    expect(await screen.findByText('App not found — links will open in the fallback browser')).toBeInTheDocument()
+    expect(api.listPresets).toHaveBeenCalledTimes(2)
   })
 
   it('renders browser icons and a placeholder for an unavailable icon', async () => {
