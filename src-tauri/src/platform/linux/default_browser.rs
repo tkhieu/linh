@@ -34,8 +34,9 @@ pub fn is_default_browser() -> bool {
 }
 
 /// Compares `id` (as reported by `xdg-settings get default-web-browser`)
-/// against Linh's own desktop id exactly, not case-insensitively: `done
-/// means 3` requires the command to return exactly `linh.desktop`.
+/// against Linh's own desktop id exactly, not case-insensitively:
+/// `xdg-settings` must report exactly `linh.desktop`, matching the
+/// lowercase filename the RPM installs it under.
 fn is_linh_desktop_id(id: &str) -> bool {
     id == desktop_id()
 }
