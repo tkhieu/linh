@@ -59,13 +59,13 @@ describe('PromptApp', () => {
   it('resizes after targets load and after a prompt URL refresh', async () => {
     render(<PromptApp />)
     await screen.findByRole('button', { name: /Google Chrome — Work/ })
-    await waitFor(() => expect(tauriWindow.setSize).toHaveBeenCalledWith({ width: 420, height: 300 }))
+    await waitFor(() => expect(tauriWindow.setSize).toHaveBeenCalledWith({ width: 360, height: 300 }))
     const initialCalls = tauriWindow.setSize.mock.calls.length
 
     api.getConfig.mockResolvedValue(config)
     emit('prompt-url-changed', 'https://example.com/next')
     await screen.findByRole('button', { name: /Firefox \(Private\)/ })
-    await waitFor(() => expect(tauriWindow.setSize).toHaveBeenCalledWith({ width: 420, height: 600 }))
+    await waitFor(() => expect(tauriWindow.setSize).toHaveBeenCalledWith({ width: 360, height: 600 }))
     expect(tauriWindow.setSize.mock.calls.length).toBeGreaterThan(initialCalls)
     await waitFor(() => expect(tauriWindow.center).toHaveBeenCalled())
   })
