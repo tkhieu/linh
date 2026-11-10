@@ -61,12 +61,13 @@ p { margin-top: .5rem; }
 .settings .preset-badge { display: inline-block; margin-left: 5px; padding: 1px 7px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); font-size: .75rem; font-weight: 600; vertical-align: middle; }
 .settings .app-status { color: var(--muted); }
 .settings footer { justify-content: flex-end; margin-top: 20px; }
-.prompt { min-height: 100vh; padding: 24px; background: var(--surface); outline: none; }
+.prompt-page, .prompt-page body, .prompt-page #root { height: 100%; overflow: hidden; background: var(--surface); }
+.prompt { padding: 24px; background: var(--surface); outline: none; }
 .prompt h1 { font-size: 1.3rem; }
 .prompt .pending-url { margin-top: 16px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg); overflow: hidden; }
 .prompt .pending-url strong, .prompt .pending-url span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .prompt .pending-url span { color: var(--muted); font-size: .88rem; margin-top: 2px; }
-.prompt-choices { list-style: none; padding: 0; margin: 18px 0; max-height: 55vh; overflow-y: auto; }
+.prompt-choices { list-style: none; padding: 0; margin: 18px 0; }
 .prompt-choices li + li { margin-top: 6px; }
 .prompt-choices button { display: flex; align-items: center; width: 100%; gap: 14px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); color: var(--text); padding: 13px; text-align: left; font-weight: 600; }
 .prompt-choices button:hover, .prompt-choices button.selected { background: var(--accent-soft); border-color: var(--accent); }

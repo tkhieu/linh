@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
+import { currentMonitor, getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
 import { getConfig, getPromptUrl, listBrowsers, promptCancel, promptChoose } from '../api'
 import type { BrowserTarget } from '../targets'
 import { deriveTargets, visibleTargets } from '../targets'
 import { BrowserIcon } from '../BrowserIcon'
+import { promptSize } from './size'
 
 function urlHost(url: string): string {
   try { return new URL(url).host } catch { return url }
@@ -12,16 +14,51 @@ function urlHost(url: string): string {
 export function PromptApp() {
   const [url, setUrl] = useState<string | null | undefined>(undefined)
   const [targets, setTargets] = useState<BrowserTarget[]>([])
+  const [targetsLoaded, setTargetsLoaded] = useState(false)
   const [selected, setSelected] = useState(0)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const mainRef = useRef<HTMLElement>(null)
+  const listRef = useRef<HTMLOListElement>(null)
   const choices = targets
   // Set once a prompt-url-changed event has applied, so the initial
   // getPromptUrl() result — which can resolve *after* a newer event,
   // since it races the event listener's own async setup — never
   // overwrites it with a stale URL.
   const urlSetByEventRef = useRef(false)
+
+  useLayoutEffect(() => {
+    if (url === undefined || !targetsLoaded) return
+    const main = mainRef.current
+    const list = listRef.current
+    if (!main) return
+    let active = true
+    // Restore the natural list height before measuring a refreshed prompt.
+    if (list) {
+      list.style.maxHeight = ''
+      list.style.overflowY = ''
+    }
+    const contentHeight = main.scrollHeight
+    const listHeight = list?.scrollHeight ?? 0
+    void (async () => {
+      try {
+        const monitor = await currentMonitor()
+        if (!active) return
+        const workAreaHeight = monitor ? monitor.workArea.size.height / monitor.scaleFactor : window.screen.availHeight
+        const size = promptSize(contentHeight, workAreaHeight, listHeight)
+        if (list && size.maxListHeight !== null) {
+          list.style.maxHeight = `${size.maxListHeight}px`
+          list.style.overflowY = 'auto'
+        }
+        const promptWindow = getCurrentWindow()
+        await promptWindow.setSize(new LogicalSize(size.width, size.height))
+        if (active) await promptWindow.center()
+      } catch (reason) {
+        console.error('Failed to size prompt window', reason)
+      }
+    })()
+    return () => { active = false }
+  }, [url, targets, targetsLoaded, error])
 
   useEffect(() => {
     let mounted = true
@@ -44,8 +81,12 @@ export function PromptApp() {
         const [config, browsers] = await Promise.all([getConfig(), listBrowsers()])
         if (!mounted || requestId !== latestTargetsRequest) return
         setTargets(visibleTargets(deriveTargets(browsers), config.shown_browsers))
+        setTargetsLoaded(true)
       } catch (reason) {
-        if (mounted && requestId === latestTargetsRequest) setError(String(reason))
+        if (mounted && requestId === latestTargetsRequest) {
+          setError(String(reason))
+          setTargetsLoaded(true)
+        }
       }
     }
 
@@ -158,7 +199,7 @@ export function PromptApp() {
       {url && <>
         <div className="pending-url" title={url}><strong>{urlHost(url)}</strong><span>{url}</span></div>
         {choices.length === 0 && <p>No browser targets are available.</p>}
-        <ol className="prompt-choices">
+        <ol className="prompt-choices" ref={listRef}>
           {choices.map(({ key, label, icon }, index) => (
             <li key={key}>
               <button

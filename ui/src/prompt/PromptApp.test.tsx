@@ -14,6 +14,19 @@ vi.mock('../api', () => api)
 const tauriEvent = vi.hoisted(() => ({ listen: vi.fn() }))
 vi.mock('@tauri-apps/api/event', () => tauriEvent)
 
+const tauriWindow = vi.hoisted(() => ({
+  currentMonitor: vi.fn(), setSize: vi.fn(), center: vi.fn(),
+}))
+vi.mock('@tauri-apps/api/window', () => ({
+  currentMonitor: tauriWindow.currentMonitor,
+  getCurrentWindow: () => ({ setSize: tauriWindow.setSize, center: tauriWindow.center }),
+  LogicalSize: class {
+    width: number
+    height: number
+    constructor(width: number, height: number) { this.width = width; this.height = height }
+  },
+}))
+
 /** Invokes the handler the component registered for `event`, as the
  * backend's real emit would. */
 function emit(event: string, payload: unknown) {
@@ -32,9 +45,31 @@ beforeEach(() => {
   api.promptChoose.mockResolvedValue(undefined)
   api.promptCancel.mockResolvedValue(undefined)
   api.getIcon.mockResolvedValue(null)
+  tauriWindow.currentMonitor.mockResolvedValue({ workArea: { size: { height: 1000 } }, scaleFactor: 1 })
+  tauriWindow.setSize.mockResolvedValue(undefined)
+  tauriWindow.center.mockResolvedValue(undefined)
+  vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+    if (this.matches('.prompt-choices')) return this.children.length * 60
+    if (this.matches('.prompt')) return 240 + this.querySelectorAll('.prompt-choices li').length * 60
+    return 0
+  })
 })
 
 describe('PromptApp', () => {
+  it('resizes after targets load and after a prompt URL refresh', async () => {
+    render(<PromptApp />)
+    await screen.findByRole('button', { name: /Google Chrome — Work/ })
+    await waitFor(() => expect(tauriWindow.setSize).toHaveBeenCalledWith({ width: 420, height: 300 }))
+    const initialCalls = tauriWindow.setSize.mock.calls.length
+
+    api.getConfig.mockResolvedValue(config)
+    emit('prompt-url-changed', 'https://example.com/next')
+    await screen.findByRole('button', { name: /Firefox \(Private\)/ })
+    await waitFor(() => expect(tauriWindow.setSize).toHaveBeenCalledWith({ width: 420, height: 600 }))
+    expect(tauriWindow.setSize.mock.calls.length).toBeGreaterThan(initialCalls)
+    await waitFor(() => expect(tauriWindow.center).toHaveBeenCalled())
+  })
+
   it('shows the pending URL and chooses a shown target with 1 immediately', async () => {
     render(<PromptApp />)
     // Wait for the choice button itself (not just the URL text) so the
