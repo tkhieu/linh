@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod mem_profile;
 mod platform;
 mod prompt_state;
 mod routing;
@@ -87,6 +88,16 @@ fn main() {
     let process_start = Instant::now();
 
     tauri::Builder::default()
+        .on_page_load(move |webview, payload| {
+            if let Some(state) = webview.try_state::<AppState>() {
+                mem_profile::log_startup_window_ready_if_relevant(
+                    &state.dirs,
+                    process_start,
+                    webview.label(),
+                    payload.event(),
+                );
+            }
+        })
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             // The moment this already-running instance was actually
             // notified of the second launch's argv.
@@ -133,6 +144,8 @@ fn main() {
                     }
                 })
                 .build(app)?;
+
+            mem_profile::spawn_if_enabled(&app_handle, state_handle.dirs.clone());
 
             // First launch: an http(s) URL in argv is routed immediately
             // (the settings window stays hidden, Linh stays resident in
