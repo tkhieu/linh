@@ -279,4 +279,87 @@ describe('SettingsApp', () => {
     expect(screen.getAllByText('◎').length).toBeGreaterThan(0)
     expect(api.getIcon).toHaveBeenCalledTimes(2)
   })
+
+  it('rescan refreshes detected browsers without discarding an unsaved edit', async () => {
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    fireEvent.change(screen.getByLabelText('Primary browser'), { target: { value: targetKey(work) } })
+    openSection('Browsers')
+    const listBrowsersCallsBeforeRescan = api.listBrowsers.mock.calls.length
+    fireEvent.click(screen.getByRole('button', { name: 'Rescan' }))
+    await waitFor(() => expect(api.listBrowsers.mock.calls.length).toBeGreaterThan(listBrowsersCallsBeforeRescan))
+    // getConfig must not be called again by rescan — only the detected
+    // browsers/caps/default-status, never the edited config draft.
+    expect(api.getConfig).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'General' }))
+    expect(screen.getByLabelText('Primary browser')).toHaveValue(targetKey(work))
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
+    await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith(expect.objectContaining({ primary: work })))
+  })
+
+  it('shows the picker step, not route checking, in Current behaviour when prompt mode is Always', async () => {
+    api.getConfig.mockResolvedValue({ ...config, prompt_mode: 'always' })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    expect(screen.getByText('Prompt mode: Always')).toBeInTheDocument()
+    expect(screen.queryByText('Check routes')).not.toBeInTheDocument()
+    expect(screen.queryByText('No match')).not.toBeInTheDocument()
+    expect(screen.getByText('Picker')).toBeInTheDocument()
+  })
+
+  it('test a link shows Picker and skips route evaluation when prompt mode is Always', async () => {
+    api.getConfig.mockResolvedValue({
+      ...config, prompt_mode: 'always',
+      rules: [{ name: 'Meet', match: ['meet.google.com'], open_in: work }],
+    })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    fireEvent.change(screen.getByLabelText('Test a link'), { target: { value: 'https://meet.google.com' } })
+    expect(await screen.findByText('Prompt mode is Always — every link opens the picker, routes are not checked.')).toBeInTheDocument()
+    expect(screen.getByText('prompt mode: always')).toBeInTheDocument()
+    const sidePanel = screen.getByText('Test a link').closest('aside')!
+    expect(within(sidePanel).getByText('Picker')).toBeInTheDocument()
+    expect(within(sidePanel).queryByText('Meet')).not.toBeInTheDocument()
+  })
+
+  it('shows "not a routable link" for a non-http(s) link, and never prefixes https:// onto a bare host', async () => {
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    const input = screen.getByLabelText('Test a link')
+    fireEvent.change(input, { target: { value: 'mailto:foo@bar.com' } })
+    expect(await screen.findByText('Not a routable link — only http:// and https:// links are routed.')).toBeInTheDocument()
+    fireEvent.change(input, { target: { value: 'github.com/owner/repo' } })
+    expect(await screen.findByText('Not a routable link — only http:// and https:// links are routed.')).toBeInTheDocument()
+  })
+
+  it('falls back consistently in the Routes table and Test a link when the Zoom app is not installed', async () => {
+    api.getConfig.mockResolvedValue({ ...config, rules: [{ name: 'Zoom calls', match: ['zoom.us/j/*'], open_in: { app: 'zoom' } }] })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    const routesList = screen.getByRole('list', { name: 'Routes' })
+    const zoomRow = screen.getByText('Zoom calls').closest('li')!
+    expect(within(zoomRow).getByText('Firefox')).toBeInTheDocument()
+    expect(routesList).toContainElement(zoomRow)
+
+    const sidePanel = screen.getByText('Test a link').closest('aside')!
+    fireEvent.change(within(sidePanel).getByLabelText('Test a link'), { target: { value: 'https://zoom.us/j/123456789' } })
+    expect(await within(sidePanel).findByText('Zoom app not installed')).toBeInTheDocument()
+    expect(within(sidePanel).getByText('Firefox')).toBeInTheDocument()
+  })
+
+  it('reports "link not a Zoom meeting" (not app-not-installed) for a non-convertible Zoom url, even when the app is installed', async () => {
+    api.listPresets.mockResolvedValue([
+      { id: 'zoom', name: 'Zoom', patterns: ['zoom.us/j/*'], app: 'zoom', app_installed: true },
+    ])
+    api.getConfig.mockResolvedValue({ ...config, rules: [{ name: 'Zoom calls', match: ['zoom.us/*'], open_in: { app: 'zoom' } }] })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    const sidePanel = screen.getByText('Test a link').closest('aside')!
+    fireEvent.change(within(sidePanel).getByLabelText('Test a link'), { target: { value: 'https://zoom.us/pricing' } })
+    expect(await within(sidePanel).findByText('link not a Zoom meeting')).toBeInTheDocument()
+  })
 })

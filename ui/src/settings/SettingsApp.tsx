@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import { getConfig, getPlatformCaps, isDefaultBrowser, listBrowsers, listPresets, saveConfig, setDefaultBrowser } from '../api'
-import type { Browser, Config, OpenIn, PlatformCaps, Preset, Rule } from '../api'
+import type { Browser, Config, OpenIn, PlatformCaps, Preset, Rule, Target } from '../api'
 import { BrowserIcon } from '../BrowserIcon'
 import { deriveTargets, isAppTarget, targetKey, visibleTargets } from '../targets'
 import type { BrowserTarget } from '../targets'
-import { parseTraceUrl, traceRoute } from '../routing'
-import type { Trace } from '../routing'
+import { parseTraceUrl, resolveAppTarget, traceRoute } from '../routing'
+import type { AppDecision, Trace } from '../routing'
 
 interface RuleDraft {
   index: number | null
@@ -39,20 +39,35 @@ function pad2(n: number): string {
   return String(n).padStart(2, '0')
 }
 
-function capitalize(value: string): string {
-  return value.charAt(0).toUpperCase() + value.slice(1)
-}
-
 function appLabel(app: 'teams' | 'zoom'): string {
   return app === 'teams' ? 'Teams' : 'Zoom'
 }
 
-/** Mirrors the real routing decision's destination for display, so a
- * rule's "Departs to" never disagrees with what it actually does. */
-function destinationLabel(openIn: OpenIn, targets: BrowserTarget[]): string {
-  if (openIn === 'prompt') return 'Ask (picker)'
-  if (isAppTarget(openIn)) return appLabel(openIn.app)
-  return targets.find(({ key }) => key === targetKey(openIn))?.label ?? targetKey(openIn)
+type InstalledApps = Record<'teams' | 'zoom', boolean>
+
+function targetLabel(target: Target, targets: BrowserTarget[]): string {
+  return targets.find(({ key }) => key === targetKey(target))?.label ?? targetKey(target)
+}
+
+function appDecisionReasonText(app: 'teams' | 'zoom', reason: NonNullable<AppDecision['reason']>): string {
+  return reason === 'app-not-installed' ? `${appLabel(app)} app not installed` : 'link not a Zoom meeting'
+}
+
+/** Mirrors the real routing decision's destination for display — including
+ * falling back exactly like src-tauri/src/routing.rs::plan_app_open does
+ * when an app target isn't actually installed — so a rule's "Departs to"
+ * never disagrees with what it actually does. `url` is `null` here (the
+ * static Routes table isn't about any one link), which only affects Zoom:
+ * its per-link convertibility check is skipped, the same way there is
+ * nothing to check it against. */
+function destinationLabel(openIn: OpenIn, targets: BrowserTarget[], primary: Target, installed: InstalledApps): { label: string; reason?: string } {
+  if (openIn === 'prompt') return { label: 'Ask (picker)' }
+  if (isAppTarget(openIn)) {
+    const resolution = resolveAppTarget(openIn, null, primary, installed[openIn.app])
+    if (resolution.launch) return { label: appLabel(openIn.app) }
+    return { label: targetLabel(resolution.fallback, targets), reason: appDecisionReasonText(openIn.app, resolution.reason!) }
+  }
+  return { label: targetLabel(openIn, targets) }
 }
 
 function CheckIcon() {
@@ -224,12 +239,21 @@ export function SettingsApp() {
     }
   }
 
+  /** Refreshes only the detected browsers/capabilities/default-browser
+   * status — never `config`, so an in-progress unsaved edit (a changed
+   * primary browser, a rule draft, a checked box) survives a rescan
+   * untouched, to be saved (or not) on its own terms afterward. */
   async function rescan() {
     if (rescanning) return
     setRescanning(true)
     setError('')
     try {
-      await reload()
+      const [nextBrowsers, nextCaps, isDefault] = await Promise.all([
+        listBrowsers(), getPlatformCaps(), isDefaultBrowser(),
+      ])
+      setBrowsers(nextBrowsers)
+      setCaps(nextCaps)
+      setIsDefault(isDefault)
     } catch (reason) {
       setError(errorMessage(reason))
     } finally {
@@ -247,6 +271,10 @@ export function SettingsApp() {
     : []
   const primaryLabel = config ? targets.find(({ key }) => key === primaryKey)?.label ?? primaryKey : ''
   const visible = config ? visibleTargets(targets, config.shown_browsers) : []
+  const installedApps: InstalledApps = {
+    teams: presets.find(({ app }) => app === 'teams')?.app_installed ?? false,
+    zoom: presets.find(({ app }) => app === 'zoom')?.app_installed ?? false,
+  }
 
   return (
     <main className="settings">
@@ -367,7 +395,7 @@ export function SettingsApp() {
                     <h3 className="primary" style={{ margin: 0, fontWeight: 500, fontSize: 14 }}>{rule.name}{rule.preset && <> <span className="preset-badge">{rule.preset}</span></>}</h3>
                     <p className="secondary" style={{ margin: 0 }}>{rule.match[0]}{rule.match.length > 1 && `  +${rule.match.length - 1}`}</p>
                   </div>
-                  <span className="col-dest">{destinationLabel(rule.open_in, targets)}</span>
+                  <span className="col-dest">{destinationLabel(rule.open_in, targets, config.primary, installedApps).label}</span>
                   <div className="rule-actions">
                     <button type="button" className="secondary" aria-label={`Move ${rule.name} up`} disabled={index === 0} onClick={() => moveRule(index, -1)}>↑</button>
                     <button type="button" className="secondary" aria-label={`Move ${rule.name} down`} disabled={index === config.rules.length - 1} onClick={() => moveRule(index, 1)}>↓</button>
@@ -378,7 +406,7 @@ export function SettingsApp() {
                 <li className="settings-row">
                   <span className="col-no">—</span>
                   <div className="col-main"><p className="primary" style={{ margin: 0 }}>No match</p><p className="secondary" style={{ margin: 0 }}>any other link</p></div>
-                  <span className="col-dest">{config.prompt_mode === 'always' ? 'Ask (picker)' : destinationLabel(config.primary, targets)}</span>
+                  <span className="col-dest">{config.prompt_mode === 'always' ? 'Ask (picker)' : destinationLabel(config.primary, targets, config.primary, installedApps).label}</span>
                 </li>
               </ol>
             </div>
@@ -416,7 +444,7 @@ export function SettingsApp() {
           </>}
         </div>
         <SidePanel section={section} config={config} caps={caps} targets={targets} primaryLabel={primaryLabel} visible={visible}
-          traceInput={traceInput} onTraceInputChange={setTraceInput} />
+          installedApps={installedApps} traceInput={traceInput} onTraceInputChange={setTraceInput} />
       </div>}
       <footer className="settings-footer"><button type="button" className="primary-action" disabled={busy} onClick={() => void save()}>Save settings</button>{saved && <span role="status">Settings saved.</span>}</footer>
     </main>
@@ -430,6 +458,7 @@ interface SidePanelProps {
   targets: BrowserTarget[]
   primaryLabel: string
   visible: BrowserTarget[]
+  installedApps: InstalledApps
   traceInput: string
   onTraceInputChange: (value: string) => void
 }
@@ -437,21 +466,30 @@ interface SidePanelProps {
 /** Every number here is derived live from `config`/`targets`/`caps` (the
  * same data the board already fetched) — never a static mock — so it can
  * never show a destination the real router wouldn't actually pick. */
-function SidePanel({ section, config, caps, targets, primaryLabel, visible, traceInput, onTraceInputChange }: SidePanelProps) {
+function SidePanel({ section, config, caps, targets, primaryLabel, visible, installedApps, traceInput, onTraceInputChange }: SidePanelProps) {
   if (section === 'general') {
     const keysShown = Math.min(visible.length, 9)
+    // routing.rs::decide returns Decision::Prompt immediately when
+    // prompt_mode is Always, before even looking at a rule — so routes
+    // are never checked and "no match" never happens; showing those
+    // steps here would describe a flow that cannot occur.
+    const always = config.prompt_mode === 'always'
     return (
       <aside className="settings-side">
         <p className="eyebrow">Current behaviour</p>
         <div className="settings-side-flow">
           <div className="settings-side-step"><span className="step-no">01</span><span className="step-name">Link clicked</span><span className="step-tag">any app</span></div>
-          <div className="settings-side-step"><span className="step-no">02</span><span className="step-name">Check routes</span><span className="step-tag">{config.rules.length} routes</span></div>
-          <div className="settings-side-step"><span className="step-no">03</span><span className="step-name">No match</span><span className="step-tag">prompt: {capitalize(config.prompt_mode)}</span></div>
+          {always
+            ? <div className="settings-side-step match"><span className="step-no">02</span><span className="step-name">Prompt mode: Always</span><span className="step-tag">picker</span></div>
+            : <>
+              <div className="settings-side-step"><span className="step-no">02</span><span className="step-name">Check routes</span><span className="step-tag">{config.rules.length} routes</span></div>
+              <div className="settings-side-step"><span className="step-no">03</span><span className="step-name">No match</span><span className="step-tag">primary browser</span></div>
+            </>}
         </div>
         <div className="settings-side-spacer" />
         <div className="settings-side-result">
           <p className="eyebrow">Departs to</p>
-          {config.prompt_mode === 'always'
+          {always
             ? <><p className="value">Picker</p><p className="caption">{visible.length} targets shown · keys 1–{keysShown}</p></>
             : <><p className="value">{primaryLabel}</p><p className="caption">opens directly · no prompt</p></>}
         </div>
@@ -484,6 +522,7 @@ function SidePanel({ section, config, caps, targets, primaryLabel, visible, trac
 
   const parsed = parseTraceUrl(traceInput)
   const trace: Trace | null = parsed ? traceRoute(config, caps, parsed.host, parsed.path) : null
+  const display = trace && parsed ? resolveTraceDisplay(trace, parsed, targets, config.primary, installedApps) : null
 
   return (
     <aside className="settings-side">
@@ -491,13 +530,17 @@ function SidePanel({ section, config, caps, targets, primaryLabel, visible, trac
       <div className="settings-side-input">
         <input
           aria-label="Test a link"
-          placeholder="github.com/owner/repo"
+          placeholder="https://github.com/owner/repo"
           value={traceInput}
           onChange={(event) => onTraceInputChange(event.target.value)}
         />
       </div>
-      {!trace && <p className="settings-side-note">{traceInput.trim() ? 'Enter a valid URL.' : 'Enter a URL to see which route it takes.'}</p>}
-      {trace && <>
+      {!trace && (
+        <p className="settings-side-note">
+          {!traceInput.trim() ? 'Enter a URL to see which route it takes.' : 'Not a routable link — only http:// and https:// links are routed.'}
+        </p>
+      )}
+      {trace && display && <>
         <div className="settings-side-flow">
           {trace.decision.kind === 'prompt-always' && <p className="settings-side-note">Prompt mode is Always — every link opens the picker, routes are not checked.</p>}
           {config.rules.length === 0 && trace.decision.kind !== 'prompt-always' && <p className="settings-side-note">No routes defined.</p>}
@@ -512,21 +555,39 @@ function SidePanel({ section, config, caps, targets, primaryLabel, visible, trac
         <div className="settings-side-spacer" />
         <div className="settings-side-result">
           <p className="eyebrow">Departs to</p>
-          {(() => {
-            const d = trace.decision
-            if (d.kind === 'prompt-always' || d.kind === 'prompt') return <p className="value">Picker</p>
-            if (d.kind === 'open-app') return <p className="value">{appLabel(d.app.app)}</p>
-            return <p className="value">{targets.find(({ key }) => key === targetKey(d.target))?.label ?? targetKey(d.target)}</p>
-          })()}
-          <p className="caption">
-            {trace.decision.kind === 'prompt-always'
-              ? 'prompt mode: always'
-              : trace.matchedIndex !== null
-                ? `via route ${pad2(trace.matchedIndex + 1)} · ${parsed?.host}`
-                : `no match · primary browser`}
-          </p>
+          <p className="value">{display.value}</p>
+          <p className="caption">{display.caption}</p>
         </div>
       </>}
     </aside>
   )
+}
+
+interface TraceDisplay {
+  value: string
+  caption: string
+}
+
+/** Turns a raw `Trace` into what the panel shows, resolving an
+ * `open-app` decision the same way `plan_app_open` would actually
+ * decide at launch time (app installed? link convertible for it?) so
+ * this can never show "Teams"/"Zoom" for a link that would really fall
+ * back to a browser. */
+function resolveTraceDisplay(
+  trace: Trace,
+  parsed: { host: string; href: string },
+  targets: BrowserTarget[],
+  primary: Target,
+  installedApps: InstalledApps,
+): TraceDisplay {
+  const viaRoute = trace.matchedIndex !== null ? `via route ${pad2(trace.matchedIndex + 1)} · ${parsed.host}` : 'no match · primary browser'
+  const d = trace.decision
+  if (d.kind === 'prompt-always') return { value: 'Picker', caption: 'prompt mode: always' }
+  if (d.kind === 'prompt') return { value: 'Picker', caption: viaRoute }
+  if (d.kind === 'open-app') {
+    const resolution = resolveAppTarget(d.app, parsed.href, primary, installedApps[d.app.app])
+    if (resolution.launch) return { value: appLabel(d.app.app), caption: viaRoute }
+    return { value: targetLabel(resolution.fallback, targets), caption: appDecisionReasonText(d.app.app, resolution.reason!) }
+  }
+  return { value: targetLabel(d.target, targets), caption: viaRoute }
 }

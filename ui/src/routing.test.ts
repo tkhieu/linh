@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Config } from './api'
-import { parseTraceUrl, patternMatches, traceRoute } from './routing'
+import { parseTraceUrl, patternMatches, resolveAppTarget, traceRoute, zoomAppUrl } from './routing'
 
 const caps = { source_app_rules: false }
 
@@ -50,18 +50,38 @@ describe('parseTraceUrl', () => {
     expect(parseTraceUrl('   ')).toBeNull()
   })
 
-  it('assumes https for a bare host', () => {
-    expect(parseTraceUrl('github.com/HuntingAlice/warmbly-setup')).toEqual({
-      host: 'github.com', path: '/HuntingAlice/warmbly-setup',
+  it('never prefixes https:// onto a bare host, matching url_intake (not routable)', () => {
+    expect(parseTraceUrl('github.com/HuntingAlice/warmbly-setup')).toBeNull()
+  })
+
+  it('respects an explicit http/https scheme', () => {
+    expect(parseTraceUrl('http://example.com/a')).toEqual({
+      host: 'example.com', path: '/a', href: 'http://example.com/a',
+    })
+    expect(parseTraceUrl('https://example.com/a')).toEqual({
+      host: 'example.com', path: '/a', href: 'https://example.com/a',
     })
   })
 
-  it('respects an explicit scheme', () => {
-    expect(parseTraceUrl('http://example.com/a')).toEqual({ host: 'example.com', path: '/a' })
+  it('excludes the port from host, matching Url::host_str()', () => {
+    expect(parseTraceUrl('https://example.com:8443/a')).toEqual({
+      host: 'example.com', path: '/a', href: 'https://example.com:8443/a',
+    })
+  })
+
+  it('lowercases the host', () => {
+    expect(parseTraceUrl('https://EXAMPLE.com/a')?.host).toBe('example.com')
+  })
+
+  it('rejects non-http(s) schemes, matching url_intake::filter_routable_url', () => {
+    expect(parseTraceUrl('mailto:foo@bar.com')).toBeNull()
+    expect(parseTraceUrl('ftp://example.com/file')).toBeNull()
+    expect(parseTraceUrl('file:///etc/passwd')).toBeNull()
   })
 
   it('returns null for unparsable input', () => {
     expect(parseTraceUrl('::not a url::')).toBeNull()
+    expect(parseTraceUrl('not a url')).toBeNull()
   })
 })
 
@@ -148,5 +168,103 @@ describe('traceRoute', () => {
     }
     const trace = traceRoute(config, { source_app_rules: true }, 'example.com', '/')
     expect(trace.decision).toEqual({ kind: 'open', target: { browser: 'chrome', private: false } })
+  })
+})
+
+describe('zoomAppUrl', () => {
+  it('rewrites subdomain host with pwd', () => {
+    expect(zoomAppUrl('https://us02web.zoom.us/j/123456789?pwd=abc'))
+      .toBe('zoommtg://us02web.zoom.us/join?action=join&confno=123456789&pwd=abc')
+  })
+
+  it('rewrites bare domain without pwd', () => {
+    expect(zoomAppUrl('https://zoom.us/j/123456789'))
+      .toBe('zoommtg://zoom.us/join?action=join&confno=123456789')
+  })
+
+  it('preserves pwd value verbatim', () => {
+    expect(zoomAppUrl('https://zoom.us/j/42?pwd=a%2Fb'))
+      .toBe('zoommtg://zoom.us/join?action=join&confno=42&pwd=a%2Fb')
+  })
+
+  it('ignores other query params and keeps pwd', () => {
+    expect(zoomAppUrl('https://zoom.us/j/42?uname=Jane&pwd=xyz'))
+      .toBe('zoommtg://zoom.us/join?action=join&confno=42&pwd=xyz')
+  })
+
+  it('rejects non-zoom host', () => {
+    expect(zoomAppUrl('https://notzoom.us/j/123')).toBeNull()
+  })
+
+  it('rejects a host merely containing zoom.us as a suffix of a label', () => {
+    expect(zoomAppUrl('https://evilzoom.us/j/123')).toBeNull()
+  })
+
+  it('rejects non-digit meeting id', () => {
+    expect(zoomAppUrl('https://zoom.us/j/abc123')).toBeNull()
+  })
+
+  it('rejects empty meeting id', () => {
+    expect(zoomAppUrl('https://zoom.us/j/')).toBeNull()
+  })
+
+  it('rejects non-join path', () => {
+    expect(zoomAppUrl('https://zoom.us/pricing')).toBeNull()
+  })
+
+  it('rejects extra path segments after the id', () => {
+    expect(zoomAppUrl('https://zoom.us/j/123/extra')).toBeNull()
+  })
+
+  it('rejects unparseable url', () => {
+    expect(zoomAppUrl('not a url')).toBeNull()
+  })
+
+  it('rejects non-http scheme', () => {
+    expect(zoomAppUrl('zoommtg://zoom.us/j/123')).toBeNull()
+  })
+})
+
+describe('resolveAppTarget', () => {
+  const primary = { browser: 'firefox', private: false }
+
+  it('teams launches when installed, regardless of url', () => {
+    expect(resolveAppTarget({ app: 'teams' }, 'https://anything.example', primary, true))
+      .toEqual({ launch: true, reason: null, fallback: primary })
+  })
+
+  it('teams falls back when not installed, with no convertibility check at all', () => {
+    expect(resolveAppTarget({ app: 'teams' }, 'https://anything.example', primary, false))
+      .toEqual({ launch: false, reason: 'app-not-installed', fallback: primary })
+  })
+
+  it('zoom launches when installed and the url converts', () => {
+    expect(resolveAppTarget({ app: 'zoom' }, 'https://zoom.us/j/123456789', primary, true))
+      .toEqual({ launch: true, reason: null, fallback: primary })
+  })
+
+  it('zoom falls back with "not-convertible" before even checking installed', () => {
+    expect(resolveAppTarget({ app: 'zoom' }, 'https://zoom.us/pricing', primary, true))
+      .toEqual({ launch: false, reason: 'not-convertible', fallback: primary })
+    expect(resolveAppTarget({ app: 'zoom' }, 'https://zoom.us/pricing', primary, false))
+      .toEqual({ launch: false, reason: 'not-convertible', fallback: primary })
+  })
+
+  it('zoom falls back with "app-not-installed" when the link is convertible but the app is missing', () => {
+    expect(resolveAppTarget({ app: 'zoom' }, 'https://zoom.us/j/123456789', primary, false))
+      .toEqual({ launch: false, reason: 'app-not-installed', fallback: primary })
+  })
+
+  it('uses the rule\'s own fallback over primary when set', () => {
+    const fallback = { browser: 'chrome', private: false }
+    expect(resolveAppTarget({ app: 'teams', fallback }, 'https://x.example', primary, false))
+      .toEqual({ launch: false, reason: 'app-not-installed', fallback })
+  })
+
+  it('with no url context (e.g. the static Routes table), zoom is assumed convertible', () => {
+    expect(resolveAppTarget({ app: 'zoom' }, null, primary, true))
+      .toEqual({ launch: true, reason: null, fallback: primary })
+    expect(resolveAppTarget({ app: 'zoom' }, null, primary, false))
+      .toEqual({ launch: false, reason: 'app-not-installed', fallback: primary })
   })
 })

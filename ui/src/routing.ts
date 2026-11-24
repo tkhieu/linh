@@ -65,19 +65,23 @@ export interface Trace {
   matchedIndex: number | null
 }
 
-/** Parses user input for the test-a-link box into a host/path pair,
- * assuming https when no scheme was typed (matching how a bare domain
- * typed by a person is meant). Returns null for empty/unparsable input. */
-export function parseTraceUrl(raw: string): { host: string; path: string } | null {
+/** Parses user input for the test-a-link box exactly like
+ * `url_intake::filter_routable_url`: must parse as a URL and have an
+ * `http`/`https` scheme, or it's not routable at all — never prefixed
+ * with `https://` (that function never does either), and `host` is the
+ * hostname only (no port), matching `Url::host_str()`. Returns null for
+ * empty input or anything not routable. */
+export function parseTraceUrl(raw: string): { host: string; path: string; href: string } | null {
   const trimmed = raw.trim()
   if (!trimmed) return null
-  const withScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed) ? trimmed : `https://${trimmed}`
+  let url: URL
   try {
-    const url = new URL(withScheme)
-    return { host: url.host, path: url.pathname }
+    url = new URL(trimmed)
   } catch {
     return null
   }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+  return { host: url.hostname, path: url.pathname, href: url.href }
 }
 
 /** Ports routing.rs::decide, but reports every step along the way (not
@@ -121,4 +125,62 @@ function openInToDecision(openIn: OpenIn): TraceDecision {
   if (openIn === 'prompt') return { kind: 'prompt' }
   if (isAppTarget(openIn)) return { kind: 'open-app', app: openIn }
   return { kind: 'open', target: openIn }
+}
+
+/** Ports zoom.rs::zoom_app_url, byte-for-byte: a path-segment split that
+ * mirrors `Url::path_segments()` (the path of an http(s) URL always
+ * starts with '/', so splitting everything after that first slash on
+ * '/' reproduces its iterator, empty trailing segments included), and a
+ * raw (non-percent-decoded) scan of the query string for `pwd=...` so
+ * its value is carried over byte-for-byte rather than risking a
+ * re-encoding mismatch — exactly the reason the Rust side avoids
+ * `query_pairs()` too. */
+export function zoomAppUrl(rawUrl: string): string | null {
+  let url: URL
+  try {
+    url = new URL(rawUrl)
+  } catch {
+    return null
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+
+  const host = url.hostname
+  if (host !== 'zoom.us' && !host.endsWith('.zoom.us')) return null
+
+  const segments = url.pathname.slice(1).split('/')
+  if (segments[0] !== 'j') return null
+  const id = segments[1]
+  if (id === undefined || segments.length > 2) return null
+  if (id.length === 0 || !/^[0-9]+$/.test(id)) return null
+
+  const query = url.search.startsWith('?') ? url.search.slice(1) : null
+  const pwd = query?.split('&').find((pair) => pair.startsWith('pwd=' ))?.slice(4) ?? null
+
+  return `zoommtg://${host}/join?action=join&confno=${id}${pwd !== null ? `&pwd=${pwd}` : ''}`
+}
+
+export type AppDecisionReason = 'app-not-installed' | 'not-convertible'
+
+export interface AppDecision {
+  launch: boolean
+  reason: AppDecisionReason | null
+  fallback: Target
+}
+
+/** Ports src-tauri/src/routing.rs::plan_app_open's pure decision (never
+ * the actual spawn): whether `appTarget`'s app would actually launch for
+ * `url`, and if not, why and what it falls back to. `url` is `null` when
+ * there is no specific link to test against (e.g. the static Routes
+ * table) — Teams has no URL-convertibility check at all (it always
+ * passes the raw URL through), and Zoom's is skipped the same way the
+ * Rust side would have nothing to check against. Checks convertibility
+ * before installed, exactly like `plan_app_open`'s order: a non-Zoom
+ * link never even asks whether the app is there. */
+export function resolveAppTarget(appTarget: AppTarget, url: string | null, primary: Target, installed: boolean): AppDecision {
+  const fallback = appTarget.fallback ?? primary
+  if (appTarget.app === 'zoom' && url !== null && zoomAppUrl(url) === null) {
+    return { launch: false, reason: 'not-convertible', fallback }
+  }
+  if (!installed) return { launch: false, reason: 'app-not-installed', fallback }
+  return { launch: true, reason: null, fallback }
 }
