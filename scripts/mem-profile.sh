@@ -180,7 +180,7 @@ print_snapshot() {
   local -a pids=("$@")
   local pid comm metrics rss pss pss_anon pss_file uss swap_pss
   local total_pss=0 total_pss_anon=0 total_pss_file=0 total_uss=0 total_swap=0
-  local counted=0
+  local counted=0 skipped=0
 
   printf '=== %s ===\n' "$label"
   printf '%-8s %-20s %10s %10s %10s %10s %10s %10s\n' \
@@ -188,6 +188,8 @@ print_snapshot() {
 
   for pid in "${pids[@]}"; do
     if ! metrics="$(process_metrics "$pid")"; then
+      echo "${PROG_NAME}: warning: pid ${pid}'s smaps_rollup is unreadable (process may have exited, or permission denied) — excluded from the total below" >&2
+      skipped=$((skipped + 1))
       continue
     fi
     read -r rss pss pss_anon pss_file uss swap_pss <<<"$metrics"
@@ -206,7 +208,11 @@ print_snapshot() {
     err "no process in the tree had a readable smaps_rollup"
   fi
 
-  printf -- '--- TREE TOTAL (n=%d processes; PSS is the headline, RSS above is per-process only and is never summed) ---\n' "$counted"
+  if [[ "$skipped" -gt 0 ]]; then
+    printf -- '--- TREE TOTAL (n=%d processes, %d SKIPPED — INCOMPLETE; PSS is the headline, RSS above is per-process only and is never summed) ---\n' "$counted" "$skipped"
+  else
+    printf -- '--- TREE TOTAL (n=%d processes; PSS is the headline, RSS above is per-process only and is never summed) ---\n' "$counted"
+  fi
   printf '  PSS       : %s\n' "$(fmt_kb_mib "$total_pss")"
   printf '  PSS_ANON  : %s\n' "$(fmt_kb_mib "$total_pss_anon")"
   printf '  PSS_FILE  : %s\n' "$(fmt_kb_mib "$total_pss_file")"
@@ -221,11 +227,33 @@ print_snapshot() {
   LAST_TOTAL_SWAP="$total_swap"
 }
 
+# Appends one TSV row to $1 (writing the header first if it's new),
+# refusing to write through a symlink (including one planted between an
+# existence check and the actual write, i.e. TOCTOU) or into anything
+# that isn't a plain regular file.
 append_tsv_row() {
   local out_file="$1" label="$2"
-  if [[ ! -s "$out_file" ]]; then
-    printf 'timestamp\tlabel\tpid_count\tpss_kib\tpss_anon_kib\tpss_file_kib\tuss_kib\tswap_pss_kib\n' >"$out_file"
+  local header='timestamp	label	pid_count	pss_kib	pss_anon_kib	pss_file_kib	uss_kib	swap_pss_kib'
+
+  if [[ -e "$out_file" || -L "$out_file" ]]; then
+    [[ ! -L "$out_file" ]] || err "--out refuses to write through a symlink: ${out_file}"
+    [[ -f "$out_file" ]] || err "--out target is not a regular file: ${out_file}"
+    if [[ ! -s "$out_file" ]]; then
+      printf '%s\n' "$header" >"$out_file"
+    fi
+  else
+    # New path: noclobber makes this fail instead of silently following a
+    # symlink (or writing into a file) that appeared at this exact path
+    # between the check above and this write.
+    if ! (
+      set -o noclobber
+      printf '%s\n' "$header" >"$out_file"
+    ) 2>/dev/null; then
+      err "failed to create --out file (it may have appeared concurrently, or the directory isn't writable): ${out_file}"
+    fi
   fi
+
+  [[ -f "$out_file" && ! -L "$out_file" ]] || err "--out refuses to write through a symlink: ${out_file}"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$(date +%s)" "$label" "$LAST_PID_COUNT" "$LAST_TOTAL_PSS" \
     "$LAST_TOTAL_PSS_ANON" "$LAST_TOTAL_PSS_FILE" "$LAST_TOTAL_USS" "$LAST_TOTAL_SWAP" >>"$out_file"

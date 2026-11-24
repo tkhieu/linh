@@ -11,7 +11,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tauri::webview::PageLoadEvent;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use crate::platform::linux::dirs::Dirs;
 use crate::platform::linux::logging;
@@ -21,7 +21,9 @@ const MIN_SAMPLES: u32 = 1;
 const MAX_SAMPLES: u32 = 50;
 const BUILD_TIMEOUT: Duration = Duration::from_secs(10);
 const PAGE_LOAD_TIMEOUT: Duration = Duration::from_secs(15);
-const WEBKIT_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const DESTROYED_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+const PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+const STARTUP_READY_LOG_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Parses `LINH_PROFILE_WEBVIEW`'s value into a validated sample count
 /// (1..=50). `None` for unset, non-numeric, or out-of-range values —
@@ -49,53 +51,117 @@ pub fn stats(mut samples: Vec<u128>) -> Option<(u128, u128, u128)> {
     Some((min, median, max))
 }
 
-/// Tracks which startup windows' "ready" line has already been logged,
-/// so a window that reloads later (it shouldn't, but defensively) never
-/// double-logs. Separated from the Tauri wiring so it's a plain,
-/// testable set operation.
-fn mark_startup_logged_once(logged: &mut HashSet<String>, label: &str) -> bool {
-    logged.insert(label.to_string())
+// --- startup settings/prompt "ready" logging (unconditional, cheap) ---
+
+/// The settings/prompt startup ready times known so far, and whether the
+/// combined line has already been logged (it must fire at most once).
+#[derive(Default)]
+struct StartupReady {
+    settings_ms: Option<u128>,
+    prompt_ms: Option<u128>,
+    logged: bool,
 }
 
-fn startup_logged_registry() -> &'static Mutex<HashSet<String>> {
-    static REGISTRY: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(HashSet::new()))
+fn startup_ready_state() -> &'static Mutex<StartupReady> {
+    static STATE: OnceLock<Mutex<StartupReady>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(StartupReady::default()))
 }
 
-/// Unconditional, cheap: logs how long each of the `settings`/`prompt`
-/// config-declared webviews took (from process start) to finish their
-/// first page load. Tauri has no hook that fires on a config-declared
-/// window's *creation* specifically (they're built before `setup` runs,
-/// outside any closure we control) — `Builder::on_page_load` is the
-/// cheapest signal it does expose, so this reports "ready" (page load
-/// finished) rather than "created". Call from a global `on_page_load`
-/// hook for every webview; it ignores anything that isn't `settings` or
-/// `prompt`, and logs at most once per label.
+/// If logging hasn't happened yet and (`force` or both times are known),
+/// marks it logged and returns the line to log. Pure state transition —
+/// the only side effect is `state.logged`, which is why this is
+/// separated from the timer/event wiring around it.
+fn take_startup_ready_line_if_ready(state: &mut StartupReady, force: bool) -> Option<String> {
+    if state.logged {
+        return None;
+    }
+    let both_known = state.settings_ms.is_some() && state.prompt_ms.is_some();
+    if !both_known && !force {
+        return None;
+    }
+    state.logged = true;
+    Some(format_startup_ready_line(
+        state.settings_ms,
+        state.prompt_ms,
+    ))
+}
+
+fn format_startup_ready_line(settings_ms: Option<u128>, prompt_ms: Option<u128>) -> String {
+    let fmt = |v: Option<u128>| match v {
+        Some(ms) => format!("{ms}ms"),
+        None => "timeout".to_string(),
+    };
+    format!(
+        "webview-create startup ready (process_start->page_load_finished): settings={} prompt={}",
+        fmt(settings_ms),
+        fmt(prompt_ms)
+    )
+}
+
+/// Arms the bounded-wait fallback exactly once (first call wins): if the
+/// combined settings+prompt line still hasn't logged by
+/// `STARTUP_READY_LOG_TIMEOUT` after `process_start`, logs it anyway with
+/// whatever is known, so a webview that never finishes loading doesn't
+/// suppress the line forever.
+fn arm_startup_ready_timeout(dirs: Dirs, process_start: Instant) {
+    static ARMED: OnceLock<()> = OnceLock::new();
+    if ARMED.set(()).is_err() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let elapsed = process_start.elapsed();
+        if elapsed < STARTUP_READY_LOG_TIMEOUT {
+            std::thread::sleep(STARTUP_READY_LOG_TIMEOUT - elapsed);
+        }
+        let line = {
+            let mut state = startup_ready_state().lock().unwrap();
+            take_startup_ready_line_if_ready(&mut state, true)
+        };
+        if let Some(line) = line {
+            logging::log_line(&dirs, &line);
+        }
+    });
+}
+
+/// Unconditional, cheap: logs, exactly once, how long the `settings` and
+/// `prompt` config-declared webviews each took (from process start) to
+/// finish their first page load, combined into a single line. Tauri has
+/// no hook that fires on a config-declared window's *creation*
+/// specifically (they're built before `setup` runs, outside any closure
+/// we control) — `Builder::on_page_load` is the cheapest signal it does
+/// expose, so this reports "ready" (page load finished) rather than
+/// "created". Call from a global `on_page_load` hook for every webview;
+/// it ignores anything that isn't `settings` or `prompt`.
 pub fn log_startup_window_ready_if_relevant(
     dirs: &Dirs,
     process_start: Instant,
     label: &str,
     event: PageLoadEvent,
 ) {
-    if event != PageLoadEvent::Finished {
-        return;
-    }
     if label != "settings" && label != "prompt" {
         return;
     }
-    let mut logged = startup_logged_registry().lock().unwrap();
-    if !mark_startup_logged_once(&mut logged, label) {
+    if event != PageLoadEvent::Finished {
         return;
     }
-    drop(logged);
-    logging::log_line(
-        dirs,
-        &format!(
-            "webview-create startup {label} ready (process_start->page_load_finished {}ms)",
-            process_start.elapsed().as_millis()
-        ),
-    );
+    arm_startup_ready_timeout(dirs.clone(), process_start);
+
+    let ms = process_start.elapsed().as_millis();
+    let line = {
+        let mut state = startup_ready_state().lock().unwrap();
+        if label == "settings" {
+            state.settings_ms.get_or_insert(ms);
+        } else {
+            state.prompt_ms.get_or_insert(ms);
+        }
+        take_startup_ready_line_if_ready(&mut state, false)
+    };
+    if let Some(line) = line {
+        logging::log_line(dirs, &line);
+    }
 }
+
+// --- opt-in cold webview-create profiling -----------------------------
 
 /// If `LINH_PROFILE_WEBVIEW=N` is set to a valid sample count, spawns a
 /// background thread that creates, measures and destroys N throwaway
@@ -118,26 +184,37 @@ fn run_profile(app: &AppHandle, dirs: &Dirs, count: u32) {
 
     let mut build_ms_samples = Vec::with_capacity(count as usize);
     let mut ready_ms_samples = Vec::with_capacity(count as usize);
+    let mut attributed_total: u32 = 0;
+    let mut attributed_exited: u32 = 0;
 
     for index in 0..count {
         match run_one_sample(app, dirs, index) {
-            Ok(sample) => {
+            Ok(outcome) => {
                 logging::log_line(
                     dirs,
                     &format!(
                         "webview-create sample {}/{count} build={}ms ready={}ms",
                         index + 1,
-                        sample.build_ms,
-                        sample.ready_ms
+                        outcome.build_ms,
+                        outcome.ready_ms
                     ),
                 );
-                build_ms_samples.push(sample.build_ms);
-                ready_ms_samples.push(sample.ready_ms);
+                build_ms_samples.push(outcome.build_ms);
+                ready_ms_samples.push(outcome.ready_ms);
+                if outcome.web_process_pid.is_some() {
+                    attributed_total += 1;
+                    if outcome.process_exit_ms.is_some() {
+                        attributed_exited += 1;
+                    }
+                }
             }
             Err(err) => {
                 logging::log_line(
                     dirs,
-                    &format!("webview-create sample {}/{count} failed: {err}", index + 1),
+                    &format!(
+                        "webview-create sample {}/{count} FAILED (excluded from stats): {err}",
+                        index + 1
+                    ),
                 );
             }
         }
@@ -145,6 +222,13 @@ fn run_profile(app: &AppHandle, dirs: &Dirs, count: u32) {
 
     log_stats_line(dirs, "build", &build_ms_samples);
     log_stats_line(dirs, "ready (page load finished)", &ready_ms_samples);
+    logging::log_line(
+        dirs,
+        &format!(
+            "webview-create WebKitWebProcess teardown: {attributed_exited}/{attributed_total} attributable sample(s) exited within {}s",
+            PROCESS_EXIT_TIMEOUT.as_secs()
+        ),
+    );
 }
 
 fn log_stats_line(dirs: &Dirs, label: &str, samples: &[u128]) {
@@ -163,17 +247,25 @@ fn log_stats_line(dirs: &Dirs, label: &str, samples: &[u128]) {
     }
 }
 
-struct Sample {
+struct SampleOutcome {
     build_ms: u128,
     ready_ms: u128,
+    /// This sample's own `WebKitWebProcess` pid, if it could be
+    /// unambiguously attributed (see [`identify_new_webkit_pid`]).
+    web_process_pid: Option<u32>,
+    /// Milliseconds from destroy-scheduled to that pid actually exiting,
+    /// or `None` if it was still running at [`PROCESS_EXIT_TIMEOUT`], or
+    /// if `web_process_pid` itself was never known.
+    process_exit_ms: Option<u128>,
 }
 
 /// Creates one throwaway, hidden `WebviewWindow` loading `prompt.html`,
 /// times `WebviewWindowBuilder::build()` and the wall time until its
-/// first `PageLoadEvent::Finished`, destroys it (`Window::destroy`, not
-/// hide/close), and waits for its `WebKitWebProcess` to actually exit
-/// (best-effort; a timeout here is logged by the caller as part of the
-/// next sample's numbers looking off, not treated as fatal).
+/// first `PageLoadEvent::Finished`, then always destroys it via
+/// [`destroy_and_wait`] — on every exit path, including a build or
+/// page-load timeout, so a throwaway window is never leaked even when a
+/// sample fails. A sample that times out is `Err` (excluded from the
+/// min/median/max stats by the caller), not a zeroed/guessed value.
 ///
 /// Built hidden (`visible(false)`), matching exactly how the real
 /// `settings`/`prompt` windows are created — not shown off-screen, since
@@ -182,18 +274,19 @@ struct Sample {
 /// Linh's own idle baseline already confirms a hidden window's
 /// `WebKitWebProcess` is spawned without ever showing it, so hidden-only
 /// still measures the real creation cost.
-fn run_one_sample(app: &AppHandle, dirs: &Dirs, index: u32) -> Result<Sample, String> {
+fn run_one_sample(app: &AppHandle, dirs: &Dirs, index: u32) -> Result<SampleOutcome, String> {
     let label = format!("linh-mem-profile-{index}");
     let root_pid = std::process::id();
-    let baseline_webkit = count_descendant_webkit_processes(root_pid);
+    let webkit_before = descendant_webkit_pids(root_pid);
 
     let (build_tx, build_rx) = mpsc::channel::<Result<u128, String>>();
     let (ready_tx, ready_rx) = mpsc::channel::<Instant>();
+    let (destroyed_tx, destroyed_rx) = mpsc::channel::<Instant>();
 
     let schedule_start = Instant::now();
     let app_for_build = app.clone();
     let label_for_build = label.clone();
-    app.run_on_main_thread(move || {
+    let scheduled = app.run_on_main_thread(move || {
         let build_start = Instant::now();
         let built = WebviewWindowBuilder::new(
             &app_for_build,
@@ -211,37 +304,183 @@ fn run_one_sample(app: &AppHandle, dirs: &Dirs, index: u32) -> Result<Sample, St
             }
         })
         .build();
+        if let Ok(window) = &built {
+            window.on_window_event(move |event| {
+                if matches!(event, WindowEvent::Destroyed) {
+                    let _ = destroyed_tx.send(Instant::now());
+                }
+            });
+        }
         let build_elapsed_ms = build_start.elapsed().as_millis();
         let _ = build_tx.send(built.map(|_| build_elapsed_ms).map_err(|e| e.to_string()));
-    })
-    .map_err(|e| format!("failed to schedule window build: {e}"))?;
-
-    let build_ms = build_rx
-        .recv_timeout(BUILD_TIMEOUT)
-        .map_err(|_| "timed out waiting for build() to run".to_string())??;
-
-    let ready_at = ready_rx
-        .recv_timeout(PAGE_LOAD_TIMEOUT)
-        .map_err(|_| "timed out waiting for page load to finish".to_string())?;
-    let ready_ms = ready_at.duration_since(schedule_start).as_millis();
-
-    let app_for_destroy = app.clone();
-    let label_for_destroy = label;
-    let _ = app.run_on_main_thread(move || {
-        if let Some(window) = app_for_destroy.get_webview_window(&label_for_destroy) {
-            let _ = window.destroy();
-        }
     });
 
-    if !wait_for_webkit_process_count_at_most(baseline_webkit, root_pid, WEBKIT_TEARDOWN_TIMEOUT) {
+    // Scoped so `?` inside can bail out early while still always falling
+    // through to the unconditional destroy/cleanup step below.
+    let attempt: Result<(u128, u128), String> = (|| {
+        scheduled.map_err(|e| format!("failed to schedule window build: {e}"))?;
+        let build_ms = build_rx
+            .recv_timeout(BUILD_TIMEOUT)
+            .map_err(|_| "timed out waiting for build() to run".to_string())??;
+        let ready_at = ready_rx
+            .recv_timeout(PAGE_LOAD_TIMEOUT)
+            .map_err(|_| "timed out waiting for page load to finish".to_string())?;
+        Ok((
+            build_ms,
+            ready_at.duration_since(schedule_start).as_millis(),
+        ))
+    })();
+
+    // Only attributable once the page has actually finished loading: any
+    // earlier and the process may not exist yet, any later (e.g. after
+    // destroy) and it may already be gone.
+    let web_process_pid = if attempt.is_ok() {
+        identify_new_webkit_pid(root_pid, &webkit_before, dirs, &label)
+    } else {
+        None
+    };
+
+    let process_exit_ms = destroy_and_wait(app, dirs, &label, destroyed_rx, web_process_pid);
+
+    attempt.map(|(build_ms, ready_ms)| SampleOutcome {
+        build_ms,
+        ready_ms,
+        web_process_pid,
+        process_exit_ms,
+    })
+}
+
+/// The single pid present in `after` but not `before`, or `None` if
+/// that's not exactly one (nothing new showed up, or more than one did —
+/// either way, not safely attributable to this one sample).
+fn pick_new_pid(before: &HashSet<u32>, after: &HashSet<u32>) -> Option<u32> {
+    let mut new_pids: Vec<u32> = after.difference(before).copied().collect();
+    if new_pids.len() == 1 {
+        new_pids.pop()
+    } else {
+        None
+    }
+}
+
+/// Diffs the current `WebKitWebProcess` descendants against
+/// `webkit_before` (captured right before this sample's window was
+/// created) and logs + returns the single new one — this sample's own
+/// process. Logs (and returns `None`) if that's ambiguous.
+fn identify_new_webkit_pid(
+    root: u32,
+    webkit_before: &HashSet<u32>,
+    dirs: &Dirs,
+    label: &str,
+) -> Option<u32> {
+    let after = descendant_webkit_pids(root);
+    match pick_new_pid(webkit_before, &after) {
+        Some(pid) => {
+            logging::log_line(
+                dirs,
+                &format!("webview-create {label}: WebKitWebProcess pid={pid}"),
+            );
+            Some(pid)
+        }
+        None => {
+            let new_count = after.difference(webkit_before).count();
+            logging::log_line(
+                dirs,
+                &format!(
+                    "webview-create {label}: {new_count} new WebKitWebProcess pid(s) observed — ambiguous, not attributing teardown to a pid"
+                ),
+            );
+            None
+        }
+    }
+}
+
+/// Destroys the throwaway webview `label` via `Window::destroy` (never
+/// hide/close), on the main thread — logging the scheduling result, the
+/// window lookup, and `destroy()`'s own result — then waits for its
+/// `WindowEvent::Destroyed`, and, if `web_process_pid` was unambiguously
+/// attributed, polls specifically that pid for exit. Always runs, on
+/// every call site/exit path, so a throwaway window is never leaked.
+/// Returns the attributed pid's exit latency (`None` if unattributed, or
+/// attributed but still running after [`PROCESS_EXIT_TIMEOUT`]).
+fn destroy_and_wait(
+    app: &AppHandle,
+    dirs: &Dirs,
+    label: &str,
+    destroyed_rx: mpsc::Receiver<Instant>,
+    web_process_pid: Option<u32>,
+) -> Option<u128> {
+    let destroy_start = Instant::now();
+    let app_for_destroy = app.clone();
+    let label_for_destroy = label.to_string();
+    let dirs_for_destroy = dirs.clone();
+    let scheduled = app.run_on_main_thread(move || {
+        let Some(window) = app_for_destroy.get_webview_window(&label_for_destroy) else {
+            logging::log_line(
+                &dirs_for_destroy,
+                &format!("webview-create {label_for_destroy}: destroy skipped — window not found"),
+            );
+            return;
+        };
+        match window.destroy() {
+            Ok(()) => logging::log_line(
+                &dirs_for_destroy,
+                &format!("webview-create {label_for_destroy}: destroy() called"),
+            ),
+            Err(err) => logging::log_line(
+                &dirs_for_destroy,
+                &format!("webview-create {label_for_destroy}: destroy() failed: {err}"),
+            ),
+        }
+    });
+    if let Err(err) = scheduled {
         logging::log_line(
             dirs,
-            "webview-create: WebKitWebProcess teardown did not settle within timeout",
+            &format!("webview-create {label}: failed to schedule destroy: {err}"),
         );
+        return None;
     }
 
-    Ok(Sample { build_ms, ready_ms })
+    let destroyed_event = match destroyed_rx.recv_timeout(DESTROYED_EVENT_TIMEOUT) {
+        Ok(at) => format!("{}ms", at.duration_since(destroy_start).as_millis()),
+        Err(_) => "timeout".to_string(),
+    };
+
+    let process_exit_ms = web_process_pid.and_then(|pid| {
+        wait_for_pid_exit(pid, PROCESS_EXIT_TIMEOUT).map(|elapsed| elapsed.as_millis())
+    });
+    let process_exit = match (web_process_pid, process_exit_ms) {
+        (None, _) => "n/a (pid unattributed)".to_string(),
+        (Some(_), Some(ms)) => format!("{ms}ms"),
+        (Some(_), None) => "still-running".to_string(),
+    };
+
+    logging::log_line(
+        dirs,
+        &format!(
+            "webview-create {label}: pid={} destroyed_event={destroyed_event} process_exit={process_exit}",
+            web_process_pid
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        ),
+    );
+
+    process_exit_ms
 }
+
+fn wait_for_pid_exit(pid: u32, timeout: Duration) -> Option<Duration> {
+    let start = Instant::now();
+    loop {
+        if !is_webkit_web_process(pid) {
+            return Some(start.elapsed());
+        }
+        if start.elapsed() >= timeout {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+// --- /proc process-tree helpers ----------------------------------------
 
 /// `/proc/<pid>/stat`'s ppid field (4th field, after the possibly
 /// space-containing `(comm)`), for every numeric entry under `/proc`.
@@ -298,25 +537,13 @@ fn is_descendant_of(pid: u32, root: u32, parents: &HashMap<u32, u32>) -> bool {
     false
 }
 
-fn count_descendant_webkit_processes(root: u32) -> usize {
+fn descendant_webkit_pids(root: u32) -> HashSet<u32> {
     let parents = parent_pids();
     parents
         .keys()
-        .filter(|&&pid| is_webkit_web_process(pid) && is_descendant_of(pid, root, &parents))
-        .count()
-}
-
-fn wait_for_webkit_process_count_at_most(target: usize, root: u32, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if count_descendant_webkit_processes(root) <= target {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
+        .copied()
+        .filter(|&pid| is_webkit_web_process(pid) && is_descendant_of(pid, root, &parents))
+        .collect()
 }
 
 #[cfg(test)]
@@ -375,14 +602,6 @@ mod tests {
     }
 
     #[test]
-    fn mark_startup_logged_once_logs_each_label_exactly_once() {
-        let mut logged = HashSet::new();
-        assert!(mark_startup_logged_once(&mut logged, "settings"));
-        assert!(!mark_startup_logged_once(&mut logged, "settings"));
-        assert!(mark_startup_logged_once(&mut logged, "prompt"));
-    }
-
-    #[test]
     fn is_descendant_of_walks_up_the_tree() {
         let mut parents = HashMap::new();
         parents.insert(3u32, 2u32);
@@ -395,5 +614,68 @@ mod tests {
     fn is_descendant_of_unknown_pid_is_false() {
         let parents = HashMap::new();
         assert!(!is_descendant_of(3, 1, &parents));
+    }
+
+    #[test]
+    fn pick_new_pid_exactly_one_new_is_attributed() {
+        let before: HashSet<u32> = [1, 2].into_iter().collect();
+        let after: HashSet<u32> = [1, 2, 3].into_iter().collect();
+        assert_eq!(pick_new_pid(&before, &after), Some(3));
+    }
+
+    #[test]
+    fn pick_new_pid_none_new_is_ambiguous() {
+        let before: HashSet<u32> = [1, 2].into_iter().collect();
+        let after: HashSet<u32> = [1, 2].into_iter().collect();
+        assert_eq!(pick_new_pid(&before, &after), None);
+    }
+
+    #[test]
+    fn pick_new_pid_more_than_one_new_is_ambiguous() {
+        let before: HashSet<u32> = [1].into_iter().collect();
+        let after: HashSet<u32> = [1, 2, 3].into_iter().collect();
+        assert_eq!(pick_new_pid(&before, &after), None);
+    }
+
+    #[test]
+    fn startup_ready_logs_only_once_both_known() {
+        let mut state = StartupReady::default();
+        assert_eq!(take_startup_ready_line_if_ready(&mut state, false), None);
+        state.settings_ms = Some(10);
+        assert_eq!(take_startup_ready_line_if_ready(&mut state, false), None);
+        state.prompt_ms = Some(20);
+        let line = take_startup_ready_line_if_ready(&mut state, false);
+        assert!(line.is_some());
+        assert!(state.logged);
+        // Must never log a second time, even once both are known.
+        assert_eq!(take_startup_ready_line_if_ready(&mut state, false), None);
+    }
+
+    #[test]
+    fn startup_ready_force_logs_with_whatever_is_known() {
+        let mut state = StartupReady {
+            settings_ms: Some(10),
+            ..Default::default()
+        };
+        let line = take_startup_ready_line_if_ready(&mut state, true);
+        assert!(line.unwrap().contains("timeout"));
+        assert!(state.logged);
+    }
+
+    #[test]
+    fn startup_ready_force_after_already_logged_is_a_noop() {
+        let mut state = StartupReady {
+            settings_ms: Some(1),
+            prompt_ms: Some(2),
+            logged: true,
+        };
+        assert_eq!(take_startup_ready_line_if_ready(&mut state, true), None);
+    }
+
+    #[test]
+    fn format_startup_ready_line_reports_timeout_for_the_missing_one() {
+        let line = format_startup_ready_line(Some(10), None);
+        assert!(line.contains("settings=10ms"));
+        assert!(line.contains("prompt=timeout"));
     }
 }

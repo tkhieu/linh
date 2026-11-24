@@ -99,6 +99,30 @@ else
 fi
 check "a second snapshot appends without repeating the TSV header" "$tsv_single_header_ok"
 
+# --- --out refuses to follow a symlink ----------------------------------
+
+symlink_target="${TMP_DIR}/real-target.tsv"
+symlink_path="${TMP_DIR}/via-symlink.tsv"
+: >"$symlink_target"
+ln -s "$symlink_target" "$symlink_path"
+
+if "$MEM_PROFILE" snapshot bad --pid "$$" --out "$symlink_path" >/dev/null 2>"${TMP_DIR}/err_symlink"; then
+  symlink_rejected=1
+else
+  symlink_rejected=0
+fi
+check "--out refuses to write through an existing symlink" "$symlink_rejected"
+
+[[ -s "${TMP_DIR}/err_symlink" ]] && symlink_msg_ok=0 || symlink_msg_ok=1
+check "--out symlink refusal prints a clear error message" "$symlink_msg_ok"
+
+if [[ -s "$symlink_target" ]]; then
+  symlink_target_untouched=1
+else
+  symlink_target_untouched=0
+fi
+check "the symlink's target file is left untouched (empty, not written through)" "$symlink_target_untouched"
+
 # --- error paths ---------------------------------------------------------
 
 if "$MEM_PROFILE" snapshot bad --pid 999999999 >/dev/null 2>"${TMP_DIR}/err1"; then
