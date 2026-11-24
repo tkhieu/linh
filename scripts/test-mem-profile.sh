@@ -81,6 +81,25 @@ header_line="$(head -n1 "$out_file")"
 contains "$header_line" "pss_kib" && tsv_header_ok=0 || tsv_header_ok=1
 check "TSV file has a header row with pss_kib" "$tsv_header_ok"
 
+# The header and a data row must split into the same 8 tab-separated
+# fields — i.e. both use real tab bytes, not a header that only looks
+# tab-separated (a literal "\t" string, or stray whitespace).
+header_field_count="$(awk -F'\t' '{print NF; exit}' "$out_file")"
+if [[ "$header_field_count" -eq 8 ]]; then
+  tsv_header_fields_ok=0
+else
+  tsv_header_fields_ok=1
+fi
+check "TSV header splits into 8 tab-separated fields" "$tsv_header_fields_ok"
+
+row_field_count="$(tail -n1 "$out_file" | awk -F'\t' '{print NF; exit}')"
+if [[ "$row_field_count" -eq 8 ]]; then
+  tsv_row_fields_ok=0
+else
+  tsv_row_fields_ok=1
+fi
+check "TSV data row splits into 8 tab-separated fields" "$tsv_row_fields_ok"
+
 row_count="$(($(wc -l <"$out_file") - 1))"
 if [[ "$row_count" -eq 1 ]]; then
   tsv_row_ok=0

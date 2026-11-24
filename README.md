@@ -75,9 +75,16 @@ at startup), set `LINH_PROFILE_WEBVIEW=N` (1–50) before launching Linh.
 It creates and destroys `N` throwaway hidden webviews after startup and
 logs each sample plus min/median/max to `~/.local/state/linh/linh.log`
 under a `webview-create` prefix. Unset (the default), this does nothing
-extra at all. Linh also always logs a cheap `webview-create startup
-<label> ready` line for the real `settings`/`prompt` windows the first
-time each finishes loading.
+extra at all — no extra thread, no extra window, no extra timer. Linh
+also always logs one cheap, synchronous line once both the real
+`settings` and `prompt` windows have finished their first page load:
+`webview-create startup ready (process_start->page_load_finished):
+settings=<ms> prompt=<ms>`. If one of them never finishes loading, that
+line is simply never logged.
+
+`--out FILE` is meant for a path you own: it refuses to write through an
+existing symlink or non-regular file, but it is not hardened against a
+concurrent attacker racing a symlink into place at that exact path.
 
 ## License
 

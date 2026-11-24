@@ -231,15 +231,21 @@ print_snapshot() {
 # refusing to write through a symlink (including one planted between an
 # existence check and the actual write, i.e. TOCTOU) or into anything
 # that isn't a plain regular file.
+# Writes the TSV header line, with real tab bytes produced by printf's
+# own '\t' escape interpretation (not a literal tab character sitting in
+# the source, which is invisible and fragile to carry around).
+print_tsv_header() {
+  printf 'timestamp\tlabel\tpid_count\tpss_kib\tpss_anon_kib\tpss_file_kib\tuss_kib\tswap_pss_kib\n'
+}
+
 append_tsv_row() {
   local out_file="$1" label="$2"
-  local header='timestamp	label	pid_count	pss_kib	pss_anon_kib	pss_file_kib	uss_kib	swap_pss_kib'
 
   if [[ -e "$out_file" || -L "$out_file" ]]; then
     [[ ! -L "$out_file" ]] || err "--out refuses to write through a symlink: ${out_file}"
     [[ -f "$out_file" ]] || err "--out target is not a regular file: ${out_file}"
     if [[ ! -s "$out_file" ]]; then
-      printf '%s\n' "$header" >"$out_file"
+      print_tsv_header >"$out_file"
     fi
   else
     # New path: noclobber makes this fail instead of silently following a
@@ -247,7 +253,7 @@ append_tsv_row() {
     # between the check above and this write.
     if ! (
       set -o noclobber
-      printf '%s\n' "$header" >"$out_file"
+      print_tsv_header >"$out_file"
     ) 2>/dev/null; then
       err "failed to create --out file (it may have appeared concurrently, or the directory isn't writable): ${out_file}"
     fi
