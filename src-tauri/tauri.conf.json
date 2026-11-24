@@ -12,16 +12,6 @@
   "app": {
     "windows": [
       {
-        "label": "settings",
-        "title": "Linh Settings",
-        "url": "settings.html",
-        "width": 720,
-        "height": 520,
-        "resizable": true,
-        "visible": false,
-        "decorations": true
-      },
-      {
         "label": "prompt",
         "title": "Linh",
         "url": "prompt.html",

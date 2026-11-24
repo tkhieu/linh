@@ -17,6 +17,7 @@ tauri = { version = "2.12", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2.5"
 tauri-plugin-deep-link = "2.6"
 url = "2"
+webkit2gtk = "2"
 
 [[bin]]
 name = "linh"

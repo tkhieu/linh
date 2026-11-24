@@ -76,11 +76,27 @@ It creates and destroys `N` throwaway hidden webviews after startup and
 logs each sample plus min/median/max to `~/.local/state/linh/linh.log`
 under a `webview-create` prefix. Unset (the default), this does nothing
 extra at all — no extra thread, no extra window, no extra timer. Linh
-also always logs one cheap, synchronous line once both the real
-`settings` and `prompt` windows have finished their first page load:
+also always logs one cheap, synchronous line per window once it finishes
+its first page load: `prompt` (created at startup) logs
 `webview-create startup ready (process_start->page_load_finished):
-settings=<ms> prompt=<ms>`. If one of them never finishes loading, that
-line is simply never logged.
+prompt=<ms>`; `settings` is created lazily on first demand (see below)
+and logs `webview-create settings first-open ready
+(create_requested->page_load_finished): settings=<ms>` instead, timed
+from when it was first requested rather than from process start. If a
+window never finishes loading, its line is simply never logged.
+
+## Settings window
+
+`settings` is not created at startup — only `prompt` is. Settings is
+built the first time it's requested (tray "Settings…", or launching Linh
+again with no URL to route) and, on Linux, related to `prompt`'s webview
+(`with_related_view`) so it shares `prompt`'s `WebKitWebProcess` instead
+of spawning a second one. Closing it hides the window rather than
+destroying it, so reopening is instant and no extra process accumulates;
+`Window::destroy()` is never used for it, since wry 0.57.1 keeps a
+window's `WebKitWebProcess` alive past `destroy()` anyway (a reference
+cycle in its IPC handler), so destroying it would free nothing while
+losing the instant-reopen behavior.
 
 `--out FILE` is meant for a path you own: it refuses to write through an
 existing symlink or non-regular file, but it is not hardened against a
