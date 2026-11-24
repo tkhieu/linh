@@ -5,6 +5,7 @@ mod mem_profile;
 mod platform;
 mod prompt_state;
 mod routing;
+mod settings_window;
 mod state;
 mod tray;
 
@@ -73,11 +74,13 @@ fn mark_ready(registry: &mut PendingRegistry) {
 }
 
 /// Routes `args`' first `http`/`https` URL (logged, timed from
-/// `received_at`), or shows the settings window if there is none.
+/// `received_at`), or shows the settings window if there is none —
+/// creating it on demand (see [`settings_window::show_or_create`]) the
+/// first time it's needed.
 fn dispatch_launch(app: &AppHandle, state: &AppState, args: &[String], received_at: Instant) {
     match url_intake::first_routable_url(args) {
         Some(url) => routing::route_url(app, state, &url, received_at),
-        None => routing::show_and_focus(app, "settings"),
+        None => settings_window::show_or_create(app, &state.dirs),
     }
 }
 
@@ -90,7 +93,7 @@ fn main() {
     tauri::Builder::default()
         .on_page_load(move |webview, payload| {
             if let Some(state) = webview.try_state::<AppState>() {
-                mem_profile::log_startup_window_ready_if_relevant(
+                mem_profile::log_window_ready_if_relevant(
                     &state.dirs,
                     process_start,
                     webview.label(),
@@ -138,7 +141,10 @@ fn main() {
                         return;
                     }
                     match id {
-                        "settings" => routing::show_and_focus(app, "settings"),
+                        "settings" => {
+                            let state = app.state::<AppState>();
+                            settings_window::show_or_create(app, &state.dirs);
+                        }
                         "quit" => app.exit(0),
                         _ => {}
                     }
@@ -148,8 +154,9 @@ fn main() {
             mem_profile::spawn_if_enabled(&app_handle, state_handle.dirs.clone());
 
             // First launch: an http(s) URL in argv is routed immediately
-            // (the settings window stays hidden, Linh stays resident in
-            // the tray); otherwise the settings window is shown.
+            // (no window shown, Linh stays resident in the tray);
+            // otherwise the settings window is created (first time) or
+            // shown.
             let args: Vec<String> = std::env::args().collect();
             dispatch_launch(&app_handle, &state_handle, &args, process_start);
 

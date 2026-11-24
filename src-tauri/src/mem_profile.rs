@@ -1,9 +1,10 @@
 //! Opt-in, OFF-by-default instrumentation for the cold WebKit webview
 //! creation cost (`LINH_PROFILE_WEBVIEW`), plus an unconditional, cheap
-//! log line for how long the config-declared `settings`/`prompt`
-//! webviews take to finish their first page load. Both exist only to
-//! gather numbers for tkhieu/linh#15; neither changes default runtime
-//! behavior when the env var is unset.
+//! log line for how long `prompt` (config-declared, created at startup)
+//! and `settings` (created lazily on first demand, see
+//! [`crate::settings_window`]) each take to finish their first page
+//! load. Both exist only to gather numbers for tkhieu/linh#15; neither
+//! changes default runtime behavior when the env var is unset.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
@@ -50,82 +51,101 @@ pub fn stats(mut samples: Vec<u128>) -> Option<(u128, u128, u128)> {
     Some((min, median, max))
 }
 
-// --- startup settings/prompt "ready" logging (unconditional, cheap) ---
+// --- window "ready" logging (unconditional, cheap) ---------------------
 
-/// The settings/prompt startup ready times known so far, and whether the
-/// combined line has already been logged (it must fire at most once).
-/// Updated and read synchronously from inside the global `on_page_load`
-/// hook itself — no background thread or timer, so with
-/// `LINH_PROFILE_WEBVIEW` unset this adds nothing beyond a mutex lock
-/// per page-load event.
+/// The instant Settings' creation was first requested (see
+/// [`record_settings_create_requested`]), set once and read back when its
+/// first page load finishes. `settings` has no config-declared startup
+/// slot anymore — it's built on demand — so unlike `prompt` its "ready"
+/// line can't be timed from `process_start`; it's timed from this instant
+/// instead.
+static SETTINGS_CREATE_REQUESTED: OnceLock<Instant> = OnceLock::new();
+
+/// Records that Settings' creation was just requested, so its first
+/// page-load-finished event (see [`log_window_ready_if_relevant`]) can be
+/// timed from here. Idempotent — only the first call (Settings is only
+/// ever ultimately (re)built once per process, since closing it hides
+/// rather than destroys it) actually sets the instant.
+pub fn record_settings_create_requested(at: Instant) {
+    let _ = SETTINGS_CREATE_REQUESTED.set(at);
+}
+
+/// Whether `prompt`'s and `settings`' ready lines have already been
+/// logged (each must fire at most once). Updated and read synchronously
+/// from inside the global `on_page_load` hook itself — no background
+/// thread or timer, so with `LINH_PROFILE_WEBVIEW` unset this adds
+/// nothing beyond a mutex lock per page-load event.
 #[derive(Default)]
-struct StartupReady {
-    settings_ms: Option<u128>,
-    prompt_ms: Option<u128>,
-    logged: bool,
+struct ReadyLogged {
+    prompt: bool,
+    settings: bool,
 }
 
-fn startup_ready_state() -> &'static Mutex<StartupReady> {
-    static STATE: OnceLock<Mutex<StartupReady>> = OnceLock::new();
-    STATE.get_or_init(|| Mutex::new(StartupReady::default()))
+fn ready_logged_state() -> &'static Mutex<ReadyLogged> {
+    static STATE: OnceLock<Mutex<ReadyLogged>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(ReadyLogged::default()))
 }
 
-/// Records `label`'s ready time (first value wins if it somehow fires
-/// twice) and, once both `settings` and `prompt` are known and this
-/// hasn't logged yet, marks it logged and returns the combined line.
-/// `None` otherwise — including when only one is known, which is
-/// permanent if the other window never finishes loading: there is no
-/// timer to force a line out later, so that line is simply never logged.
-/// Pure state transition, directly unit-testable without any Tauri or
-/// timing types.
-fn record_ready_and_take_line_if_both_known(
-    state: &mut StartupReady,
-    label: &str,
-    ms: u128,
-) -> Option<String> {
-    if label == "settings" {
-        state.settings_ms.get_or_insert(ms);
-    } else {
-        state.prompt_ms.get_or_insert(ms);
+/// The ready line for `label` timed at `ms`, if it hasn't already been
+/// logged (marking it logged as a side effect) — `None` for an unknown
+/// label or a repeat event. Pure state transition, directly
+/// unit-testable without any Tauri or timing types.
+fn record_ready_and_take_line(state: &mut ReadyLogged, label: &str, ms: u128) -> Option<String> {
+    match label {
+        "prompt" => {
+            if state.prompt {
+                return None;
+            }
+            state.prompt = true;
+            Some(format!(
+                "webview-create startup ready (process_start->page_load_finished): prompt={ms}ms"
+            ))
+        }
+        "settings" => {
+            if state.settings {
+                return None;
+            }
+            state.settings = true;
+            Some(format!(
+                "webview-create settings first-open ready (create_requested->page_load_finished): settings={ms}ms"
+            ))
+        }
+        _ => None,
     }
-    if state.logged {
-        return None;
-    }
-    let (Some(settings_ms), Some(prompt_ms)) = (state.settings_ms, state.prompt_ms) else {
-        return None;
-    };
-    state.logged = true;
-    Some(format!(
-        "webview-create startup ready (process_start->page_load_finished): settings={settings_ms}ms prompt={prompt_ms}ms"
-    ))
 }
 
-/// Unconditional, cheap: logs, exactly once, how long the `settings` and
-/// `prompt` config-declared webviews each took (from process start) to
-/// finish their first page load, combined into a single line, written
-/// synchronously from whichever of the two page-load events completes
-/// the pair. Tauri has no hook that fires on a config-declared window's
-/// *creation* specifically (they're built before `setup` runs, outside
-/// any closure we control) — `Builder::on_page_load` is the cheapest
-/// signal it does expose, so this reports "ready" (page load finished)
-/// rather than "created". Call from a global `on_page_load` hook for
-/// every webview; it ignores anything that isn't `settings` or `prompt`.
-pub fn log_startup_window_ready_if_relevant(
+/// Unconditional, cheap: logs, exactly once each, how long `prompt`
+/// (timed from `process_start`) and `settings` (timed from
+/// [`record_settings_create_requested`], since it has no startup slot to
+/// time from) took to finish their first page load. Tauri has no hook
+/// that fires on a window's *creation* specifically — `Builder::
+/// on_page_load` is the cheapest signal it does expose, so this reports
+/// "ready" (page load finished) rather than "created". Call from a
+/// global `on_page_load` hook for every webview; it ignores anything
+/// that isn't `settings` or `prompt`, and ignores `settings` entirely if
+/// its creation was never requested (can't happen in practice, since
+/// `settings_window::create` always calls
+/// [`record_settings_create_requested`] before building the window).
+pub fn log_window_ready_if_relevant(
     dirs: &Dirs,
     process_start: Instant,
     label: &str,
     event: PageLoadEvent,
 ) {
-    if label != "settings" && label != "prompt" {
-        return;
-    }
     if event != PageLoadEvent::Finished {
         return;
     }
-    let ms = process_start.elapsed().as_millis();
+    let ms = match label {
+        "prompt" => process_start.elapsed().as_millis(),
+        "settings" => match SETTINGS_CREATE_REQUESTED.get() {
+            Some(requested_at) => requested_at.elapsed().as_millis(),
+            None => return,
+        },
+        _ => return,
+    };
     let line = {
-        let mut state = startup_ready_state().lock().unwrap();
-        record_ready_and_take_line_if_both_known(&mut state, label, ms)
+        let mut state = ready_logged_state().lock().unwrap();
+        record_ready_and_take_line(&mut state, label, ms)
     };
     if let Some(line) = line {
         logging::log_line(dirs, &line);
@@ -609,53 +629,53 @@ mod tests {
     }
 
     #[test]
-    fn only_one_known_never_logs() {
-        let mut state = StartupReady::default();
-        assert_eq!(
-            record_ready_and_take_line_if_both_known(&mut state, "settings", 10),
-            None
-        );
-        assert!(!state.logged, "must not log until the other one is known");
-    }
-
-    #[test]
-    fn logs_exactly_once_once_both_are_known() {
-        let mut state = StartupReady::default();
-        assert_eq!(
-            record_ready_and_take_line_if_both_known(&mut state, "settings", 10),
-            None
-        );
-        let line = record_ready_and_take_line_if_both_known(&mut state, "prompt", 20);
+    fn prompt_logs_on_first_event() {
+        let mut state = ReadyLogged::default();
+        let line = record_ready_and_take_line(&mut state, "prompt", 20);
         assert_eq!(
             line,
             Some(
-                "webview-create startup ready (process_start->page_load_finished): settings=10ms prompt=20ms"
+                "webview-create startup ready (process_start->page_load_finished): prompt=20ms"
                     .to_string()
             )
         );
-        assert!(state.logged);
+        assert!(state.prompt);
+    }
 
-        // A repeat event for either window afterward must never log again.
+    #[test]
+    fn settings_logs_on_first_event() {
+        let mut state = ReadyLogged::default();
+        let line = record_ready_and_take_line(&mut state, "settings", 42);
         assert_eq!(
-            record_ready_and_take_line_if_both_known(&mut state, "prompt", 99),
+            line,
+            Some(
+                "webview-create settings first-open ready (create_requested->page_load_finished): settings=42ms"
+                    .to_string()
+            )
+        );
+        assert!(state.settings);
+    }
+
+    #[test]
+    fn each_label_logs_at_most_once_independently_of_the_other() {
+        let mut state = ReadyLogged::default();
+        assert!(record_ready_and_take_line(&mut state, "prompt", 10).is_some());
+        // A repeat "prompt" event must never log again...
+        assert_eq!(record_ready_and_take_line(&mut state, "prompt", 99), None);
+        // ...but "settings" is independent and must still log its own
+        // first event.
+        assert!(record_ready_and_take_line(&mut state, "settings", 50).is_some());
+        assert_eq!(
+            record_ready_and_take_line(&mut state, "settings", 999),
             None
         );
     }
 
     #[test]
-    fn first_value_wins_on_a_duplicate_event_for_the_same_label() {
-        let mut state = StartupReady::default();
-        record_ready_and_take_line_if_both_known(&mut state, "settings", 10);
-        // A second, later event for the same label (shouldn't normally
-        // happen, but defensively) must not overwrite the first value.
-        record_ready_and_take_line_if_both_known(&mut state, "settings", 999);
-        let line = record_ready_and_take_line_if_both_known(&mut state, "prompt", 20);
-        assert_eq!(
-            line,
-            Some(
-                "webview-create startup ready (process_start->page_load_finished): settings=10ms prompt=20ms"
-                    .to_string()
-            )
-        );
+    fn unknown_label_never_logs() {
+        let mut state = ReadyLogged::default();
+        assert_eq!(record_ready_and_take_line(&mut state, "other", 10), None);
+        assert!(!state.prompt);
+        assert!(!state.settings);
     }
 }
