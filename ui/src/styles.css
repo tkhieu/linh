@@ -60,8 +60,17 @@ p { margin-top: .5rem; }
 .browser-icon-placeholder { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: 0 0 16px; border-radius: 3px; background: var(--line); color: var(--faint); font-size: 11px; line-height: 1; }
 
 /* ---------- Picker (prompt.html) ---------- */
-.prompt-page, .prompt-page body, .prompt-page #root { height: 100%; overflow: hidden; background: var(--surface); }
-.prompt { background: var(--surface); outline: none; display: flex; flex-direction: column; }
+/* The prompt window is transparent (tauri.conf.json) so the card below
+   can have rounded corners with nothing square showing past them — no
+   drop shadow, and no margin reserved for one: the window edge is the
+   card edge. Settings is a normal opaque, decorated window and is
+   untouched. */
+.prompt-page, .prompt-page body, .prompt-page #root { height: 100%; overflow: hidden; background: transparent; }
+.prompt, .prompt:focus, .prompt:focus-visible {
+  background: var(--surface); display: flex; flex-direction: column;
+  border-radius: 8px; overflow: hidden;
+  outline: 1px solid var(--control-border); outline-offset: -0.5px;
+}
 .prompt-incoming { background: var(--panel-bg); color: var(--panel-ink); padding: 20px 24px; display: flex; flex-direction: column; gap: 8px; }
 .prompt-incoming .eyebrow { color: var(--panel-faint); }
 .prompt-host { font: 700 20px/1.1 var(--font-display); letter-spacing: -.3px; color: var(--panel-ink); margin: 0; overflow-wrap: anywhere; }

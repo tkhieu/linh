@@ -213,4 +213,16 @@ describe('PromptApp', () => {
     expect(document.querySelectorAll('.prompt .browser-icon-placeholder')).toHaveLength(2)
     expect(api.getIcon).toHaveBeenCalledTimes(2)
   })
+
+  it('renders the rounded card as the sole mounted element, so nothing outside it can add to the measured height', async () => {
+    const { container } = render(<PromptApp />)
+    await screen.findByRole('button', { name: /Google Chrome — Work/ })
+    // The window is sized from this element's own scrollHeight (see the
+    // useLayoutEffect above); a wrapper sibling or extra ancestor here
+    // would silently throw that measurement off by its own height, and
+    // since the window is now transparent with the card's own rounded
+    // corners/outline, it would also show as a visible gap past the card.
+    expect(container.children).toHaveLength(1)
+    expect(container.firstElementChild).toHaveClass('prompt')
+  })
 })

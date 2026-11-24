@@ -19,6 +19,7 @@
         "height": 400,
         "resizable": false,
         "decorations": false,
+        "transparent": true,
         "visible": false,
         "center": true,
         "alwaysOnTop": true,
