@@ -334,19 +334,73 @@ describe('SettingsApp', () => {
     expect(await screen.findByText('Not a routable link — only http:// and https:// links are routed.')).toBeInTheDocument()
   })
 
-  it('falls back consistently in the Routes table and Test a link when the Zoom app is not installed', async () => {
+  it('falls back consistently in the Routes table and Test a link once the Zoom app is confirmed not installed', async () => {
     api.getConfig.mockResolvedValue({ ...config, rules: [{ name: 'Zoom calls', match: ['zoom.us/j/*'], open_in: { app: 'zoom' } }] })
     render(<SettingsApp />)
     await screen.findByLabelText('Primary browser')
     openSection('Rules')
     const routesList = screen.getByRole('list', { name: 'Routes' })
     const zoomRow = screen.getByText('Zoom calls').closest('li')!
-    expect(within(zoomRow).getByText('Firefox')).toBeInTheDocument()
+    // listPresets() is still in flight: shows the app itself with a
+    // neutral note, never a guessed fallback.
+    expect(within(zoomRow).getByText('checking…')).toBeInTheDocument()
+    expect(within(zoomRow).queryByText('Firefox')).not.toBeInTheDocument()
+    await waitFor(() => expect(within(zoomRow).getByText('Firefox')).toBeInTheDocument())
     expect(routesList).toContainElement(zoomRow)
 
     const sidePanel = screen.getByText('Test a link').closest('aside')!
     fireEvent.change(within(sidePanel).getByLabelText('Test a link'), { target: { value: 'https://zoom.us/j/123456789' } })
     expect(await within(sidePanel).findByText('Zoom app not installed')).toBeInTheDocument()
+    expect(within(sidePanel).getByText('Firefox')).toBeInTheDocument()
+  })
+
+  it('shows the app itself with a neutral note (never a guessed fallback) while availability is unknown, in both panels', async () => {
+    let resolvePresets: ((value: Awaited<ReturnType<typeof api.listPresets>>) => void) | undefined
+    api.listPresets.mockImplementation(() => new Promise((resolve) => { resolvePresets = resolve }))
+    api.getConfig.mockResolvedValue({ ...config, rules: [{ name: 'Teams calls', match: ['teams.example.com/*'], open_in: { app: 'teams' } }] })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    const zoomRow = screen.getByText('Teams calls').closest('li')!
+    expect(within(zoomRow).getByText('Teams')).toBeInTheDocument()
+    expect(within(zoomRow).getByText('checking…')).toBeInTheDocument()
+
+    const sidePanel = screen.getByText('Test a link').closest('aside')!
+    fireEvent.change(within(sidePanel).getByLabelText('Test a link'), { target: { value: 'https://teams.example.com/meet' } })
+    expect(await within(sidePanel).findByText('checking…')).toBeInTheDocument()
+    expect(within(sidePanel).getByText('Teams')).toBeInTheDocument()
+
+    resolvePresets?.([{ id: 'teams', name: 'Microsoft Teams', patterns: ['teams.example.com/*'], app: 'teams', app_installed: true }])
+    await waitFor(() => expect(within(zoomRow).queryByText('checking…')).not.toBeInTheDocument())
+    expect(within(zoomRow).getByText('Teams')).toBeInTheDocument()
+  })
+
+  it('shows "app availability unknown" (not a guessed fallback) when listPresets() fails', async () => {
+    api.listPresets.mockRejectedValue('network error')
+    api.getConfig.mockResolvedValue({ ...config, rules: [{ name: 'Zoom calls', match: ['zoom.us/j/*'], open_in: { app: 'zoom' } }] })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    const zoomRow = screen.getByText('Zoom calls').closest('li')!
+    await waitFor(() => expect(within(zoomRow).getByText('app availability unknown')).toBeInTheDocument())
+    expect(within(zoomRow).getByText('Zoom')).toBeInTheDocument()
+    expect(within(zoomRow).queryByText('Firefox')).not.toBeInTheDocument()
+
+    const sidePanel = screen.getByText('Test a link').closest('aside')!
+    fireEvent.change(within(sidePanel).getByLabelText('Test a link'), { target: { value: 'https://zoom.us/j/123456789' } })
+    expect(await within(sidePanel).findByText('app availability unknown')).toBeInTheDocument()
+    expect(within(sidePanel).getByText('Zoom')).toBeInTheDocument()
+  })
+
+  it('still falls back for a non-convertible Zoom link while availability is unknown — that part is a url fact', async () => {
+    api.listPresets.mockImplementation(() => new Promise(() => { /* never resolves */ }))
+    api.getConfig.mockResolvedValue({ ...config, rules: [{ name: 'Zoom calls', match: ['zoom.us/*'], open_in: { app: 'zoom' } }] })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    const sidePanel = screen.getByText('Test a link').closest('aside')!
+    fireEvent.change(within(sidePanel).getByLabelText('Test a link'), { target: { value: 'https://zoom.us/pricing' } })
+    expect(await within(sidePanel).findByText('link not a Zoom meeting')).toBeInTheDocument()
     expect(within(sidePanel).getByText('Firefox')).toBeInTheDocument()
   })
 

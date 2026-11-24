@@ -5,7 +5,7 @@ import { BrowserIcon } from '../BrowserIcon'
 import { deriveTargets, isAppTarget, targetKey, visibleTargets } from '../targets'
 import type { BrowserTarget } from '../targets'
 import { parseTraceUrl, resolveAppTarget, traceRoute } from '../routing'
-import type { AppDecision, Trace } from '../routing'
+import type { AppAvailability, AppDecision, Trace } from '../routing'
 
 interface RuleDraft {
   index: number | null
@@ -43,7 +43,12 @@ function appLabel(app: 'teams' | 'zoom'): string {
   return app === 'teams' ? 'Teams' : 'Zoom'
 }
 
-type InstalledApps = Record<'teams' | 'zoom', boolean>
+type InstalledApps = Record<'teams' | 'zoom', AppAvailability>
+
+/** Whether `listPresets()` (the source of `app_installed`) has settled
+ * yet — while it's loading, or if it failed, availability is 'unknown',
+ * never guessed as installed or missing. */
+type PresetsStatus = 'loading' | 'loaded' | 'error'
 
 function targetLabel(target: Target, targets: BrowserTarget[]): string {
   return targets.find(({ key }) => key === targetKey(target))?.label ?? targetKey(target)
@@ -53,18 +58,31 @@ function appDecisionReasonText(app: 'teams' | 'zoom', reason: NonNullable<AppDec
   return reason === 'app-not-installed' ? `${appLabel(app)} app not installed` : 'link not a Zoom meeting'
 }
 
+/** The note to show for an app destination whose availability isn't
+ * known yet — never presented as if it were the real answer. */
+function uncertainAvailabilityNote(presetsStatus: PresetsStatus): string {
+  return presetsStatus === 'error' ? 'app availability unknown' : 'checking…'
+}
+
 /** Mirrors the real routing decision's destination for display — including
  * falling back exactly like src-tauri/src/routing.rs::plan_app_open does
  * when an app target isn't actually installed — so a rule's "Departs to"
  * never disagrees with what it actually does. `url` is `null` here (the
  * static Routes table isn't about any one link), which only affects Zoom:
  * its per-link convertibility check is skipped, the same way there is
- * nothing to check it against. */
-function destinationLabel(openIn: OpenIn, targets: BrowserTarget[], primary: Target, installed: InstalledApps): { label: string; reason?: string } {
+ * nothing to check it against. While availability is still `'unknown'`
+ * (`listPresets()` hasn't resolved, or failed), this shows the app itself
+ * with a neutral note rather than guessing the fallback as the answer —
+ * except a non-convertible Zoom link, which falls back regardless, since
+ * that part is a fact about the URL, not about availability. */
+function destinationLabel(
+  openIn: OpenIn, targets: BrowserTarget[], primary: Target, installed: InstalledApps, presetsStatus: PresetsStatus,
+): { label: string; reason?: string } {
   if (openIn === 'prompt') return { label: 'Ask (picker)' }
   if (isAppTarget(openIn)) {
     const resolution = resolveAppTarget(openIn, null, primary, installed[openIn.app])
-    if (resolution.launch) return { label: appLabel(openIn.app) }
+    if (resolution.launch === true) return { label: appLabel(openIn.app) }
+    if (resolution.launch === 'unknown') return { label: appLabel(openIn.app), reason: uncertainAvailabilityNote(presetsStatus) }
     return { label: targetLabel(resolution.fallback, targets), reason: appDecisionReasonText(openIn.app, resolution.reason!) }
   }
   return { label: targetLabel(openIn, targets) }
@@ -89,6 +107,7 @@ export function SettingsApp() {
   const [draft, setDraft] = useState<RuleDraft | null>(null)
   const [section, setSection] = useState<'general' | 'browsers' | 'rules'>('general')
   const [presets, setPresets] = useState<Preset[]>([])
+  const [presetsStatus, setPresetsStatus] = useState<PresetsStatus>('loading')
   const [presetMenu, setPresetMenu] = useState(false)
   const [traceInput, setTraceInput] = useState('')
   const targets = useMemo(() => deriveTargets(browsers), [browsers])
@@ -120,8 +139,16 @@ export function SettingsApp() {
   useEffect(() => {
     if (section !== 'rules') return
     let active = true
-    listPresets().then((items) => { if (active) setPresets(items) })
-      .catch((reason: unknown) => { if (active) setError(errorMessage(reason)) })
+    setPresetsStatus('loading')
+    listPresets().then((items) => {
+      if (!active) return
+      setPresets(items)
+      setPresetsStatus('loaded')
+    }).catch((reason: unknown) => {
+      if (!active) return
+      setError(errorMessage(reason))
+      setPresetsStatus('error')
+    })
     return () => { active = false }
   }, [section])
 
@@ -271,10 +298,13 @@ export function SettingsApp() {
     : []
   const primaryLabel = config ? targets.find(({ key }) => key === primaryKey)?.label ?? primaryKey : ''
   const visible = config ? visibleTargets(targets, config.shown_browsers) : []
-  const installedApps: InstalledApps = {
-    teams: presets.find(({ app }) => app === 'teams')?.app_installed ?? false,
-    zoom: presets.find(({ app }) => app === 'zoom')?.app_installed ?? false,
+  const appAvailability = (app: 'teams' | 'zoom'): AppAvailability => {
+    if (presetsStatus !== 'loaded') return 'unknown'
+    const preset = presets.find((item) => item.app === app)
+    if (!preset) return 'unknown'
+    return preset.app_installed ? 'installed' : 'missing'
   }
+  const installedApps: InstalledApps = { teams: appAvailability('teams'), zoom: appAvailability('zoom') }
 
   return (
     <main className="settings">
@@ -395,7 +425,10 @@ export function SettingsApp() {
                     <h3 className="primary" style={{ margin: 0, fontWeight: 500, fontSize: 14 }}>{rule.name}{rule.preset && <> <span className="preset-badge">{rule.preset}</span></>}</h3>
                     <p className="secondary" style={{ margin: 0 }}>{rule.match[0]}{rule.match.length > 1 && `  +${rule.match.length - 1}`}</p>
                   </div>
-                  <span className="col-dest">{destinationLabel(rule.open_in, targets, config.primary, installedApps).label}</span>
+                  <span className="col-dest">{(() => {
+                    const dest = destinationLabel(rule.open_in, targets, config.primary, installedApps, presetsStatus)
+                    return <><span>{dest.label}</span>{dest.reason && <> · <span className="hint">{dest.reason}</span></>}</>
+                  })()}</span>
                   <div className="rule-actions">
                     <button type="button" className="secondary" aria-label={`Move ${rule.name} up`} disabled={index === 0} onClick={() => moveRule(index, -1)}>↑</button>
                     <button type="button" className="secondary" aria-label={`Move ${rule.name} down`} disabled={index === config.rules.length - 1} onClick={() => moveRule(index, 1)}>↓</button>
@@ -406,7 +439,7 @@ export function SettingsApp() {
                 <li className="settings-row">
                   <span className="col-no">—</span>
                   <div className="col-main"><p className="primary" style={{ margin: 0 }}>No match</p><p className="secondary" style={{ margin: 0 }}>any other link</p></div>
-                  <span className="col-dest">{config.prompt_mode === 'always' ? 'Ask (picker)' : destinationLabel(config.primary, targets, config.primary, installedApps).label}</span>
+                  <span className="col-dest">{config.prompt_mode === 'always' ? 'Ask (picker)' : destinationLabel(config.primary, targets, config.primary, installedApps, presetsStatus).label}</span>
                 </li>
               </ol>
             </div>
@@ -444,7 +477,7 @@ export function SettingsApp() {
           </>}
         </div>
         <SidePanel section={section} config={config} caps={caps} targets={targets} primaryLabel={primaryLabel} visible={visible}
-          installedApps={installedApps} traceInput={traceInput} onTraceInputChange={setTraceInput} />
+          installedApps={installedApps} presetsStatus={presetsStatus} traceInput={traceInput} onTraceInputChange={setTraceInput} />
       </div>}
       <footer className="settings-footer"><button type="button" className="primary-action" disabled={busy} onClick={() => void save()}>Save settings</button>{saved && <span role="status">Settings saved.</span>}</footer>
     </main>
@@ -459,6 +492,7 @@ interface SidePanelProps {
   primaryLabel: string
   visible: BrowserTarget[]
   installedApps: InstalledApps
+  presetsStatus: PresetsStatus
   traceInput: string
   onTraceInputChange: (value: string) => void
 }
@@ -466,7 +500,7 @@ interface SidePanelProps {
 /** Every number here is derived live from `config`/`targets`/`caps` (the
  * same data the board already fetched) — never a static mock — so it can
  * never show a destination the real router wouldn't actually pick. */
-function SidePanel({ section, config, caps, targets, primaryLabel, visible, installedApps, traceInput, onTraceInputChange }: SidePanelProps) {
+function SidePanel({ section, config, caps, targets, primaryLabel, visible, installedApps, presetsStatus, traceInput, onTraceInputChange }: SidePanelProps) {
   if (section === 'general') {
     const keysShown = Math.min(visible.length, 9)
     // routing.rs::decide returns Decision::Prompt immediately when
@@ -522,7 +556,7 @@ function SidePanel({ section, config, caps, targets, primaryLabel, visible, inst
 
   const parsed = parseTraceUrl(traceInput)
   const trace: Trace | null = parsed ? traceRoute(config, caps, parsed.host, parsed.path) : null
-  const display = trace && parsed ? resolveTraceDisplay(trace, parsed, targets, config.primary, installedApps) : null
+  const display = trace && parsed ? resolveTraceDisplay(trace, parsed, targets, config.primary, installedApps, presetsStatus) : null
 
   return (
     <aside className="settings-side">
@@ -579,6 +613,7 @@ function resolveTraceDisplay(
   targets: BrowserTarget[],
   primary: Target,
   installedApps: InstalledApps,
+  presetsStatus: PresetsStatus,
 ): TraceDisplay {
   const viaRoute = trace.matchedIndex !== null ? `via route ${pad2(trace.matchedIndex + 1)} · ${parsed.host}` : 'no match · primary browser'
   const d = trace.decision
@@ -586,7 +621,8 @@ function resolveTraceDisplay(
   if (d.kind === 'prompt') return { value: 'Picker', caption: viaRoute }
   if (d.kind === 'open-app') {
     const resolution = resolveAppTarget(d.app, parsed.href, primary, installedApps[d.app.app])
-    if (resolution.launch) return { value: appLabel(d.app.app), caption: viaRoute }
+    if (resolution.launch === true) return { value: appLabel(d.app.app), caption: viaRoute }
+    if (resolution.launch === 'unknown') return { value: appLabel(d.app.app), caption: uncertainAvailabilityNote(presetsStatus) }
     return { value: targetLabel(resolution.fallback, targets), caption: appDecisionReasonText(d.app.app, resolution.reason!) }
   }
   return { value: targetLabel(d.target, targets), caption: viaRoute }

@@ -79,12 +79,14 @@ p { margin-top: .5rem; }
 .prompt-url { font: 400 12px/1.4 var(--font-mono); color: var(--panel-faint); overflow-wrap: anywhere; }
 .prompt-body { padding: 0 24px; }
 .prompt-empty, .prompt-loading { padding: 20px 24px; color: var(--muted); }
-/* The card's own 24px horizontal inset is split 14px (this wrapper) +
-   10px (each row's own padding below), matching picker.html — not just
-   a flat 24px on every row — so the highlighted/hovered background can
-   bleed slightly wider under the row content than the head labels. */
-.prompt-targets { padding: 8px 14px 0; }
-.prompt-head-row { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 1px solid var(--line-strong); padding: 8px 10px; }
+/* Per picker.html: this wrapper keeps the card's full 24px horizontal
+   inset (matching the head row's labels and the 372px row width), and
+   each choice row adds its own 10px on top — so a row's highlighted
+   background (painted by the button itself, unrestricted by its own
+   padding) starts flush with this wrapper's edge at 24px, while the
+   icon/label content inside sits 10px further in, at 34px. */
+.prompt-targets { padding: 8px 24px 0; }
+.prompt-head-row { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 1px solid var(--line-strong); padding: 8px 0; }
 .prompt-choices { list-style: none; padding: 0; margin: 0; }
 .prompt-choices li { border-bottom: 1px solid var(--line); }
 .prompt-choices li:last-child { border-bottom: 0; }

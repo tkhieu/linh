@@ -161,8 +161,16 @@ export function zoomAppUrl(rawUrl: string): string | null {
 
 export type AppDecisionReason = 'app-not-installed' | 'not-convertible'
 
+/** Whether `app_installed` for an app is known yet: `listPresets()`
+ * starts empty and resolves asynchronously, and can fail — "not yet
+ * loaded" and "failed to load" both mean the same thing here, that we
+ * genuinely don't know, not that the app is missing. */
+export type AppAvailability = 'installed' | 'missing' | 'unknown'
+
 export interface AppDecision {
-  launch: boolean
+  /** `'unknown'` means exactly that — availability hasn't been
+   * determined, so this is not a claim that it will or won't launch. */
+  launch: boolean | 'unknown'
   reason: AppDecisionReason | null
   fallback: Target
 }
@@ -174,13 +182,18 @@ export interface AppDecision {
  * table) — Teams has no URL-convertibility check at all (it always
  * passes the raw URL through), and Zoom's is skipped the same way the
  * Rust side would have nothing to check against. Checks convertibility
- * before installed, exactly like `plan_app_open`'s order: a non-Zoom
- * link never even asks whether the app is there. */
-export function resolveAppTarget(appTarget: AppTarget, url: string | null, primary: Target, installed: boolean): AppDecision {
+ * before availability, exactly like `plan_app_open`'s order: a
+ * not-convertible Zoom link falls back regardless of whether the app's
+ * installed state is even known yet — that part is a pure fact about
+ * the URL, not a guess. Only once convertibility is settled does an
+ * `'unknown'` availability itself become the answer, rather than
+ * guessing `true` or `false` for it. */
+export function resolveAppTarget(appTarget: AppTarget, url: string | null, primary: Target, availability: AppAvailability): AppDecision {
   const fallback = appTarget.fallback ?? primary
   if (appTarget.app === 'zoom' && url !== null && zoomAppUrl(url) === null) {
     return { launch: false, reason: 'not-convertible', fallback }
   }
-  if (!installed) return { launch: false, reason: 'app-not-installed', fallback }
+  if (availability === 'unknown') return { launch: 'unknown', reason: null, fallback }
+  if (availability === 'missing') return { launch: false, reason: 'app-not-installed', fallback }
   return { launch: true, reason: null, fallback }
 }

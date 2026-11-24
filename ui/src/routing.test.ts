@@ -229,42 +229,56 @@ describe('resolveAppTarget', () => {
   const primary = { browser: 'firefox', private: false }
 
   it('teams launches when installed, regardless of url', () => {
-    expect(resolveAppTarget({ app: 'teams' }, 'https://anything.example', primary, true))
+    expect(resolveAppTarget({ app: 'teams' }, 'https://anything.example', primary, 'installed'))
       .toEqual({ launch: true, reason: null, fallback: primary })
   })
 
-  it('teams falls back when not installed, with no convertibility check at all', () => {
-    expect(resolveAppTarget({ app: 'teams' }, 'https://anything.example', primary, false))
+  it('teams falls back when missing, with no convertibility check at all', () => {
+    expect(resolveAppTarget({ app: 'teams' }, 'https://anything.example', primary, 'missing'))
       .toEqual({ launch: false, reason: 'app-not-installed', fallback: primary })
   })
 
   it('zoom launches when installed and the url converts', () => {
-    expect(resolveAppTarget({ app: 'zoom' }, 'https://zoom.us/j/123456789', primary, true))
+    expect(resolveAppTarget({ app: 'zoom' }, 'https://zoom.us/j/123456789', primary, 'installed'))
       .toEqual({ launch: true, reason: null, fallback: primary })
   })
 
-  it('zoom falls back with "not-convertible" before even checking installed', () => {
-    expect(resolveAppTarget({ app: 'zoom' }, 'https://zoom.us/pricing', primary, true))
+  it('zoom falls back with "not-convertible" before even checking availability', () => {
+    expect(resolveAppTarget({ app: 'zoom' }, 'https://zoom.us/pricing', primary, 'installed'))
       .toEqual({ launch: false, reason: 'not-convertible', fallback: primary })
-    expect(resolveAppTarget({ app: 'zoom' }, 'https://zoom.us/pricing', primary, false))
+    expect(resolveAppTarget({ app: 'zoom' }, 'https://zoom.us/pricing', primary, 'missing'))
+      .toEqual({ launch: false, reason: 'not-convertible', fallback: primary })
+  })
+
+  it('zoom falls back with "not-convertible" even when availability is unknown — a non-convertible link is a pure url fact', () => {
+    expect(resolveAppTarget({ app: 'zoom' }, 'https://zoom.us/pricing', primary, 'unknown'))
       .toEqual({ launch: false, reason: 'not-convertible', fallback: primary })
   })
 
   it('zoom falls back with "app-not-installed" when the link is convertible but the app is missing', () => {
-    expect(resolveAppTarget({ app: 'zoom' }, 'https://zoom.us/j/123456789', primary, false))
+    expect(resolveAppTarget({ app: 'zoom' }, 'https://zoom.us/j/123456789', primary, 'missing'))
       .toEqual({ launch: false, reason: 'app-not-installed', fallback: primary })
+  })
+
+  it('reports "unknown" (never a guessed true/false) when availability has not been determined yet', () => {
+    expect(resolveAppTarget({ app: 'teams' }, 'https://anything.example', primary, 'unknown'))
+      .toEqual({ launch: 'unknown', reason: null, fallback: primary })
+    expect(resolveAppTarget({ app: 'zoom' }, 'https://zoom.us/j/123456789', primary, 'unknown'))
+      .toEqual({ launch: 'unknown', reason: null, fallback: primary })
   })
 
   it('uses the rule\'s own fallback over primary when set', () => {
     const fallback = { browser: 'chrome', private: false }
-    expect(resolveAppTarget({ app: 'teams', fallback }, 'https://x.example', primary, false))
+    expect(resolveAppTarget({ app: 'teams', fallback }, 'https://x.example', primary, 'missing'))
       .toEqual({ launch: false, reason: 'app-not-installed', fallback })
   })
 
   it('with no url context (e.g. the static Routes table), zoom is assumed convertible', () => {
-    expect(resolveAppTarget({ app: 'zoom' }, null, primary, true))
+    expect(resolveAppTarget({ app: 'zoom' }, null, primary, 'installed'))
       .toEqual({ launch: true, reason: null, fallback: primary })
-    expect(resolveAppTarget({ app: 'zoom' }, null, primary, false))
+    expect(resolveAppTarget({ app: 'zoom' }, null, primary, 'missing'))
       .toEqual({ launch: false, reason: 'app-not-installed', fallback: primary })
+    expect(resolveAppTarget({ app: 'zoom' }, null, primary, 'unknown'))
+      .toEqual({ launch: 'unknown', reason: null, fallback: primary })
   })
 })
