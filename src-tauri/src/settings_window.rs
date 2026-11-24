@@ -101,7 +101,8 @@ fn build(app: &AppHandle, dirs: &Dirs, related_view: Option<webkit2gtk::WebView>
     let mut builder =
         WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("settings.html".into()))
             .title("Linh Settings")
-            .inner_size(720.0, 520.0)
+            .inner_size(1040.0, 620.0)
+            .min_inner_size(860.0, 520.0)
             .resizable(true)
             .decorations(true);
     if let Some(related_view) = related_view {

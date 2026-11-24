@@ -1,75 +1,185 @@
 :root {
   color-scheme: light dark;
-  font: 14px/1.5 system-ui, sans-serif;
-  --bg: #f4f6f8; --surface: #fff; --text: #202b35; --muted: #5b6978;
-  --border: #d9e0e7; --control: #fff; --hover: #ebf2fb;
-  --accent: #285fa5; --accent-hover: #1f4c86; --accent-soft: #e7f0fd;
+  font: 14px/1.5 var(--font-sans);
+  --font-sans: "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --font-display: "Martian Mono", "IBM Plex Mono", ui-monospace, monospace;
+
+  --bg: #FFFFFF; --surface: #FFFFFF; --ink: #1A1A1A; --muted: #666666; --faint: #8A8F98;
+  --line: #EEF0F2; --line-strong: #1A1A1A; --control-border: #DADDE2; --control-border-strong: #C4C8CF;
+  --accent: #2F86D6; --accent-soft: #EEF5FC;
   --danger: #a52b25; --success: #236d3e;
+
+  /* The incoming-link header and both settings side panels are always
+     dark, in light and dark mode alike (see Decisions #2 in the UI
+     rework task). */
+  --panel-bg: #0A0A0A; --panel-border: #2E2E2E; --panel-line: #1E1E1E;
+  --panel-text-dim: #6E6E6E; --panel-text-mid: #9A9A9A; --panel-text-bright: #D0D0D0;
+  --panel-faint: #8A8F98; --panel-accent: #6FB6F0; --panel-ink: #FFFFFF;
 }
 @media (prefers-color-scheme: dark) {
+  /* The design only specifies a light theme. This dark variant reuses
+     its exact palette: the app surface becomes the same near-black used
+     by the design's own dark panels, card/control borders reuse the
+     panel hairline tones, and the accent becomes the lighter blue the
+     design already uses for text-on-dark (so links painted on the dark
+     background keep enough contrast). */
   :root {
-    --bg: #191e25; --surface: #242b34; --text: #edf1f5; --muted: #b5c0ca;
-    --border: #404a56; --control: #2c3540; --hover: #34465d;
-    --accent: #8cb9ff; --accent-hover: #b0ceff; --accent-soft: #293f5d;
+    --bg: #0A0A0A; --surface: #121212; --ink: #EDEDED; --muted: #9A9A9A; --faint: #8A8F98;
+    --line: #242424; --line-strong: #EDEDED; --control-border: #2E2E2E; --control-border-strong: #3A3A3A;
+    --accent: #6FB6F0; --accent-soft: #15283b;
     --danger: #ffaaa2; --success: #a7dfb7;
   }
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--text); }
-button, input, select, textarea { font: inherit; }
+body { margin: 0; background: var(--bg); color: var(--ink); }
+button, input, select, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: default; opacity: .5; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 h1, h2, h3, p { margin: 0; }
-h1 { font-size: 1.65rem; letter-spacing: -.025em; }
-h2 { font-size: 1.15rem; }
-h3 { font-size: 1rem; }
 p { margin-top: .5rem; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.eyebrow { font: 400 11px/1.3 var(--font-mono); letter-spacing: .8px; color: var(--faint); text-transform: uppercase; }
 .hint { color: var(--muted); font-size: .9rem; }
 .error { color: var(--danger); }
 .success { color: var(--success); }
-.browser-icon { width: 22px; height: 22px; object-fit: contain; flex: 0 0 22px; }
-.browser-icon-placeholder { display: inline-grid; place-items: center; border-radius: 6px; background: var(--border); color: var(--muted); font-size: 20px; line-height: 1; }
-.settings { max-width: 780px; margin: 0 auto; padding: 32px 24px 40px; }
-.settings > header { margin-bottom: 24px; }
-.settings > header p { color: var(--muted); }
-.settings-tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border); margin-bottom: 22px; }
-.settings-tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 10px 16px; margin-bottom: -1px; background: transparent; color: var(--muted); font-weight: 600; }
-.settings-tabs button[aria-current=page] { border-bottom-color: var(--accent); color: var(--text); }
-.settings section { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 22px; margin-bottom: 16px; box-shadow: 0 3px 14px #0000000a; }
-.settings .banner { border-color: var(--accent); background: var(--accent-soft); }
-.settings label:not(.checklist label) { display: block; font-weight: 600; margin: 18px 0 6px; }
-.settings select, .settings input:not([type=checkbox]), .settings textarea { width: 100%; padding: 9px 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--control); color: var(--text); }
-.settings textarea { resize: vertical; }
-.settings button { border: 1px solid var(--border); border-radius: 7px; background: var(--control); color: var(--text); padding: 7px 11px; }
-.settings button:hover:not(:disabled) { background: var(--hover); }
-.settings .primary-action, .settings .banner button { border-color: var(--accent); background: var(--accent); color: var(--bg); font-weight: 600; }
-.settings .primary-action:hover:not(:disabled), .settings .banner button:hover:not(:disabled) { background: var(--accent-hover); }
-.settings .banner button { margin-top: 14px; }
+.browser-icon { width: 16px; height: 16px; object-fit: contain; flex: 0 0 16px; }
+.browser-icon-placeholder { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: 0 0 16px; border-radius: 3px; background: var(--line); color: var(--faint); font-size: 11px; line-height: 1; }
+
+/* ---------- Picker (prompt.html) ---------- */
+.prompt-page, .prompt-page body, .prompt-page #root { height: 100%; overflow: hidden; background: var(--surface); }
+.prompt { background: var(--surface); outline: none; display: flex; flex-direction: column; }
+.prompt-incoming { background: var(--panel-bg); color: var(--panel-ink); padding: 20px 24px; display: flex; flex-direction: column; gap: 8px; }
+.prompt-incoming .eyebrow { color: var(--panel-faint); }
+.prompt-host { font: 700 20px/1.1 var(--font-display); letter-spacing: -.3px; color: var(--panel-ink); margin: 0; overflow-wrap: anywhere; }
+.prompt-url { font: 400 12px/1.4 var(--font-mono); color: var(--panel-faint); overflow-wrap: anywhere; }
+.prompt-body { padding: 0 24px; }
+.prompt-empty, .prompt-loading { padding: 20px 24px; color: var(--muted); }
+.prompt-targets { padding: 8px 24px 0; }
+.prompt-head-row { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 1px solid var(--line-strong); padding: 8px 0; }
+.prompt-choices { list-style: none; padding: 0; margin: 0; }
+.prompt-choices li { border-bottom: 1px solid var(--line); }
+.prompt-choices li:last-child { border-bottom: 0; }
+.prompt-choices button {
+  display: flex; align-items: center; width: 100%; gap: 12px;
+  border: 0; border-radius: 0; background: transparent; color: var(--ink);
+  padding: 14px 0; text-align: left; font: 400 15px/1.2 var(--font-sans);
+}
+.prompt-choices button:hover, .prompt-choices button.selected { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.prompt-choices .prompt-choice-label { flex: 1 1 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; order: 2; }
+.prompt-choices .browser-icon, .prompt-choices .browser-icon-placeholder { order: 1; }
+.prompt-choices kbd {
+  order: 3; flex-shrink: 0; display: inline-grid; place-items: center; width: 22px; height: 22px;
+  border: 1px solid var(--control-border); border-radius: 3px; color: var(--muted);
+  font: 400 12px/1 var(--font-mono);
+}
+.prompt-choices button:hover kbd, .prompt-choices button.selected kbd { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.prompt-shortcuts { display: flex; flex-wrap: wrap; gap: 18px; padding: 16px 24px 20px; font: 400 11px/1 var(--font-mono); color: var(--faint); margin: 0; }
+
+/* ---------- Settings ---------- */
+.settings { display: flex; flex-direction: column; height: 100vh; background: var(--surface); }
+.settings-topbar { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; padding: 16px 28px; border-bottom: 1px solid var(--line); }
+.settings-logo { display: flex; align-items: center; gap: 10px; }
+.settings-logo strong { font: 700 14px/1 var(--font-display); letter-spacing: 1px; color: var(--ink); }
+.settings-logo span { font: 400 12px/1 var(--font-mono); color: var(--faint); }
+.settings-tabs { display: flex; gap: 28px; border: 0; margin: 0; }
+.settings-tabs button {
+  display: flex; align-items: center; gap: 6px; border: 0; background: transparent; padding: 0;
+  font: 400 12px/1 var(--font-mono); letter-spacing: .6px; text-transform: uppercase; color: var(--faint);
+}
+.settings-tabs button[aria-current=page] { color: var(--ink); font-weight: 600; }
+.settings-tabs .nav-pip { width: 6px; height: 6px; flex-shrink: 0; background: var(--accent); border-radius: 50%; }
+.settings-body { display: flex; flex: 1 1 0; min-height: 0; overflow: hidden; }
+.settings-board { flex: 1 1 0; min-width: 0; overflow-y: auto; padding: 32px 28px; display: flex; flex-direction: column; gap: 24px; }
+.settings-board > header { margin: 0; }
+.settings-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
+.settings-heading h2 { font: 700 28px/1.1 var(--font-display); letter-spacing: -.5px; color: var(--ink); margin: 0 0 8px; }
+.settings-heading p { color: var(--muted); font-size: 13px; margin: 0; }
+.settings-heading .rule-actions { flex-shrink: 0; }
+.settings-board .banner { border: 1px solid var(--accent); background: var(--accent-soft); border-radius: 8px; padding: 18px 20px; }
+.settings-board .banner button { margin-top: 14px; }
+.settings button.secondary, .settings .preset-menu button, .settings-heading .rule-actions button:not(.primary) {
+  border: 1px solid var(--control-border); border-radius: 4px; background: transparent; color: var(--ink);
+  font: 400 12px/1 var(--font-mono); padding: 8px 12px;
+}
+.settings-heading .rule-actions button.primary, .settings button.primary-action {
+  border: 1px solid var(--ink); border-radius: 4px; background: var(--ink); color: var(--bg);
+  font: 500 12px/1 var(--font-mono); padding: 8px 12px;
+}
+.settings button:hover:not(:disabled) { opacity: .85; }
+
+.settings-table { width: 100%; border-collapse: collapse; }
+.settings-table-head { display: flex; border-bottom: 1px solid var(--line-strong); padding-bottom: 10px; }
+.settings-table-head span { font: 400 11px/1 var(--font-mono); letter-spacing: .8px; color: var(--faint); text-transform: uppercase; }
+.settings-rows { list-style: none; margin: 0; padding: 0; }
+.settings-row { display: flex; align-items: center; gap: 0; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.settings-row.selected { background: var(--accent-soft); }
+.settings-row:last-child { border-bottom: 0; }
+.col-no { flex: 0 0 44px; font: 400 12px/1 var(--font-mono); color: var(--faint); }
+.settings-row.selected .col-no { color: var(--accent); font-weight: 600; }
+.col-main { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.col-main .primary { font: 500 14px/1.3 var(--font-sans); color: var(--ink); }
+.col-main .secondary { font: 400 12px/1.3 var(--font-mono); color: var(--muted); overflow-wrap: anywhere; }
+.col-dest { flex: 0 0 180px; font: 400 13px/1 var(--font-mono); color: var(--ink); }
+.settings-row.selected .col-dest { color: var(--accent); font-weight: 600; }
+.col-private { flex: 0 0 110px; font: 400 12px/1 var(--font-mono); color: var(--faint); }
+.col-pick { flex: 0 0 90px; }
+.col-name { flex: 1 1 0; display: flex; align-items: center; gap: 10px; font: 400 14px/1.3 var(--font-sans); color: var(--ink); }
+
+.settings .checklist.settings-rows { display: block; }
+.settings .checklist label.settings-row { cursor: pointer; }
+.check-box {
+  width: 16px; height: 16px; border-radius: 3px; border: 1px solid var(--control-border-strong);
+  display: inline-grid; place-items: center; background: transparent; flex-shrink: 0;
+}
+.check-box.checked { background: var(--accent); border-color: var(--accent); color: #fff; }
+.check-box svg { width: 11px; height: 11px; }
+.settings input[type=checkbox].sr-only-input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+
+.settings label:not(.checklist label):not(.settings-row) { display: block; font-weight: 600; margin: 18px 0 6px; }
+.settings select, .settings input:not([type=checkbox]), .settings textarea {
+  width: 100%; padding: 9px 12px; border: 1px solid var(--control-border); border-radius: 4px;
+  background: var(--surface); color: var(--ink); font: 400 13px/1.3 var(--font-mono);
+}
+.settings textarea { resize: vertical; font-family: var(--font-sans); }
+.settings .rule-editor { border-top: 1px solid var(--line); padding-top: 20px; margin-top: 4px; }
+.settings .editor-actions { display: flex; gap: 8px; margin-top: 18px; }
+.settings .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.settings .rule-actions { display: flex; align-items: center; gap: 8px; }
 .settings .target-select { display: flex; align-items: center; gap: 10px; }
-.settings .checklist { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 12px; margin-top: 16px; }
-.settings .checklist label { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; }
-.settings .section-heading, .settings .rule-actions, .settings .editor-actions, .settings footer { display: flex; align-items: center; gap: 8px; }
-.settings .section-heading { justify-content: space-between; }
-.settings .rules { padding: 0; margin: 14px 0 0; list-style: none; }
-.settings .rules li { display: flex; justify-content: space-between; gap: 16px; align-items: center; border-top: 1px solid var(--border); padding: 15px 0; }
-.settings .rules li p { color: var(--muted); overflow-wrap: anywhere; }
-.settings .rule-actions { flex-shrink: 0; }
-.settings .rule-editor { border-top: 1px solid var(--border); padding-top: 20px; margin-top: 16px; }
-.settings .editor-actions { margin-top: 18px; }
-.settings .preset-menu { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 0; }
+.settings .preset-menu { display: flex; flex-wrap: wrap; gap: 8px; }
 .settings .preset-badge { display: inline-block; margin-left: 5px; padding: 1px 7px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); font-size: .75rem; font-weight: 600; vertical-align: middle; }
 .settings .app-status { color: var(--muted); }
-.settings footer { justify-content: flex-end; margin-top: 20px; }
-.prompt-page, .prompt-page body, .prompt-page #root { height: 100%; overflow: hidden; background: var(--surface); }
-.prompt { padding: 24px; background: var(--surface); outline: none; }
-.prompt h1 { font-size: 1.3rem; }
-.prompt .pending-url { margin-top: 16px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg); overflow: hidden; }
-.prompt .pending-url strong, .prompt .pending-url span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.prompt .pending-url span { color: var(--muted); font-size: .88rem; margin-top: 2px; }
-.prompt-choices { list-style: none; padding: 0; margin: 18px 0; }
-.prompt-choices li + li { margin-top: 6px; }
-.prompt-choices button { display: flex; align-items: center; width: 100%; gap: 14px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); color: var(--text); padding: 13px; text-align: left; font-weight: 600; }
-.prompt-choices button:hover, .prompt-choices button.selected { background: var(--accent-soft); border-color: var(--accent); }
-.prompt-choices kbd { display: inline-grid; place-items: center; width: 25px; height: 25px; border: 1px solid var(--border); border-radius: 5px; color: var(--muted); font: inherit; font-size: .85rem; }
-.prompt-shortcuts { display: flex; flex-wrap: wrap; gap: 6px 16px; border-top: 1px solid var(--border); padding-top: 13px; }
+.settings .note { display: flex; align-items: center; gap: 8px; }
+.settings .note .eyebrow { text-transform: none; }
+.settings footer.settings-footer { display: flex; align-items: center; gap: 8px; justify-content: flex-end; padding: 16px 28px; border-top: 1px solid var(--line); flex-shrink: 0; }
+
+/* The right-hand side panel: always dark, in both themes (same reasoning
+   as the picker's incoming-link header). */
+.settings-side {
+  width: 340px; flex-shrink: 0; background: var(--panel-bg); color: var(--panel-ink);
+  padding: 32px 28px; display: flex; flex-direction: column; gap: 24px; overflow-y: auto;
+}
+.settings-side .eyebrow { color: var(--panel-faint); }
+.settings-side-input {
+  display: flex; align-items: flex-start; border: 1px solid var(--panel-border); border-radius: 4px;
+  padding: 10px 12px; width: 100%; background: transparent;
+}
+.settings-side-input input {
+  flex: 1 1 0; border: 0; background: transparent; color: var(--panel-ink);
+  font: 400 12px/1.4 var(--font-mono); padding: 0; outline: none;
+}
+.settings-side-flow { display: flex; flex-direction: column; }
+.settings-side-step { display: flex; align-items: center; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--panel-line); }
+.settings-side-step:last-child { border-bottom: 0; }
+.settings-side-step .step-no { font: 400 12px/1 var(--font-mono); color: var(--panel-text-dim); }
+.settings-side-step .step-name { flex: 1 1 0; font: 400 12px/1.3 var(--font-mono); color: var(--panel-text-mid); }
+.settings-side-step .step-tag { font: 400 11px/1 var(--font-mono); letter-spacing: .6px; color: var(--panel-text-dim); text-transform: uppercase; }
+.settings-side-step.match .step-no, .settings-side-step.match .step-tag { color: var(--panel-accent); font-weight: 600; }
+.settings-side-step.match .step-name { color: var(--panel-ink); }
+.settings-side-note { color: var(--panel-faint); font: 400 12px/1.4 var(--font-mono); }
+.settings-side-spacer { flex: 1 1 0; }
+.settings-side-result { border-top: 1px solid var(--panel-border); padding-top: 16px; display: flex; flex-direction: column; gap: 6px; }
+.settings-side-result .value { font: 700 20px/1.2 var(--font-display); color: var(--panel-ink); overflow-wrap: anywhere; }
+.settings-side-result .caption { font: 400 12px/1.3 var(--font-mono); color: var(--panel-faint); }
