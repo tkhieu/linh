@@ -9,6 +9,7 @@ mod routing;
 mod settings_window;
 mod state;
 mod tray;
+mod webkit_tune;
 
 use std::sync::Mutex;
 use std::time::Instant;
@@ -87,6 +88,10 @@ fn dispatch_launch(app: &AppHandle, state: &AppState, args: &[String], received_
 
 fn main() {
     allocator::cap_arenas();
+    // Must run before the builder below builds its first window (and so
+    // its first `WebContext`/`WebsiteDataManager`) — see webkit_tune's
+    // doc comment for why this can't instead happen from `setup`.
+    webkit_tune::configure_before_tauri();
     // Captured before anything else so first-launch latency logging
     // honestly includes browser scanning and config load, not just the
     // final routing decision.
@@ -152,6 +157,20 @@ fn main() {
                     }
                 })
                 .build(app)?;
+
+            #[cfg(target_os = "linux")]
+            if let Some(prompt_window) = app_handle.get_webview_window("prompt") {
+                let dirs_for_err = state_handle.dirs.clone();
+                let scheduled = prompt_window.with_webview(|webview| {
+                    webkit_tune::tune_webview(webview.inner());
+                });
+                if let Err(err) = scheduled {
+                    platform::logging::log_line(
+                        &dirs_for_err,
+                        &format!("webkit_tune: with_webview failed: {err}"),
+                    );
+                }
+            }
 
             mem_profile::spawn_if_enabled(&app_handle, state_handle.dirs.clone());
 

@@ -129,6 +129,55 @@ losing the instant-reopen behavior.
 existing symlink or non-regular file, but it is not hardened against a
 concurrent attacker racing a symlink into place at that exact path.
 
+## WebKitGTK memory tuning
+
+`src-tauri/src/webkit_tune.rs` (Linux only) applies the WebKitGTK-level
+settings that measurably lower idle and picker-shown PSS for a
+single-purpose app that never browses between documents:
+
+- `webkit_web_context_set_cache_model(DOCUMENT_VIEWER)` instead of the
+  default `WEB_BROWSER` model's large object/page caches.
+- `WebKitSettings`' page cache disabled — it only pays off across
+  in-page navigations Linh never performs. A second knob, the legacy
+  offline-application-cache, was tried alongside it but turned out to be
+  a no-op in the installed WebKitGTK 2.54.2 (setter does nothing, getter
+  always reports `false`), so it was dropped; the measured saving
+  belongs to the page cache alone. Because `with_related_view` makes
+  `prompt` and `settings` share one `WebKitSettings`, and wry
+  unconditionally re-enables the page cache while constructing each new
+  `WebKitWebView`, this setting is re-applied right after the Settings
+  window is built — otherwise opening Settings once would silently turn
+  the page cache back on for both windows.
+- `WEBKIT_DISABLE_COMPOSITING_MODE`/`WEBKIT_DISABLE_DMABUF_RENDERER` set
+  before Tauri launches its first `WebKitWebProcess`, forcing WebKitGTK's
+  Skia backend to rasterize on the CPU instead of using GPU-accelerated
+  (DMA-BUF/EGL) compositing — WebKitGTK 2.54 removed the old Cairo 2D
+  backend entirely, so this is a GPU/CPU split within Skia, not a switch
+  to Cairo. Linh's UI uses only borders and `border-radius`, nothing
+  that path depends on. GPU compositing is also what makes scrolling
+  smooth, so that's the one thing the owner still needs to check
+  visually on Wayland. These two vars are process-wide, so every
+  `Command` Linh runs on Linux chains
+  `.strip_linh_webkit_env()` (the `StripLinhWebkitEnv` extension trait in
+  `src-tauri/src/platform/launcher.rs`) right after `Command::new`, which
+  removes only the vars `configure_before_tauri` itself introduced (a
+  value the user already had set in their own environment before Linh
+  started is left exactly as it was). This covers every child process
+  Linh spawns: `spawn_detached` (browsers and app targets),
+  `xdg-settings get`/`xdg-settings set`/`xdg-mime default` in
+  `platform/linux/default_browser.rs`, and `notify-send` in
+  `platform/linux/notify.rs` — so a launched WebKitGTK app (e.g. GNOME
+  Web) never inherits Linh's own rendering policy.
+
+A fourth candidate — tuning the `WebKitNetworkProcess`'s own memory-
+pressure thresholds via
+`webkit_website_data_manager_set_memory_pressure_settings()` — was tried
+and dropped: it must run before Tauri builds its first
+`WebKitWebsiteDataManager`, which forced an explicit `gtk::init()` call
+before GTK would otherwise be initialized, and that made startup regress
+to tens of seconds. Not worth it for a few MB on an already-small
+process.
+
 ## License
 
 Copyright (C) 2026 tkhieu. Linh is licensed under
