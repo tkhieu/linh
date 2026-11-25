@@ -14,7 +14,8 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use crate::allocator;
 use crate::mem_profile;
-use crate::platform::linux::{dirs::Dirs, logging};
+use crate::platform::current::dirs::Dirs;
+use crate::platform::logging;
 use crate::routing;
 
 pub const LABEL: &str = "settings";
@@ -57,7 +58,10 @@ fn should_create(window_exists: bool) -> bool {
 /// Builds the `settings` window, related to `prompt`'s webview when it
 /// is available (sharing its `WebKitWebProcess`) and logs + falls back to
 /// an unrelated window otherwise, then always installs the close-hides
-/// handler. Must run on the main thread.
+/// handler. Must run on the main thread. Linux only: sharing a related
+/// webview is a `webkit2gtk`-specific workaround (see this module's doc
+/// comment); other platforms always build standalone.
+#[cfg(target_os = "linux")]
 fn create(app: &AppHandle, dirs: &Dirs) {
     mem_profile::record_settings_create_requested(Instant::now());
 
@@ -95,9 +99,18 @@ fn create(app: &AppHandle, dirs: &Dirs) {
     }
 }
 
+// ported in a later change: no related-webview sharing outside Linux
+// yet, so Settings always builds standalone there.
+#[cfg(not(target_os = "linux"))]
+fn create(app: &AppHandle, dirs: &Dirs) {
+    mem_profile::record_settings_create_requested(Instant::now());
+    build(app, dirs);
+}
+
 /// Actually builds and manages the `settings` window (matching the
 /// properties it used to have in `tauri.conf.json`) and wires its
 /// close button to hide instead of destroy. Must run on the main thread.
+#[cfg(target_os = "linux")]
 fn build(app: &AppHandle, dirs: &Dirs, related_view: Option<webkit2gtk::WebView>) {
     let mut builder =
         WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("settings.html".into()))
@@ -111,23 +124,42 @@ fn build(app: &AppHandle, dirs: &Dirs, related_view: Option<webkit2gtk::WebView>
     }
 
     match builder.build() {
-        Ok(window) => {
-            let app_for_close = app.clone();
-            window.on_window_event(move |event| {
-                if let WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    if let Some(window) = app_for_close.get_webview_window(LABEL) {
-                        if window.hide().is_ok() {
-                            allocator::trim();
-                        }
-                    }
-                }
-            });
-        }
+        Ok(window) => install_close_handler(app, window),
         Err(err) => {
             logging::log_line(dirs, &format!("settings: failed to build window: {err}"));
         }
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn build(app: &AppHandle, dirs: &Dirs) {
+    let builder = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("settings.html".into()))
+        .title("Linh Settings")
+        .inner_size(1040.0, 620.0)
+        .min_inner_size(860.0, 520.0)
+        .resizable(true)
+        .decorations(true);
+
+    match builder.build() {
+        Ok(window) => install_close_handler(app, window),
+        Err(err) => {
+            logging::log_line(dirs, &format!("settings: failed to build window: {err}"));
+        }
+    }
+}
+
+fn install_close_handler(app: &AppHandle, window: tauri::WebviewWindow) {
+    let app_for_close = app.clone();
+    window.on_window_event(move |event| {
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            if let Some(window) = app_for_close.get_webview_window(LABEL) {
+                if window.hide().is_ok() {
+                    allocator::trim();
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]

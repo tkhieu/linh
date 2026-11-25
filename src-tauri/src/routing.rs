@@ -4,7 +4,8 @@ use linh_core::{AppTarget, Browser, Decision, LaunchCommand, Target};
 use tauri::{AppHandle, Manager};
 use url::Url;
 
-use crate::platform::linux::{apps, launcher, logging, url_intake};
+use crate::platform::current::apps;
+use crate::platform::{launcher, logging, url_intake};
 use crate::state::AppState;
 
 /// Decides where `raw_url` should go (per `linh_core::decide`, with Linux
@@ -215,7 +216,7 @@ mod tests {
     use std::cell::RefCell;
     use std::path::PathBuf;
 
-    use crate::platform::linux::dirs::Dirs;
+    use crate::platform::current::dirs::Dirs;
 
     fn target(browser: &str) -> Target {
         Target {
@@ -255,17 +256,26 @@ mod tests {
         root
     }
 
+    #[cfg(target_os = "linux")]
+    fn test_dirs(root: &std::path::Path) -> Dirs {
+        Dirs {
+            home: root.join("home"),
+            config_home: root.join("home/.config"),
+            state_home: root.join("home/.local/state"),
+            application_dirs: Vec::new(),
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn test_dirs(root: &std::path::Path) -> Dirs {
+        Dirs {
+            config_home: root.join("home/.config"),
+            state_home: root.join("home/.local/state"),
+        }
+    }
+
     fn test_state(root: &std::path::Path, browsers: Vec<Browser>) -> AppState {
-        AppState::for_test(
-            Dirs {
-                home: root.join("home"),
-                config_home: root.join("home/.config"),
-                state_home: root.join("home/.local/state"),
-                application_dirs: Vec::new(),
-            },
-            Config::default(),
-            browsers,
-        )
+        AppState::for_test(test_dirs(root), Config::default(), browsers)
     }
 
     // --- `plan_app_open`: pure decision, no filesystem/process I/O ---
@@ -454,12 +464,7 @@ mod tests {
             ..Config::default()
         };
         let state = AppState::for_test(
-            Dirs {
-                home: root.join("home"),
-                config_home: root.join("home/.config"),
-                state_home: root.join("home/.local/state"),
-                application_dirs: Vec::new(),
-            },
+            test_dirs(&root),
             config,
             vec![native_browser("firefox", "/usr/bin/firefox %u")],
         );

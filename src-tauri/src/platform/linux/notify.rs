@@ -1,7 +1,8 @@
 use std::process::Command;
 
+use crate::platform::logging::log_line;
+
 use super::dirs::Dirs;
-use super::logging::log_line;
 
 /// Shows a desktop notification (via `notify-send`) for an error the user
 /// should know about, such as a broken config file. Falls back to logging

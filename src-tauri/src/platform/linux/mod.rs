@@ -11,11 +11,8 @@ pub mod default_browser;
 pub mod desktop;
 pub mod dirs;
 pub mod icons;
-pub mod launcher;
-pub mod logging;
 pub mod notify;
 pub mod scan;
-pub mod url_intake;
 
 /// The desktop-entry id (without the `.desktop` suffix) that the RPM
 /// installs Linh under. Must match `tauri.conf.json`'s `productName`

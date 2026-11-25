@@ -6,23 +6,33 @@
 //! load. Both exist only to gather numbers for tkhieu/linh#15; neither
 //! changes default runtime behavior when the env var is unset.
 
+#[cfg(target_os = "linux")]
 use std::collections::{HashMap, HashSet};
+#[cfg(target_os = "linux")]
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+#[cfg(target_os = "linux")]
+use std::time::Duration;
+use std::time::Instant;
 
 use tauri::webview::PageLoadEvent;
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::AppHandle;
+#[cfg(target_os = "linux")]
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
-use crate::platform::linux::dirs::Dirs;
-use crate::platform::linux::logging;
+use crate::platform::current::dirs::Dirs;
+use crate::platform::logging;
 
 const ENV_VAR: &str = "LINH_PROFILE_WEBVIEW";
 const MIN_SAMPLES: u32 = 1;
 const MAX_SAMPLES: u32 = 50;
+#[cfg(target_os = "linux")]
 const BUILD_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(target_os = "linux")]
 const PAGE_LOAD_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(target_os = "linux")]
 const DESTROYED_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(target_os = "linux")]
 const PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Parses `LINH_PROFILE_WEBVIEW`'s value into a validated sample count
@@ -34,7 +44,8 @@ pub fn parse_sample_count(value: Option<&str>) -> Option<u32> {
 }
 
 /// min/median/max (in whatever unit `samples` is already in). `None` if
-/// `samples` is empty.
+/// `samples` is empty. Only called from the Linux-only profiling below.
+#[cfg(target_os = "linux")]
 pub fn stats(mut samples: Vec<u128>) -> Option<(u128, u128, u128)> {
     if samples.is_empty() {
         return None;
@@ -152,13 +163,15 @@ pub fn log_window_ready_if_relevant(
     }
 }
 
-// --- opt-in cold webview-create profiling -----------------------------
+// --- opt-in cold webview-create profiling (Linux only: it measures the
+// WebKitGTK-specific `WebKitWebProcess`) -------------------------------
 
 /// If `LINH_PROFILE_WEBVIEW=N` is set to a valid sample count, spawns a
 /// background thread that creates, measures and destroys N throwaway
 /// webviews loading `prompt.html`, logging each sample plus
 /// min/median/max to the normal Linh log. Does nothing otherwise (no
 /// extra windows, no extra work, no extra logging).
+#[cfg(target_os = "linux")]
 pub fn spawn_if_enabled(app: &AppHandle, dirs: Dirs) {
     let Some(count) = parse_sample_count(std::env::var(ENV_VAR).ok().as_deref()) else {
         return;
@@ -167,6 +180,21 @@ pub fn spawn_if_enabled(app: &AppHandle, dirs: Dirs) {
     std::thread::spawn(move || run_profile(&app, &dirs, count));
 }
 
+// ported in a later change: this profiling measures WebKitGTK's
+// `WebKitWebProcess` specifically, so it has nothing to do on other
+// OSes. Logs instead of silently doing nothing, so setting the env var
+// there isn't mistaken for the feature having run.
+#[cfg(not(target_os = "linux"))]
+pub fn spawn_if_enabled(_app: &AppHandle, dirs: Dirs) {
+    if parse_sample_count(std::env::var(ENV_VAR).ok().as_deref()).is_some() {
+        logging::log_line(
+            &dirs,
+            &format!("{ENV_VAR} is set, but webview-create profiling is Linux-only; ignoring"),
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn run_profile(app: &AppHandle, dirs: &Dirs, count: u32) {
     logging::log_line(
         dirs,
@@ -222,6 +250,7 @@ fn run_profile(app: &AppHandle, dirs: &Dirs, count: u32) {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn log_stats_line(dirs: &Dirs, label: &str, samples: &[u128]) {
     match stats(samples.to_vec()) {
         Some((min, median, max)) => logging::log_line(
@@ -238,6 +267,7 @@ fn log_stats_line(dirs: &Dirs, label: &str, samples: &[u128]) {
     }
 }
 
+#[cfg(target_os = "linux")]
 struct SampleOutcome {
     build_ms: u128,
     ready_ms: u128,
@@ -265,6 +295,7 @@ struct SampleOutcome {
 /// Linh's own idle baseline already confirms a hidden window's
 /// `WebKitWebProcess` is spawned without ever showing it, so hidden-only
 /// still measures the real creation cost.
+#[cfg(target_os = "linux")]
 fn run_one_sample(app: &AppHandle, dirs: &Dirs, index: u32) -> Result<SampleOutcome, String> {
     let label = format!("linh-mem-profile-{index}");
     let root_pid = std::process::id();
@@ -344,6 +375,7 @@ fn run_one_sample(app: &AppHandle, dirs: &Dirs, index: u32) -> Result<SampleOutc
 /// The single pid present in `after` but not `before`, or `None` if
 /// that's not exactly one (nothing new showed up, or more than one did —
 /// either way, not safely attributable to this one sample).
+#[cfg(target_os = "linux")]
 fn pick_new_pid(before: &HashSet<u32>, after: &HashSet<u32>) -> Option<u32> {
     let mut new_pids: Vec<u32> = after.difference(before).copied().collect();
     if new_pids.len() == 1 {
@@ -357,6 +389,7 @@ fn pick_new_pid(before: &HashSet<u32>, after: &HashSet<u32>) -> Option<u32> {
 /// `webkit_before` (captured right before this sample's window was
 /// created) and logs + returns the single new one — this sample's own
 /// process. Logs (and returns `None`) if that's ambiguous.
+#[cfg(target_os = "linux")]
 fn identify_new_webkit_pid(
     root: u32,
     webkit_before: &HashSet<u32>,
@@ -393,6 +426,7 @@ fn identify_new_webkit_pid(
 /// every call site/exit path, so a throwaway window is never leaked.
 /// Returns the attributed pid's exit latency (`None` if unattributed, or
 /// attributed but still running after [`PROCESS_EXIT_TIMEOUT`]).
+#[cfg(target_os = "linux")]
 fn destroy_and_wait(
     app: &AppHandle,
     dirs: &Dirs,
@@ -458,6 +492,7 @@ fn destroy_and_wait(
     process_exit_ms
 }
 
+#[cfg(target_os = "linux")]
 fn wait_for_pid_exit(pid: u32, timeout: Duration) -> Option<Duration> {
     let start = Instant::now();
     loop {
@@ -477,6 +512,7 @@ fn wait_for_pid_exit(pid: u32, timeout: Duration) -> Option<Duration> {
 /// space-containing `(comm)`), for every numeric entry under `/proc`.
 /// Best-effort: unreadable/raced-away processes are simply absent from
 /// the map rather than erroring.
+#[cfg(target_os = "linux")]
 fn parent_pids() -> HashMap<u32, u32> {
     let mut map = HashMap::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
@@ -506,6 +542,7 @@ fn parent_pids() -> HashMap<u32, u32> {
     map
 }
 
+#[cfg(target_os = "linux")]
 fn is_webkit_web_process(pid: u32) -> bool {
     std::fs::read_link(format!("/proc/{pid}/exe"))
         .ok()
@@ -513,6 +550,7 @@ fn is_webkit_web_process(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(target_os = "linux")]
 fn is_descendant_of(pid: u32, root: u32, parents: &HashMap<u32, u32>) -> bool {
     let mut current = pid;
     // `parents` is a snapshot of a real process tree, which cannot cycle;
@@ -528,6 +566,7 @@ fn is_descendant_of(pid: u32, root: u32, parents: &HashMap<u32, u32>) -> bool {
     false
 }
 
+#[cfg(target_os = "linux")]
 fn descendant_webkit_pids(root: u32) -> HashSet<u32> {
     let parents = parent_pids();
     parents
@@ -568,31 +607,37 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn stats_of_empty_is_none() {
         assert_eq!(stats(Vec::new()), None);
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn stats_of_single_sample() {
         assert_eq!(stats(vec![42]), Some((42, 42, 42)));
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn stats_odd_count_median_is_middle_element() {
         assert_eq!(stats(vec![5, 1, 3]), Some((1, 3, 5)));
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn stats_even_count_median_is_average_of_middle_two() {
         assert_eq!(stats(vec![10, 20, 30, 40]), Some((10, 25, 40)));
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn stats_does_not_depend_on_input_order() {
         assert_eq!(stats(vec![3, 1, 2]), stats(vec![1, 2, 3]));
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn is_descendant_of_walks_up_the_tree() {
         let mut parents = HashMap::new();
         parents.insert(3u32, 2u32);
@@ -602,12 +647,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn is_descendant_of_unknown_pid_is_false() {
         let parents = HashMap::new();
         assert!(!is_descendant_of(3, 1, &parents));
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn pick_new_pid_exactly_one_new_is_attributed() {
         let before: HashSet<u32> = [1, 2].into_iter().collect();
         let after: HashSet<u32> = [1, 2, 3].into_iter().collect();
@@ -615,6 +662,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn pick_new_pid_none_new_is_ambiguous() {
         let before: HashSet<u32> = [1, 2].into_iter().collect();
         let after: HashSet<u32> = [1, 2].into_iter().collect();
@@ -622,6 +670,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn pick_new_pid_more_than_one_new_is_ambiguous() {
         let before: HashSet<u32> = [1].into_iter().collect();
         let after: HashSet<u32> = [1, 2, 3].into_iter().collect();

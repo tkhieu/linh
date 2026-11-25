@@ -10,7 +10,6 @@ tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
 base64 = "0.22"
-libc = "0.2"
 linh-core = { path = "../crates/linh-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -18,6 +17,9 @@ tauri = { version = "2.12", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2.5"
 tauri-plugin-deep-link = "2.6"
 url = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 webkit2gtk = "2"
 
 [[bin]]

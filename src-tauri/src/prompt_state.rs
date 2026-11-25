@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::platform::linux::logging;
+use crate::platform::logging;
 use crate::state::AppState;
 
 /// A pending prompt URL, plus the moment its URL was received (for
@@ -146,7 +146,7 @@ impl PromptState {
     /// `url`, and the newly-pending URL's own, separately-scheduled
     /// reconcile will show it and log it when it actually runs. Logs an
     /// error line instead if showing the window fails.
-    fn reconcile(&self, app: &AppHandle, dirs: &crate::platform::linux::dirs::Dirs) {
+    fn reconcile(&self, app: &AppHandle, dirs: &crate::platform::current::dirs::Dirs) {
         let pending = self.machine.lock().unwrap().peek().map(str::to_string);
         let Some(window) = app.get_webview_window("prompt") else {
             logging::log_line(dirs, "failed to reconcile prompt window: window not found");
