@@ -2,7 +2,7 @@
 
 A Velja-style browser picker: registers as the default browser and routes
 each URL to the right browser, profile, or private window based on rules
-you configure. This repo currently targets Fedora (GNOME/Wayland).
+you configure. This repo targets Fedora and Ubuntu 24.04 (GNOME/Wayland).
 
 ## Repo layout
 
@@ -30,6 +30,8 @@ cd src-tauri                      # run the Tauri CLI from here (as CI does)
 cargo tauri dev                   # run the app
 cargo tauri build --bundles rpm   # produce target/release/bundle/rpm/Linh-*.rpm
 ```
+
+Install on Ubuntu 24.04: download the CI `.deb` artifact and run `sudo apt install ./linh_*.deb`.
 
 ## Tests and checks
 
