@@ -373,7 +373,7 @@ describe('SettingsApp', () => {
   it('shows the app itself with a neutral note (never a guessed fallback) while availability is unknown, in both panels', async () => {
     let resolvePresets: ((value: Awaited<ReturnType<typeof api.listPresets>>) => void) | undefined
     api.listPresets.mockImplementation(() => new Promise((resolve) => { resolvePresets = resolve }))
-    api.getConfig.mockResolvedValue({ ...config, prompt_mode: 'always', rules: [{ name: 'Teams calls', match: ['teams.example.com/*'], open_in: { app: 'teams' } }] })
+    api.getConfig.mockResolvedValue({ ...config, rules: [{ name: 'Teams calls', match: ['teams.example.com/*'], open_in: { app: 'teams' } }] })
     render(<SettingsApp />)
     await screen.findByLabelText('Primary browser')
     openSection('Rules')

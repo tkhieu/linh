@@ -63,6 +63,9 @@
         "installMode": "currentUser",
         "installerHooks": "src/platform/windows/minimum-version.nsh"
       }
+    },
+    "macOS": {
+      "minimumSystemVersion": "13.0"
     }
   },
   "plugins": {

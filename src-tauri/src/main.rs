@@ -133,6 +133,41 @@ fn main() {
             let app_handle = app.handle().clone();
             let state_handle = app.state::<AppState>();
 
+            // macOS delivers an http(s) link as an Apple Event
+            // (`kAEGetURL`), not argv: Tauri surfaces it as
+            // `RunEvent::Opened`, which `tauri-plugin-deep-link` forwards
+            // as a `deep-link://new-url` event. Feeding that into the
+            // very same `PENDING_LAUNCHES` queue the single-instance
+            // callback above uses — rather than also polling
+            // `deep_link().get_current()` for the launch that opened
+            // Linh in the first place — keeps there being exactly one
+            // dispatch per URL: once this listener is registered (here,
+            // before anything below that could block), every `Opened`
+            // event is either queued (not ready yet) or dispatched
+            // immediately (already ready), the same as a second launch.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let app_for_listener = app_handle.clone();
+                app_handle.deep_link().on_open_url(move |event| {
+                    let received_at = Instant::now();
+                    let args: Vec<String> = event
+                        .urls()
+                        .into_iter()
+                        .map(|url| url.to_string())
+                        .collect();
+                    let not_queued = {
+                        let mut registry = PENDING_LAUNCHES.lock().unwrap();
+                        enqueue_if_pending(&mut registry, received_at, args)
+                    };
+                    if let Some(args) = not_queued {
+                        if let Some(state) = app_for_listener.try_state::<AppState>() {
+                            dispatch_launch(&app_for_listener, &state, &args, received_at);
+                        }
+                    }
+                });
+            }
+
             let menu = tray::build_initial(&app_handle, &state_handle)?;
             TrayIconBuilder::with_id(tray::TRAY_ID)
                 .menu(&menu)

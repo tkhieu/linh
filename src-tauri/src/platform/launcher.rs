@@ -5,7 +5,10 @@ use std::thread;
 use linh_core::LaunchCommand;
 use linh_core::{Browser, Target};
 
-/// The Windows registry uses `%1` and CRT quoting; other platforms keep
+/// The Windows registry uses `%1` and CRT quoting, and macOS launches
+/// through `open -a <bundle> --args ...` rather than a `.desktop` `Exec=`
+/// line (`browser.install`'s `exec` holds a bundle path there, not an
+/// `Exec=` string) — both need their own command builder. Linux keeps
 /// the existing Desktop Entry launch parser.
 pub fn build_launch_command(
     browser: &Browser,
@@ -16,7 +19,11 @@ pub fn build_launch_command(
     {
         super::windows::command::build_launch_command(browser, target, url)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        super::macos::command::build_launch_command(browser, target, url)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         linh_core::build_launch_command(browser, target, url).map_err(|e| e.to_string())
     }

@@ -116,17 +116,21 @@ fn plan_app_open(
         .clone()
         .unwrap_or_else(|| primary.clone());
 
-    // Teams always passes the original URL through unchanged; Zoom
-    // needs its web-join link rewritten to a `zoommtg://` deep link,
-    // which isn't possible for every Zoom URL (see `zoom_app_url`).
+    // Teams needs its web link rewritten to an `msteams://` deep link on
+    // Windows and macOS, whose official clients only register as
+    // handlers for that scheme, not for raw `https` URLs — Linux's
+    // teams-for-linux accepts the original URL unchanged instead. Zoom
+    // needs its web-join link rewritten to a `zoommtg://` deep link
+    // everywhere, which isn't possible for every Zoom URL (see
+    // `zoom_app_url`).
     let launch_url = match app_target.app.as_str() {
         "zoom" => linh_core::zoom_app_url(url),
         "teams" => {
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             {
                 apps::teams_app_url(url)
             }
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
             {
                 Some(url.to_string())
             }

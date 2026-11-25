@@ -78,8 +78,10 @@ pub struct AppTarget {
     pub fallback: Option<Target>,
 }
 
-/// Whether the prompt window should always appear, or never (routing falls
-/// through to rules / primary browser).
+/// How an unmatched URL (one no rule matches) is routed: `Always` opens
+/// the picker, `Never` opens the primary browser. A URL that matches a
+/// rule is routed by that rule's destination regardless of this
+/// setting — rules are checked first in both modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PromptMode {

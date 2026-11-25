@@ -2,8 +2,8 @@
 
 A Velja-style browser picker: registers as the default browser and routes
 each URL to the right browser, profile, or private window based on rules
-you configure. Native builds target Fedora, Ubuntu 24.04, and Windows 10
-version 1809 or later.
+you configure. Native builds target Fedora, Ubuntu 24.04, Windows 10
+version 1809 or later, and macOS 13 Ventura or later.
 
 Routes are checked in order before the prompt mode applies. The first matching
 route opens its configured destination, including an app or the picker. When no
@@ -62,6 +62,44 @@ the Linh log under `%LOCALAPPDATA%\Linh\linh.log`.
 At startup, Linh repairs an existing per-user URL registration if it points
 to an older executable. Uninstall removes Linh's per-user ProgID,
 capabilities, and RegisteredApplications value.
+
+## Build on macOS
+
+Install Rust, Node.js, and pnpm. From the repository root run
+`pnpm --dir ui install`; then run `cargo tauri build --bundles app,dmg`
+from `src-tauri`. The macOS CI job uploads an unsigned `.dmg`; Gatekeeper
+blocks an unsigned app by default, so opening it the first time needs
+right-click → **Open**.
+
+Linh finds browsers via LaunchServices' registered `https` handlers
+(`LSCopyAllHandlersForURLScheme`), resolving each bundle id to its `.app`
+path and `Info.plist` display name/icon. Chrome, Edge, Brave, Vivaldi,
+Opera, Arc, and Firefox support private launches (`--incognito` for
+Chromium browsers, `-private-window` for Firefox); Safari has no
+command-line private-mode flag, so Linh never offers one for it.
+Chromium profiles come from each browser's `Local State` file under
+`~/Library/Application Support/<vendor>`. Browsers launch via
+`open -a <bundle> --args ...`, never through a shell. Teams and Zoom are
+detected via LaunchServices' handlers for `msteams:`/`zoommtg:` and
+launched the same way.
+
+To make Linh the default browser, click **Make Linh your default
+browser** in Linh. Linh calls `LSSetDefaultHandlerForURLScheme` for
+`http` and `https`;
+macOS shows its own confirmation dialog rather than switching
+immediately, so return to Linh afterwards to confirm the default status.
+Browser icons are converted from each bundle's `.icns` to PNG via
+`sips`(1). macOS notifications use `osascript -e 'display
+notification ...'`; failures are recorded in the Linh log under
+`~/Library/Logs/Linh/linh.log`.
+
+URLs opened while Linh isn't running yet arrive as a macOS Apple Event
+rather than a command-line argument; URLs opened while it's already
+running arrive the same way. Source-app rules (routing based on which
+app opened the link) aren't implemented on macOS: the Apple Event that
+delivers the URL doesn't expose the sending app's bundle id through any
+API this project uses, so, as on Linux, source-app rules are unavailable
+there.
 
 ## Tests and checks
 

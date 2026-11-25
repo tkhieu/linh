@@ -1,14 +1,21 @@
-//! macOS platform mechanics. Not yet implemented — every function here
-//! returns an explicit, honest "unsupported" result (`None`, `false`, an
-//! empty list, or `Err`) rather than a guess, so the UI's existing error
-//! handling (it already copes with no browsers detected, a failed
-//! default-browser set, a missing icon, ...) covers it until a later
-//! change ports this module for real.
+//! macOS platform mechanics: LaunchServices-based browser/app discovery
+//! and default-handler get/set, `.app` bundle metadata (display name,
+//! icon, Chromium profile) resolution, `open`(1)-based launching, and
+//! `osascript`-based notifications.
 
 pub mod app_config;
 pub mod apps;
 pub mod browsers;
+mod bundle;
+mod chromium;
+pub mod command;
 pub mod default_browser;
 pub mod dirs;
 pub mod icons;
+mod launch_services;
 pub mod notify;
+
+/// Linh's `CFBundleIdentifier`, as declared in `tauri.conf.json`'s
+/// top-level `identifier` (which the macOS bundler writes into the
+/// built app's `Info.plist`). Must stay in sync with that value.
+pub const LINH_BUNDLE_ID: &str = "dev.tkhieu.linh";
