@@ -96,7 +96,7 @@ function CheckIcon() {
 
 export function SettingsApp() {
   const isWindows = navigator.userAgent.includes('Windows')
-  const isMac = navigator.userAgent.includes('Mac')
+  const platformName = navigator.userAgent.includes('Mac') ? 'macOS' : isWindows ? 'Windows' : 'Linux'
   const [config, setConfig] = useState<Config | null>(null)
   const [browsers, setBrowsers] = useState<Browser[]>([])
   const [caps, setCaps] = useState<PlatformCaps | null>(null)
@@ -416,7 +416,7 @@ export function SettingsApp() {
               <div className="rule-actions"><button type="button" className="secondary" aria-expanded={presetMenu} onClick={() => setPresetMenu(!presetMenu)}>Presets</button><button type="button" className="primary" onClick={() => setDraft({ ...emptyDraft })}>+ New route</button></div>
             </div>
             {presetMenu && <div className="preset-menu" role="menu" aria-label="Presets">{presets.map((preset) => <button type="button" role="menuitem" key={preset.id} onClick={() => addPreset(preset)}>{preset.name}</button>)}</div>}
-            {!caps.source_app_rules && <p className="hint">Source app rules are unavailable on {isMac ? 'macOS' : 'Linux'}. Existing source app values are kept when you save.</p>}
+            {!caps.source_app_rules && <p className="hint">Source app rules are unavailable on {platformName}. Existing source app values are kept when you save.</p>}
             <div>
               <div className="settings-table-head">
                 <span className="col-no">No</span><span style={{ flex: '1 1 0' }}>Route / matches</span><span className="col-dest">Departs to</span>

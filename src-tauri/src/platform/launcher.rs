@@ -9,11 +9,18 @@ use linh_core::{Browser, Target};
 
 use crate::platform::current::dirs::Dirs;
 
+/// Something to run exactly once if a launch that already reported
+/// synchronous success is later confirmed to have actually failed (see
+/// [`spawn_detached`]'s doc comment). Only macOS ever invokes one today;
+/// Linux and Windows ignore it, since their `spawn_detached` only ever
+/// knows success/failure synchronously, as before.
+pub type AsyncFailureHandler = Box<dyn FnOnce() + Send + 'static>;
+
 /// The Windows registry uses `%1` and CRT quoting, and macOS launches
-/// through `open(1)`/a direct bundle exec rather than a `.desktop`
-/// `Exec=` line (`browser.install`'s `exec` holds a bundle path there,
-/// not an `Exec=` string) — both need their own command builder. Linux
-/// keeps the existing Desktop Entry launch parser.
+/// through `open(1)` rather than a `.desktop` `Exec=` line
+/// (`browser.install`'s `exec` holds a bundle path there, not an
+/// `Exec=` string) — both need their own command builder. Linux keeps
+/// the existing Desktop Entry launch parser.
 pub fn build_launch_command(
     browser: &Browser,
     target: &Target,
@@ -77,27 +84,39 @@ fn strip_vars(command: &mut Command, vars: &[&str]) {
 /// `args` are passed directly to `exec`), and reaps it in a background
 /// thread so it never lingers as a zombie. See
 /// [`StripLinhWebkitEnv`]'s doc comment for why its environment is
-/// stripped first.
+/// stripped first. Returns as soon as the process has been spawned
+/// (`Command::spawn()` succeeding), never waiting for it to exit, on any
+/// platform — this must never block the caller, which can be Tauri's
+/// `setup`, the `RunEvent::Opened` listener, or the single-instance
+/// callback (see `main.rs`), none of which can afford to stall.
 ///
 /// `platform::macos::command::build_launch_command` only ever produces
-/// `open`(1)-wrapped commands, which are spawned differently — see
-/// [`spawn_macos_open`] — since it's the one case where waiting for the
-/// child's exit is both safe and useful (`open` always returns quickly,
-/// whether or not the app it opens stays running). The plain
-/// fire-and-forget path below is kept reachable for macOS too — rather
-/// than relying on that always being true — as a safe fallback for any
-/// command whose program isn't `open`, e.g. if that invariant ever
-/// changes. `dirs` is only read on macOS, to log a bounded-wait timeout
-/// — see [`spawn_macos_open`].
+/// `open`(1)-wrapped commands, for which [`spawn_macos_open`] additionally
+/// starts a worker thread that watches `open`'s own exit (cheap: `open`
+/// always returns quickly, whether or not the app it opens stays
+/// running) and, only if that watcher *confirms* a failure — a non-zero
+/// exit, or `open` itself hanging past a hard deadline — calls
+/// `on_confirmed_failure` once. The plain fire-and-forget path below is
+/// kept reachable for macOS too — rather than relying on the "every
+/// macOS command is `open`" invariant always holding — as a safe
+/// fallback for any command whose program isn't `open`, e.g. if that
+/// ever changes; `on_confirmed_failure` is simply dropped unused there,
+/// same as on Linux/Windows, which keep their exact existing
+/// fire-and-forget behavior with no later failure detection at all.
+/// `dirs` is only read on macOS, to log what the watcher found.
 #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
-pub fn spawn_detached(dirs: &Dirs, cmd: &LaunchCommand) -> io::Result<()> {
+pub fn spawn_detached(
+    dirs: &Dirs,
+    cmd: &LaunchCommand,
+    on_confirmed_failure: AsyncFailureHandler,
+) -> io::Result<()> {
     #[cfg(target_os = "windows")]
     if matches!(cmd.program.as_str(), "msteams:" | "zoommtg:") {
         return super::windows::open_uri(&cmd.args[0]).map_err(io::Error::other);
     }
     #[cfg(target_os = "macos")]
     if cmd.program == super::macos::command::OPEN {
-        return spawn_macos_open(dirs, cmd);
+        return spawn_macos_open(dirs, cmd, on_confirmed_failure);
     }
     let mut command = Command::new(&cmd.program);
     command
@@ -127,102 +146,170 @@ pub fn spawn_detached(dirs: &Dirs, cmd: &LaunchCommand) -> io::Result<()> {
     Ok(())
 }
 
-/// How long to wait for `open(1)` to exit before giving up on getting a
-/// real success/failure signal from it.
+/// How long `open`(1) gets before its watcher gives up waiting for a
+/// normal exit, kills it, and treats that as a confirmed failure.
 #[cfg(target_os = "macos")]
-const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const OPEN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// `open(1)` asks LaunchServices to open the app/URL and returns as soon
-/// as that request has been made, without waiting for the app itself to
-/// quit (unlike a direct exec, or Linux's `flatpak run`, which execs
-/// into and so blocks for the app's entire lifetime) — so waiting for
-/// its exit status is normally cheap, and is the only way to learn that
-/// the bundle no longer exists or no handler is registered for a custom
-/// scheme, so the caller (`routing::open_app_target_with`) can fall back
-/// to the configured browser instead of silently dropping the link.
-/// `open` succeeding at the `Command::spawn()` level alone (it always
-/// exists) would otherwise look identical to it actually finding the
-/// app.
-///
-/// This still runs the wait on a worker thread with a bounded timeout,
-/// rather than on the caller's thread (routing, which can run from
-/// Tauri's setup/event-loop callbacks — see `main.rs`'s `RunEvent`
-/// listener and single-instance callback), so a LaunchServices request
-/// that never completes can never freeze Linh. A timeout does *not*
-/// trigger the browser fallback the way a real (non-zero exit) failure
-/// does: `open` may still be about to succeed, and falling back here as
-/// well risks the link opening twice (once whenever `open` actually
-/// finishes, once in the fallback browser) — logging and otherwise
-/// treating it as success is the safer of the two imperfect choices.
+/// How often the watcher polls for `open`'s exit. Small enough to notice
+/// a quick exit promptly; large enough not to spin.
 #[cfg(target_os = "macos")]
-fn spawn_macos_open(dirs: &Dirs, cmd: &LaunchCommand) -> io::Result<()> {
-    let program = cmd.program.clone();
-    let args = cmd.args.clone();
-    let outcome = run_with_timeout(OPEN_TIMEOUT, move || {
-        Command::new(&program)
-            .args(&args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-    });
-    handle_open_outcome(dirs, &cmd.program, outcome)
+const OPEN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Spawns `cmd` (an `open`(1) invocation) and returns immediately — never
+/// waiting on the caller's thread — handing the child off to a worker
+/// thread that watches it. `open` asks LaunchServices to open the
+/// app/URL and returns on its own as soon as that request has been made,
+/// without waiting for the app itself to quit (unlike a direct exec, or
+/// Linux's `flatpak run`, which execs into and so blocks for the app's
+/// entire lifetime) — so that watcher thread's wait is normally quick,
+/// and is the only way to learn that the bundle no longer exists or no
+/// handler is registered for a custom scheme (`open` succeeding at the
+/// `Command::spawn()` level alone — it always exists — looks identical
+/// to it actually finding the app). See [`watch_and_report`] for exactly
+/// what "watches" means.
+#[cfg(target_os = "macos")]
+fn spawn_macos_open(
+    dirs: &Dirs,
+    cmd: &LaunchCommand,
+    on_confirmed_failure: AsyncFailureHandler,
+) -> io::Result<()> {
+    let mut command = Command::new(&cmd.program);
+    command
+        .args(&cmd.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let child = command.spawn()?;
+    spawn_watcher(
+        child,
+        OPEN_DEADLINE,
+        OPEN_POLL_INTERVAL,
+        dirs.clone(),
+        cmd.program.clone(),
+        on_confirmed_failure,
+    );
+    Ok(())
 }
 
-/// What came back from running a bounded-wait command: it finished (with
-/// the usual `io::Result<ExitStatus>`), or the timeout elapsed first and
-/// it may still be running.
+/// The subset of [`std::process::Child`] the watcher needs, so tests can
+/// inject a fake instead of a real OS process.
 #[cfg(target_os = "macos")]
-enum RunOutcome {
-    Finished(io::Result<ExitStatus>),
-    TimedOut,
+trait Waitable {
+    /// Non-blocking: `Ok(None)` while still running.
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>>;
+    /// Kills and reaps (waits for) the process, so it's never left as a
+    /// zombie even when forced to give up on it.
+    fn kill_and_reap(&mut self) -> io::Result<()>;
 }
 
-/// Runs `run` on a worker thread and waits up to `timeout` for it,
-/// without ever blocking the calling thread past `timeout`. `run` keeps
-/// running in its own thread past a timeout (reaping whatever child it
-/// spawned when it eventually does finish); its result is simply
-/// dropped, since nothing is listening for it anymore.
 #[cfg(target_os = "macos")]
-fn run_with_timeout<F>(timeout: std::time::Duration, run: F) -> RunOutcome
-where
-    F: FnOnce() -> io::Result<ExitStatus> + Send + 'static,
-{
-    let (tx, rx) = std::sync::mpsc::channel();
-    thread::spawn(move || {
-        let _ = tx.send(run());
-    });
-    match rx.recv_timeout(timeout) {
-        Ok(result) => RunOutcome::Finished(result),
-        Err(
-            std::sync::mpsc::RecvTimeoutError::Timeout
-            | std::sync::mpsc::RecvTimeoutError::Disconnected,
-        ) => RunOutcome::TimedOut,
+impl Waitable for std::process::Child {
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        std::process::Child::try_wait(self)
+    }
+
+    fn kill_and_reap(&mut self) -> io::Result<()> {
+        std::process::Child::kill(self)?;
+        std::process::Child::wait(self).map(|_| ())
     }
 }
 
-/// Turns a [`RunOutcome`] for `program` into the `io::Result` callers
-/// expect: success/failure map straight through; a timeout logs why it's
-/// *not* being treated as a failure (see [`spawn_macos_open`]) and
-/// counts as success.
+/// Spawns exactly one worker thread that calls [`watch_and_report`] and
+/// then terminates — it never lingers, however `waitable` resolves.
+/// Returns immediately; the thread itself does all the waiting.
 #[cfg(target_os = "macos")]
-fn handle_open_outcome(dirs: &Dirs, program: &str, outcome: RunOutcome) -> io::Result<()> {
-    match outcome {
-        RunOutcome::Finished(Ok(status)) if status.success() => Ok(()),
-        RunOutcome::Finished(Ok(status)) => {
-            Err(io::Error::other(format!("{program} exited with {status}")))
+fn spawn_watcher<W: Waitable + Send + 'static>(
+    waitable: W,
+    deadline: std::time::Duration,
+    poll_interval: std::time::Duration,
+    dirs: Dirs,
+    program: String,
+    on_confirmed_failure: AsyncFailureHandler,
+) {
+    thread::spawn(move || {
+        watch_and_report(
+            waitable,
+            deadline,
+            poll_interval,
+            &dirs,
+            &program,
+            on_confirmed_failure,
+        );
+    });
+}
+
+/// What watching `waitable` to resolution found.
+#[cfg(target_os = "macos")]
+enum WatchResult {
+    /// Exited on its own with a successful status.
+    Succeeded,
+    /// Exited on its own with a failing status, or `try_wait` itself
+    /// errored.
+    Failed,
+    /// Never exited before `deadline`; already killed and reaped.
+    TimedOut,
+}
+
+/// Polls `waitable` every `poll_interval` until it exits or `deadline`
+/// elapses (from this call, not from when the process actually
+/// started), in which case it's killed and reaped so it's never left
+/// running or as a zombie. Always terminates: either `waitable` exits
+/// (success or failure) or the deadline forces it.
+#[cfg(target_os = "macos")]
+fn watch<W: Waitable>(
+    mut waitable: W,
+    deadline: std::time::Duration,
+    poll_interval: std::time::Duration,
+) -> WatchResult {
+    let start = std::time::Instant::now();
+    loop {
+        match waitable.try_wait() {
+            Ok(Some(status)) => {
+                return if status.success() {
+                    WatchResult::Succeeded
+                } else {
+                    WatchResult::Failed
+                };
+            }
+            Ok(None) => {}
+            Err(_) => return WatchResult::Failed,
         }
-        RunOutcome::Finished(Err(err)) => Err(err),
-        RunOutcome::TimedOut => {
+        if start.elapsed() >= deadline {
+            let _ = waitable.kill_and_reap();
+            return WatchResult::TimedOut;
+        }
+        thread::sleep(poll_interval);
+    }
+}
+
+/// Runs [`watch`] and, only on a confirmed failure (not a success),
+/// logs it and calls `on_confirmed_failure` exactly once. A success logs
+/// nothing extra — the normal `receive->spawn` line already covers it.
+#[cfg(target_os = "macos")]
+fn watch_and_report<W: Waitable>(
+    waitable: W,
+    deadline: std::time::Duration,
+    poll_interval: std::time::Duration,
+    dirs: &Dirs,
+    program: &str,
+    on_confirmed_failure: AsyncFailureHandler,
+) {
+    match watch(waitable, deadline, poll_interval) {
+        WatchResult::Succeeded => {}
+        WatchResult::Failed => {
             crate::platform::logging::log_line(
                 dirs,
-                &format!(
-                    "{program} had not exited after {OPEN_TIMEOUT:?}; not treating this as a \
-                     launch failure (it may still succeed) and not falling back, since that \
-                     could open the link twice — continuing without waiting further"
-                ),
+                &format!("{program}: confirmed failed after appearing to launch; falling back"),
             );
-            Ok(())
+            on_confirmed_failure();
+        }
+        WatchResult::TimedOut => {
+            crate::platform::logging::log_line(
+                dirs,
+                &format!("{program}: still running after {deadline:?}; killed it and falling back"),
+            );
+            on_confirmed_failure();
         }
     }
 }
@@ -231,6 +318,8 @@ fn handle_open_outcome(dirs: &Dirs, program: &str, outcome: RunOutcome) -> io::R
 mod macos_tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
     use std::time::Duration;
 
     fn exit_status(code: i32) -> ExitStatus {
@@ -252,57 +341,135 @@ mod macos_tests {
         }
     }
 
-    #[test]
-    fn finishing_before_the_timeout_is_reported_as_finished() {
-        let outcome = run_with_timeout(Duration::from_millis(200), || Ok(exit_status(0)));
-        assert!(matches!(outcome, RunOutcome::Finished(Ok(status)) if status.success()));
+    /// Reports exactly the scripted sequence of poll results, then keeps
+    /// reporting "still running" forever (so a deadline test can run it
+    /// past its deadline).
+    struct ScriptedWaitable {
+        remaining: std::collections::VecDeque<Option<ExitStatus>>,
+        kill_called: Arc<AtomicBool>,
+    }
+
+    impl Waitable for ScriptedWaitable {
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            Ok(self.remaining.pop_front().flatten())
+        }
+
+        fn kill_and_reap(&mut self) -> io::Result<()> {
+            self.kill_called.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn still_running_forever() -> ScriptedWaitable {
+        ScriptedWaitable {
+            remaining: std::collections::VecDeque::new(),
+            kill_called: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn exits_with(code: i32) -> ScriptedWaitable {
+        ScriptedWaitable {
+            remaining: std::collections::VecDeque::from([Some(exit_status(code))]),
+            kill_called: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     #[test]
-    fn exceeding_the_timeout_is_reported_as_timed_out() {
-        let outcome = run_with_timeout(Duration::from_millis(50), || {
-            thread::sleep(Duration::from_millis(300));
-            Ok(exit_status(0))
-        });
-        assert!(matches!(outcome, RunOutcome::TimedOut));
-    }
-
-    #[test]
-    fn successful_exit_is_ok() {
-        let dirs = test_dirs();
+    fn zero_exit_runs_no_fallback() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran_for_closure = ran.clone();
+        watch_and_report(
+            exits_with(0),
+            Duration::from_millis(200),
+            Duration::from_millis(5),
+            &test_dirs(),
+            "fake-open",
+            Box::new(move || ran_for_closure.store(true, Ordering::SeqCst)),
+        );
         assert!(
-            handle_open_outcome(&dirs, "open", RunOutcome::Finished(Ok(exit_status(0)))).is_ok()
+            !ran.load(Ordering::SeqCst),
+            "a clean exit must not fall back"
         );
     }
 
     #[test]
-    fn failing_exit_is_err() {
-        let dirs = test_dirs();
-        assert!(
-            handle_open_outcome(&dirs, "open", RunOutcome::Finished(Ok(exit_status(256)))).is_err()
+    fn non_zero_exit_runs_fallback_exactly_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_closure = calls.clone();
+        watch_and_report(
+            exits_with(256), // raw wait-status 256 => exit code 1
+            Duration::from_millis(200),
+            Duration::from_millis(5),
+            &test_dirs(),
+            "fake-open",
+            Box::new(move || {
+                calls_for_closure.fetch_add(1, Ordering::SeqCst);
+            }),
         );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
-    fn spawn_error_is_propagated() {
-        let dirs = test_dirs();
-        let err = handle_open_outcome(
-            &dirs,
-            "open",
-            RunOutcome::Finished(Err(io::Error::other("boom"))),
-        )
-        .unwrap_err();
-        assert_eq!(err.to_string(), "boom");
+    fn deadline_kills_reaps_and_runs_fallback_exactly_once() {
+        let waitable = still_running_forever();
+        let kill_called = waitable.kill_called.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_closure = calls.clone();
+        watch_and_report(
+            waitable,
+            Duration::from_millis(60),
+            Duration::from_millis(10),
+            &test_dirs(),
+            "fake-open",
+            Box::new(move || {
+                calls_for_closure.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        assert!(
+            kill_called.load(Ordering::SeqCst),
+            "must kill a hung process"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// `try_wait` blocks on a two-party barrier until the test releases
+    /// it. If `spawn_watcher` ever waited for the watcher thread (rather
+    /// than only spawning it and returning), this test would deadlock —
+    /// a hang, not a flaky timing race — since nothing can release the
+    /// barrier until after `spawn_watcher` has already returned.
+    struct BlocksOnBarrier {
+        barrier: Arc<Barrier>,
+    }
+
+    impl Waitable for BlocksOnBarrier {
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            self.barrier.wait();
+            Ok(Some(exit_status(0)))
+        }
+
+        fn kill_and_reap(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
-    fn timing_out_is_ok_not_a_failure() {
-        // A timeout must never be treated as a launch failure: doing so
-        // would make the caller fall back to another browser while
-        // `open` might still succeed on its own, risking the link
-        // opening twice.
-        let dirs = test_dirs();
-        assert!(handle_open_outcome(&dirs, "open", RunOutcome::TimedOut).is_ok());
+    fn spawn_watcher_returns_without_waiting_for_the_child() {
+        let barrier = Arc::new(Barrier::new(2));
+        let waitable = BlocksOnBarrier {
+            barrier: barrier.clone(),
+        };
+        spawn_watcher(
+            waitable,
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+            test_dirs(),
+            "fake-open".to_string(),
+            Box::new(|| {}),
+        );
+        // Only reachable if `spawn_watcher` didn't block on the watcher
+        // thread's `try_wait`. Releases the watcher thread so it (and
+        // the test binary) can exit cleanly.
+        barrier.wait();
     }
 }
 

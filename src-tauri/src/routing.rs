@@ -5,6 +5,8 @@ use tauri::{AppHandle, Manager};
 use url::Url;
 
 use crate::platform::current::apps;
+use crate::platform::current::dirs::Dirs;
+use crate::platform::launcher::AsyncFailureHandler;
 use crate::platform::{launcher, logging, url_intake};
 use crate::state::AppState;
 
@@ -78,7 +80,9 @@ pub fn route_url(app: &AppHandle, state: &AppState, raw_url: &str, received_at: 
 /// Resolves `target` against the detected browsers and spawns it, never
 /// through a shell.
 pub fn open_target(state: &AppState, target: &Target, url: &str) -> Result<(), String> {
-    open_target_with(state, target, url, |cmd| real_spawn(&state.dirs, cmd))
+    open_target_with(state, target, url, |cmd, on_confirmed_failure| {
+        real_spawn(&state.dirs, cmd, on_confirmed_failure)
+    })
 }
 
 /// What [`plan_app_open`] decided to do for a given `AppTarget` + URL —
@@ -168,7 +172,7 @@ pub fn open_app_target(state: &AppState, app_target: &AppTarget, url: &str) -> R
         app_target,
         url,
         |app_id| apps::find_app(&state.dirs, app_id),
-        |cmd| real_spawn(&state.dirs, cmd),
+        |cmd, on_confirmed_failure| real_spawn(&state.dirs, cmd, on_confirmed_failure),
     )
 }
 
@@ -177,12 +181,14 @@ fn open_app_target_with(
     app_target: &AppTarget,
     url: &str,
     find_app: impl FnOnce(&str) -> Option<Browser>,
-    spawn: impl Fn(&LaunchCommand) -> Result<(), String>,
+    spawn: impl Fn(&LaunchCommand, AsyncFailureHandler) -> Result<(), String>,
 ) -> Result<(), String> {
     let primary = state.config.lock().unwrap().primary.clone();
     match plan_app_open(app_target, url, find_app, &primary) {
         AppOpenPlan::Launch { cmd, fallback } => {
-            if spawn(&cmd).is_ok() {
+            let on_confirmed_failure =
+                async_fallback_handler(state, fallback.clone(), url.to_string());
+            if spawn(&cmd, on_confirmed_failure).is_ok() {
                 Ok(())
             } else {
                 open_target_with(state, &fallback, url, spawn)
@@ -196,7 +202,7 @@ fn open_target_with(
     state: &AppState,
     target: &Target,
     url: &str,
-    spawn: impl Fn(&LaunchCommand) -> Result<(), String>,
+    spawn: impl Fn(&LaunchCommand, AsyncFailureHandler) -> Result<(), String>,
 ) -> Result<(), String> {
     let browsers = state.browsers.lock().unwrap();
     let browser = browsers
@@ -205,17 +211,59 @@ fn open_target_with(
         .ok_or_else(|| format!("browser '{}' is not installed", target.browser))?;
     let cmd = launcher::build_launch_command(browser, target, url)?;
     drop(browsers);
-    spawn(&cmd)
+    let dirs = state.dirs.clone();
+    let url_owned = url.to_string();
+    let on_confirmed_failure: AsyncFailureHandler = Box::new(move || {
+        logging::log_line(
+            &dirs,
+            &format!(
+                "{url_owned}: launch appeared to start but was later confirmed to have failed"
+            ),
+        );
+    });
+    spawn(&cmd, on_confirmed_failure)
+}
+
+/// Builds the [`AsyncFailureHandler`] for an app-target launch attempt:
+/// if `spawn` later confirms it actually failed (macOS only — see
+/// `platform::launcher::spawn_detached`'s doc comment; Linux/Windows
+/// never invoke this, since their `spawn_detached` only ever reports
+/// success/failure synchronously), opens `fallback` with `url` the same
+/// way the synchronous "spawn itself failed" branch already does.
+/// Reads `state` now, into an owned snapshot, since this can run well
+/// after `state` — a short-lived borrow — is out of scope.
+fn async_fallback_handler(state: &AppState, fallback: Target, url: String) -> AsyncFailureHandler {
+    let dirs = state.dirs.clone();
+    let browsers = state.browsers.lock().unwrap().clone();
+    Box::new(move || {
+        let result = browsers
+            .iter()
+            .find(|b| b.id == fallback.browser)
+            .ok_or_else(|| format!("browser '{}' is not installed", fallback.browser))
+            .and_then(|browser| launcher::build_launch_command(browser, &fallback, &url))
+            .and_then(|cmd| real_spawn(&dirs, &cmd, Box::new(|| {})));
+        match result {
+            Ok(()) => logging::log_line(
+                &dirs,
+                &format!("{url}: confirmed launch failure, fallback opened -> {fallback:?}"),
+            ),
+            Err(err) => logging::log_line(
+                &dirs,
+                &format!("{url}: confirmed launch failure, fallback also failed: {err}"),
+            ),
+        }
+    })
 }
 
 /// The real, process-spawning implementation of the `spawn` parameter
 /// threaded through [`open_target_with`]/[`open_app_target_with`]; tests
 /// inject a fake instead so they never launch a real process.
 fn real_spawn(
-    dirs: &crate::platform::current::dirs::Dirs,
+    dirs: &Dirs,
     cmd: &LaunchCommand,
+    on_confirmed_failure: AsyncFailureHandler,
 ) -> Result<(), String> {
-    launcher::spawn_detached(dirs, cmd).map_err(|e| e.to_string())
+    launcher::spawn_detached(dirs, cmd, on_confirmed_failure).map_err(|e| e.to_string())
 }
 
 pub fn show_and_focus(app: &AppHandle, label: &str) {
@@ -230,8 +278,9 @@ pub fn show_and_focus(app: &AppHandle, label: &str) {
 // failure meaning the binary itself couldn't exec) — Windows registry
 // commands are exercised in platform::windows::command tests, and macOS
 // `open`-wrapped commands (`cmd.program` is always `/usr/bin/open`,
-// `launcher::spawn_macos`'s exit-status check standing in for a spawn
-// failure) in platform::macos::command tests.
+// `launcher::watch_and_report`'s confirmed-failure handling standing in
+// for a spawn failure) in platform::launcher's and
+// platform::macos::command's own tests.
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
@@ -413,7 +462,7 @@ mod tests {
             &app_target,
             original_url,
             |_| None, // app not installed
-            |cmd| {
+            |cmd, _on_confirmed_failure| {
                 seen.borrow_mut().push(cmd.clone());
                 Ok(())
             },
@@ -447,7 +496,7 @@ mod tests {
             &app_target,
             original_url,
             |_| Some(app.clone()),
-            |cmd| {
+            |cmd, _on_confirmed_failure| {
                 let is_app_cmd = cmd.program == "/usr/bin/teams-for-linux";
                 seen.borrow_mut().push(cmd.clone());
                 if is_app_cmd {
@@ -490,7 +539,7 @@ mod tests {
             &app_target,
             "https://teams.microsoft.com/l/meetup-join/abc",
             |_| None,
-            |cmd| {
+            |cmd, _on_confirmed_failure| {
                 seen.borrow_mut().push(cmd.clone());
                 Ok(())
             },

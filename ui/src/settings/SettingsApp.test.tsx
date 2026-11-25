@@ -84,6 +84,18 @@ describe('SettingsApp', () => {
     }
   })
 
+  it('names Windows, not Linux, in the source-app-rules hint on Windows', async () => {
+    const userAgent = vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Windows NT 10.0')
+    try {
+      render(<SettingsApp />)
+      await screen.findByLabelText('Primary browser')
+      openSection('Rules')
+      expect(await screen.findByText(/Source app rules are unavailable on Windows\./)).toBeInTheDocument()
+    } finally {
+      userAgent.mockRestore()
+    }
+  })
+
   it('adds, edits, reorders, deletes rules, and saves target settings', async () => {
     render(<SettingsApp />)
     await screen.findByLabelText('Primary browser')
