@@ -1,5 +1,7 @@
 # Linh
 
+Release instructions: [docs/release.md](docs/release.md).
+
 A Velja-style browser picker: registers as the default browser and routes
 each URL to the right browser, profile, or private window based on rules
 you configure. Native builds target Fedora, Ubuntu 24.04, and Windows 10
