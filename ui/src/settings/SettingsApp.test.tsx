@@ -63,6 +63,27 @@ describe('SettingsApp', () => {
     }
   })
 
+  it('names the current platform in the source-app-rules hint', async () => {
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    expect(await screen.findByText(/Source app rules are unavailable on Linux\./)).toBeInTheDocument()
+  })
+
+  it('names macOS in the source-app-rules hint on a Mac', async () => {
+    const userAgent = vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+    )
+    try {
+      render(<SettingsApp />)
+      await screen.findByLabelText('Primary browser')
+      openSection('Rules')
+      expect(await screen.findByText(/Source app rules are unavailable on macOS\./)).toBeInTheDocument()
+    } finally {
+      userAgent.mockRestore()
+    }
+  })
+
   it('adds, edits, reorders, deletes rules, and saves target settings', async () => {
     render(<SettingsApp />)
     await screen.findByLabelText('Primary browser')

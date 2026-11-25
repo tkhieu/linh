@@ -78,7 +78,7 @@ pub fn route_url(app: &AppHandle, state: &AppState, raw_url: &str, received_at: 
 /// Resolves `target` against the detected browsers and spawns it, never
 /// through a shell.
 pub fn open_target(state: &AppState, target: &Target, url: &str) -> Result<(), String> {
-    open_target_with(state, target, url, real_spawn)
+    open_target_with(state, target, url, |cmd| real_spawn(&state.dirs, cmd))
 }
 
 /// What [`plan_app_open`] decided to do for a given `AppTarget` + URL —
@@ -168,7 +168,7 @@ pub fn open_app_target(state: &AppState, app_target: &AppTarget, url: &str) -> R
         app_target,
         url,
         |app_id| apps::find_app(&state.dirs, app_id),
-        real_spawn,
+        |cmd| real_spawn(&state.dirs, cmd),
     )
 }
 
@@ -211,8 +211,11 @@ fn open_target_with(
 /// The real, process-spawning implementation of the `spawn` parameter
 /// threaded through [`open_target_with`]/[`open_app_target_with`]; tests
 /// inject a fake instead so they never launch a real process.
-fn real_spawn(cmd: &LaunchCommand) -> Result<(), String> {
-    launcher::spawn_detached(cmd).map_err(|e| e.to_string())
+fn real_spawn(
+    dirs: &crate::platform::current::dirs::Dirs,
+    cmd: &LaunchCommand,
+) -> Result<(), String> {
+    launcher::spawn_detached(dirs, cmd).map_err(|e| e.to_string())
 }
 
 pub fn show_and_focus(app: &AppHandle, label: &str) {

@@ -1,16 +1,19 @@
 use std::io;
+#[cfg(target_os = "macos")]
+use std::process::ExitStatus;
 use std::process::{Command, Stdio};
-#[cfg(not(target_os = "macos"))]
 use std::thread;
 
 use linh_core::LaunchCommand;
 use linh_core::{Browser, Target};
 
+use crate::platform::current::dirs::Dirs;
+
 /// The Windows registry uses `%1` and CRT quoting, and macOS launches
-/// through `open -a <bundle> --args ...` rather than a `.desktop` `Exec=`
-/// line (`browser.install`'s `exec` holds a bundle path there, not an
-/// `Exec=` string) — both need their own command builder. Linux keeps
-/// the existing Desktop Entry launch parser.
+/// through `open(1)`/a direct bundle exec rather than a `.desktop`
+/// `Exec=` line (`browser.install`'s `exec` holds a bundle path there,
+/// not an `Exec=` string) — both need their own command builder. Linux
+/// keeps the existing Desktop Entry launch parser.
 pub fn build_launch_command(
     browser: &Browser,
     target: &Target,
@@ -45,15 +48,11 @@ use crate::webkit_tune;
 /// inherit Linh's own rendering policy. Only vars Linh itself introduced
 /// are removed; one already present in the user's own environment
 /// before Linh started is left alone, since that's the user's own
-/// choice. A no-op on Windows; unused (and so not compiled at all) on
-/// macOS, which never reaches the generic `Command::new` path below —
-/// every macOS launch goes through [`spawn_macos`] instead.
-#[cfg(not(target_os = "macos"))]
+/// choice. A no-op on other platforms.
 pub trait StripLinhWebkitEnv {
     fn strip_linh_webkit_env(&mut self) -> &mut Self;
 }
 
-#[cfg(not(target_os = "macos"))]
 impl StripLinhWebkitEnv for Command {
     #[cfg(target_os = "linux")]
     fn strip_linh_webkit_env(&mut self) -> &mut Self {
@@ -79,86 +78,231 @@ fn strip_vars(command: &mut Command, vars: &[&str]) {
 /// thread so it never lingers as a zombie. See
 /// [`StripLinhWebkitEnv`]'s doc comment for why its environment is
 /// stripped first.
-pub fn spawn_detached(cmd: &LaunchCommand) -> io::Result<()> {
+///
+/// `platform::macos::command::build_launch_command` only ever produces
+/// `open`(1)-wrapped commands, which are spawned differently — see
+/// [`spawn_macos_open`] — since it's the one case where waiting for the
+/// child's exit is both safe and useful (`open` always returns quickly,
+/// whether or not the app it opens stays running). The plain
+/// fire-and-forget path below is kept reachable for macOS too — rather
+/// than relying on that always being true — as a safe fallback for any
+/// command whose program isn't `open`, e.g. if that invariant ever
+/// changes. `dirs` is only read on macOS, to log a bounded-wait timeout
+/// — see [`spawn_macos_open`].
+#[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+pub fn spawn_detached(dirs: &Dirs, cmd: &LaunchCommand) -> io::Result<()> {
     #[cfg(target_os = "windows")]
     if matches!(cmd.program.as_str(), "msteams:" | "zoommtg:") {
         return super::windows::open_uri(&cmd.args[0]).map_err(io::Error::other);
     }
     #[cfg(target_os = "macos")]
-    {
-        spawn_macos(cmd)
+    if cmd.program == super::macos::command::OPEN {
+        return spawn_macos_open(dirs, cmd);
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let mut command = Command::new(&cmd.program);
-        command
-            .strip_linh_webkit_env()
-            .args(&cmd.args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
-        let mut child = command.spawn()?;
-        thread::spawn(move || {
-            let _ = child.wait();
-        });
-        Ok(())
-    }
-}
-
-/// Every macOS launch goes through `/usr/bin/open`, which — unlike a
-/// direct exec of the target app, or Linux's `flatpak run` (which execs
-/// into, and so blocks for, the app's entire lifetime) — asks
-/// LaunchServices to open the app/URL and returns immediately, without
-/// waiting for the app itself to quit. That makes waiting for its exit
-/// status here cheap, and it's the only way to learn that the bundle no
-/// longer exists or no handler is registered for a custom scheme, so the
-/// caller (`routing::open_app_target_with`) can fall back to the
-/// configured browser instead of silently dropping the link — `open`
-/// succeeding at the `Command::spawn()` level (it always exists) would
-/// otherwise look identical to it actually finding the app.
-#[cfg(target_os = "macos")]
-fn spawn_macos(cmd: &LaunchCommand) -> io::Result<()> {
-    let status = Command::new(&cmd.program)
+    let mut command = Command::new(&cmd.program);
+    command
+        .strip_linh_webkit_env()
         .args(&cmd.args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "{} exited with {status}",
-            cmd.program
-        )))
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::process::CommandExt;
+        // Puts the child in its own process group so it's never tied to
+        // Linh's: if Linh's own process group ever gets a signal (e.g. a
+        // terminal session closing, in a dev build run from one), the
+        // browser the child becomes must not be killed along with it.
+        command.process_group(0);
+    }
+    let mut child = command.spawn()?;
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+/// How long to wait for `open(1)` to exit before giving up on getting a
+/// real success/failure signal from it.
+#[cfg(target_os = "macos")]
+const OPEN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `open(1)` asks LaunchServices to open the app/URL and returns as soon
+/// as that request has been made, without waiting for the app itself to
+/// quit (unlike a direct exec, or Linux's `flatpak run`, which execs
+/// into and so blocks for the app's entire lifetime) — so waiting for
+/// its exit status is normally cheap, and is the only way to learn that
+/// the bundle no longer exists or no handler is registered for a custom
+/// scheme, so the caller (`routing::open_app_target_with`) can fall back
+/// to the configured browser instead of silently dropping the link.
+/// `open` succeeding at the `Command::spawn()` level alone (it always
+/// exists) would otherwise look identical to it actually finding the
+/// app.
+///
+/// This still runs the wait on a worker thread with a bounded timeout,
+/// rather than on the caller's thread (routing, which can run from
+/// Tauri's setup/event-loop callbacks — see `main.rs`'s `RunEvent`
+/// listener and single-instance callback), so a LaunchServices request
+/// that never completes can never freeze Linh. A timeout does *not*
+/// trigger the browser fallback the way a real (non-zero exit) failure
+/// does: `open` may still be about to succeed, and falling back here as
+/// well risks the link opening twice (once whenever `open` actually
+/// finishes, once in the fallback browser) — logging and otherwise
+/// treating it as success is the safer of the two imperfect choices.
+#[cfg(target_os = "macos")]
+fn spawn_macos_open(dirs: &Dirs, cmd: &LaunchCommand) -> io::Result<()> {
+    let program = cmd.program.clone();
+    let args = cmd.args.clone();
+    let outcome = run_with_timeout(OPEN_TIMEOUT, move || {
+        Command::new(&program)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+    });
+    handle_open_outcome(dirs, &cmd.program, outcome)
+}
+
+/// What came back from running a bounded-wait command: it finished (with
+/// the usual `io::Result<ExitStatus>`), or the timeout elapsed first and
+/// it may still be running.
+#[cfg(target_os = "macos")]
+enum RunOutcome {
+    Finished(io::Result<ExitStatus>),
+    TimedOut,
+}
+
+/// Runs `run` on a worker thread and waits up to `timeout` for it,
+/// without ever blocking the calling thread past `timeout`. `run` keeps
+/// running in its own thread past a timeout (reaping whatever child it
+/// spawned when it eventually does finish); its result is simply
+/// dropped, since nothing is listening for it anymore.
+#[cfg(target_os = "macos")]
+fn run_with_timeout<F>(timeout: std::time::Duration, run: F) -> RunOutcome
+where
+    F: FnOnce() -> io::Result<ExitStatus> + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(run());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(result) => RunOutcome::Finished(result),
+        Err(
+            std::sync::mpsc::RecvTimeoutError::Timeout
+            | std::sync::mpsc::RecvTimeoutError::Disconnected,
+        ) => RunOutcome::TimedOut,
+    }
+}
+
+/// Turns a [`RunOutcome`] for `program` into the `io::Result` callers
+/// expect: success/failure map straight through; a timeout logs why it's
+/// *not* being treated as a failure (see [`spawn_macos_open`]) and
+/// counts as success.
+#[cfg(target_os = "macos")]
+fn handle_open_outcome(dirs: &Dirs, program: &str, outcome: RunOutcome) -> io::Result<()> {
+    match outcome {
+        RunOutcome::Finished(Ok(status)) if status.success() => Ok(()),
+        RunOutcome::Finished(Ok(status)) => {
+            Err(io::Error::other(format!("{program} exited with {status}")))
+        }
+        RunOutcome::Finished(Err(err)) => Err(err),
+        RunOutcome::TimedOut => {
+            crate::platform::logging::log_line(
+                dirs,
+                &format!(
+                    "{program} had not exited after {OPEN_TIMEOUT:?}; not treating this as a \
+                     launch failure (it may still succeed) and not falling back, since that \
+                     could open the link twice — continuing without waiting further"
+                ),
+            );
+            Ok(())
+        }
     }
 }
 
 #[cfg(all(test, target_os = "macos"))]
 mod macos_tests {
     use super::*;
+    use std::os::unix::process::ExitStatusExt;
+    use std::time::Duration;
 
-    #[test]
-    fn ok_when_the_launch_command_exits_successfully() {
-        let cmd = LaunchCommand {
-            program: "/usr/bin/true".to_string(),
-            args: Vec::new(),
-        };
-        assert!(spawn_macos(&cmd).is_ok());
+    fn exit_status(code: i32) -> ExitStatus {
+        ExitStatusExt::from_raw(code)
+    }
+
+    fn test_dirs() -> Dirs {
+        let root = std::env::temp_dir().join(format!(
+            "linh-launcher-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        Dirs {
+            config_home: root.join("config"),
+            state_home: root.join("state"),
+        }
     }
 
     #[test]
-    fn err_when_the_launch_command_exits_with_failure() {
-        let cmd = LaunchCommand {
-            program: "/usr/bin/false".to_string(),
-            args: Vec::new(),
-        };
-        assert!(spawn_macos(&cmd).is_err());
+    fn finishing_before_the_timeout_is_reported_as_finished() {
+        let outcome = run_with_timeout(Duration::from_millis(200), || Ok(exit_status(0)));
+        assert!(matches!(outcome, RunOutcome::Finished(Ok(status)) if status.success()));
+    }
+
+    #[test]
+    fn exceeding_the_timeout_is_reported_as_timed_out() {
+        let outcome = run_with_timeout(Duration::from_millis(50), || {
+            thread::sleep(Duration::from_millis(300));
+            Ok(exit_status(0))
+        });
+        assert!(matches!(outcome, RunOutcome::TimedOut));
+    }
+
+    #[test]
+    fn successful_exit_is_ok() {
+        let dirs = test_dirs();
+        assert!(
+            handle_open_outcome(&dirs, "open", RunOutcome::Finished(Ok(exit_status(0)))).is_ok()
+        );
+    }
+
+    #[test]
+    fn failing_exit_is_err() {
+        let dirs = test_dirs();
+        assert!(
+            handle_open_outcome(&dirs, "open", RunOutcome::Finished(Ok(exit_status(256)))).is_err()
+        );
+    }
+
+    #[test]
+    fn spawn_error_is_propagated() {
+        let dirs = test_dirs();
+        let err = handle_open_outcome(
+            &dirs,
+            "open",
+            RunOutcome::Finished(Err(io::Error::other("boom"))),
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "boom");
+    }
+
+    #[test]
+    fn timing_out_is_ok_not_a_failure() {
+        // A timeout must never be treated as a launch failure: doing so
+        // would make the caller fall back to another browser while
+        // `open` might still succeed on its own, risking the link
+        // opening twice.
+        let dirs = test_dirs();
+        assert!(handle_open_outcome(&dirs, "open", RunOutcome::TimedOut).is_ok());
     }
 }
 

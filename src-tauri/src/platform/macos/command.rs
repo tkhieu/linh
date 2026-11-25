@@ -1,13 +1,43 @@
 //! Builds the `open`(1) argv used to launch a browser or app target.
 //! `browser.install`'s `exec` holds the `.app` bundle's path (resolved by
-//! `browsers.rs`/`apps.rs`), not a shell command — `open -a <bundle>
-//! --args <flags...> <url>` is how macOS launches (or re-activates, if
-//! already running) an app with argv, without a shell and without
-//! needing to parse the bundle's `CFBundleExecutable` ourselves.
+//! `browsers.rs`/`apps.rs`), not a shell command.
+//!
+//! Delivery to an *already-running* instance depends on whether any
+//! extra flags are needed:
+//!
+//! - No profile/private flag: `open -a <bundle> <url>`, with the URL as
+//!   a plain positional argument (never after `--args`). `open`(1) hands
+//!   a positional URL/file argument to LaunchServices as something to
+//!   open *with* the target app, which is delivered the same way (an
+//!   Apple Event) whether or not the app is already running. This is
+//!   also how Teams/Zoom targets are opened (just `open <scheme-url>`,
+//!   no `-a`): see `apps::find_app`.
+//! - A profile or private-window flag: `open`(1)'s own man page says
+//!   `--args` passes its remaining arguments to "the new instance of
+//!   the application" — plain `open -a` only *activates* an
+//!   already-running one rather than starting a new instance, so those
+//!   arguments would never reach it (`open` still exits 0, having just
+//!   brought the existing window forward with no URL, no profile, no
+//!   private window — a widely-reported real-world gotcha, e.g.
+//!   <https://forum.vivaldi.net/post/570354>, Mozilla support thread
+//!   <https://support.mozilla.org/bm/questions/1375699>). `open`'s `-n`
+//!   flag ("open a new instance of the application(s) even if one is
+//!   already running") forces that new-instance launch, which is the
+//!   documented, widely-used fix for this exact problem for both Chrome
+//!   and Firefox profile/incognito flags, e.g.
+//!   <https://gist.github.com/gm3dmo/98247152b375b84ac7a9d4cbb7f92e3b>
+//!   (`open -na "Google Chrome" --args --profile-directory=...`) and
+//!   Firefox's own remoting service
+//!   (`toolkit/components/remote/nsMacRemoteClient.mm`'s
+//!   `SendCommandLine`, which does forward a new instance's full argv,
+//!   including `-private-window`, to a running one over a Mach port).
 
 use linh_core::{Browser, BrowserFamily, InstallKind, LaunchCommand, Target};
 
-const OPEN: &str = "/usr/bin/open";
+/// Also referenced by `platform::launcher::spawn_detached`, to apply its
+/// bounded-wait handling only to an `open`-wrapped `LaunchCommand` (every
+/// one this module builds is).
+pub(crate) const OPEN: &str = "/usr/bin/open";
 
 fn private_flag(browser: &Browser) -> Option<&'static str> {
     if !browser.supports_private {
@@ -28,13 +58,10 @@ pub fn build_launch_command(
     if url.starts_with('-') {
         return Err("URL must not start with a command-line switch".into());
     }
-    let InstallKind::Native { exec } = &browser.install else {
+    let InstallKind::Native { exec: bundle_path } = &browser.install else {
         return Err("macOS does not support Flatpak launches".into());
     };
-    if matches!(exec.as_str(), "msteams:" | "zoommtg:") {
-        // Teams/Zoom targets: `open` resolves the scheme to whichever
-        // app LaunchServices has registered for it, so no bundle path is
-        // needed (see `apps::find_app`).
+    if matches!(bundle_path.as_str(), "msteams:" | "zoommtg:") {
         return Ok(LaunchCommand {
             program: OPEN.to_string(),
             args: vec![url.to_string()],
@@ -52,6 +79,16 @@ pub fn build_launch_command(
             app_args.push(flag.to_string());
         }
     }
+
+    if app_args.is_empty() {
+        // No flags to deliver: a plain positional URL reaches a running
+        // instance as well as launching a new one.
+        return Ok(LaunchCommand {
+            program: OPEN.to_string(),
+            args: vec!["-a".to_string(), bundle_path.clone(), url.to_string()],
+        });
+    }
+
     if browser.family == BrowserFamily::Chromium {
         // Guards against the URL being parsed as further flags —
         // everything from here on is the single navigation target.
@@ -59,7 +96,12 @@ pub fn build_launch_command(
     }
     app_args.push(url.to_string());
 
-    let mut args = vec!["-a".to_string(), exec.clone(), "--args".to_string()];
+    let mut args = vec![
+        "-n".to_string(),
+        "-a".to_string(),
+        bundle_path.clone(),
+        "--args".to_string(),
+    ];
     args.extend(app_args);
     Ok(LaunchCommand {
         program: OPEN.to_string(),
@@ -95,7 +137,25 @@ mod tests {
     }
 
     #[test]
-    fn chrome_profile_and_private_place_guard_right_before_url() {
+    fn no_flag_chrome_uses_open_with_a_positional_url() {
+        let browser = browser("Google Chrome", BrowserFamily::Chromium, true);
+        let cmd =
+            build_launch_command(&browser, &target(None, false), "https://example.com/").unwrap();
+        assert_eq!(cmd.program, OPEN);
+        assert_eq!(
+            cmd.args,
+            vec![
+                "-a".to_string(),
+                "/Applications/Google Chrome.app".to_string(),
+                "https://example.com/".to_string(),
+            ],
+            "no --args: a positional URL is delivered by Apple Event even \
+             to an already-running Chrome"
+        );
+    }
+
+    #[test]
+    fn chrome_profile_and_incognito_force_a_new_instance_with_the_guard_before_url() {
         let browser = browser("Google Chrome", BrowserFamily::Chromium, true);
         let cmd = build_launch_command(
             &browser,
@@ -103,10 +163,11 @@ mod tests {
             "https://example.com/",
         )
         .unwrap();
-        assert_eq!(cmd.program, "/usr/bin/open");
+        assert_eq!(cmd.program, OPEN);
         assert_eq!(
             cmd.args,
             vec![
+                "-n".to_string(),
                 "-a".to_string(),
                 "/Applications/Google Chrome.app".to_string(),
                 "--args".to_string(),
@@ -114,40 +175,48 @@ mod tests {
                 "--incognito".to_string(),
                 "--single-argument".to_string(),
                 "https://example.com/".to_string(),
-            ]
+            ],
+            "flags present: -n forces a new instance so --args actually \
+             reaches Chrome's own argv even when it's already running"
         );
     }
 
     #[test]
-    fn firefox_private_uses_single_dash_flag_and_no_guard() {
+    fn firefox_private_forces_a_new_instance_with_the_single_dash_flag() {
         let browser = browser("Firefox", BrowserFamily::Firefox, true);
         let cmd =
             build_launch_command(&browser, &target(None, true), "https://example.com/").unwrap();
+        assert_eq!(cmd.program, OPEN);
         assert_eq!(
             cmd.args,
             vec![
+                "-n".to_string(),
                 "-a".to_string(),
                 "/Applications/Firefox.app".to_string(),
                 "--args".to_string(),
                 "-private-window".to_string(),
                 "https://example.com/".to_string(),
-            ]
+            ],
+            "no --single-argument guard for Firefox, which has no such flag"
         );
     }
 
     #[test]
-    fn safari_has_no_private_flag_even_when_requested() {
+    fn safari_has_no_private_flag_so_still_uses_open_with_a_positional_url() {
         let browser = browser("Safari", BrowserFamily::Other, false);
         let cmd =
             build_launch_command(&browser, &target(None, true), "https://example.com/").unwrap();
+        assert_eq!(cmd.program, OPEN);
         assert_eq!(
             cmd.args,
             vec![
                 "-a".to_string(),
                 "/Applications/Safari.app".to_string(),
-                "--args".to_string(),
                 "https://example.com/".to_string(),
-            ]
+            ],
+            "private was requested but Safari has no private flag, so no \
+             flags end up needing delivery and the plain positional path \
+             is used, same as the no-flag case"
         );
     }
 
@@ -171,7 +240,7 @@ mod tests {
             "msteams://teams.microsoft.com/l/meetup-join/abc",
         )
         .unwrap();
-        assert_eq!(cmd.program, "/usr/bin/open");
+        assert_eq!(cmd.program, OPEN);
         assert_eq!(
             cmd.args,
             vec!["msteams://teams.microsoft.com/l/meetup-join/abc".to_string()]
@@ -182,6 +251,12 @@ mod tests {
     fn rejects_switch_shaped_url() {
         let browser = browser("Google Chrome", BrowserFamily::Chromium, true);
         assert!(build_launch_command(&browser, &target(None, false), "--evil").is_err());
+    }
+
+    #[test]
+    fn rejects_switch_shaped_url_with_flags_present_too() {
+        let browser = browser("Google Chrome", BrowserFamily::Chromium, true);
+        assert!(build_launch_command(&browser, &target(Some("Work"), false), "--evil").is_err());
     }
 
     #[test]
