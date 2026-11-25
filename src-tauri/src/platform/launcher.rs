@@ -342,7 +342,7 @@ fn watch_and_report<W: Waitable>(
 mod macos_tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
@@ -375,7 +375,6 @@ mod macos_tests {
     /// "still running" forever (so a deadline test can run it past its
     /// deadline).
     enum Step {
-        StillRunning,
         Exited(ExitStatus),
         TryWaitErrors,
     }
@@ -394,7 +393,7 @@ mod macos_tests {
     impl Waitable for ScriptedWaitable {
         fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
             match self.remaining.pop_front() {
-                Some(Step::StillRunning) | None => Ok(None),
+                None => Ok(None),
                 Some(Step::Exited(status)) => Ok(Some(status)),
                 Some(Step::TryWaitErrors) => Err(io::Error::other("try_wait failed")),
             }
