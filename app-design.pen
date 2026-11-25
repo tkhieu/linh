@@ -2731,7 +2731,7 @@
                             {
                               "type": "text",
                               "id": "s0Tgvt",
-                              "name": "Chrome — regulator.c",
+                              "name": "Chrome — example.com",
                               "fill": "#1A1A1A",
                               "content": "Chrome — example.com",
                               "fontFamily": "IBM Plex Sans",
@@ -3326,7 +3326,7 @@
                         {
                           "type": "text",
                           "id": "jYgQ4",
-                          "name": "Chrome — regulator.c",
+                          "name": "Chrome — example.com",
                           "fill": "#D0D0D0",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
@@ -3660,7 +3660,7 @@
                 {
                   "type": "text",
                   "id": "xybTs",
-                  "name": "Chrome — regulator.c",
+                  "name": "Chrome — example.com",
                   "fill": "#1A1A1A",
                   "textGrowth": "fixed-width",
                   "width": "fill_container",
