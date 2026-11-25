@@ -222,9 +222,14 @@ pub fn show_and_focus(app: &AppHandle, label: &str) {
     }
 }
 
-// These fixtures are Desktop Entry commands; Windows registry commands are
-// exercised in platform::windows::command tests.
-#[cfg(all(test, not(target_os = "windows")))]
+// These fixtures are Desktop Entry commands (raw `Exec=` strings,
+// `cmd.program` equal to the launched browser's own binary, a spawn
+// failure meaning the binary itself couldn't exec) — Windows registry
+// commands are exercised in platform::windows::command tests, and macOS
+// `open`-wrapped commands (`cmd.program` is always `/usr/bin/open`,
+// `launcher::spawn_macos`'s exit-status check standing in for a spawn
+// failure) in platform::macos::command tests.
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use linh_core::{BrowserFamily, Config, InstallKind};
@@ -271,21 +276,12 @@ mod tests {
         root
     }
 
-    #[cfg(target_os = "linux")]
     fn test_dirs(root: &std::path::Path) -> Dirs {
         Dirs {
             home: root.join("home"),
             config_home: root.join("home/.config"),
             state_home: root.join("home/.local/state"),
             application_dirs: Vec::new(),
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn test_dirs(root: &std::path::Path) -> Dirs {
-        Dirs {
-            config_home: root.join("home/.config"),
-            state_home: root.join("home/.local/state"),
         }
     }
 

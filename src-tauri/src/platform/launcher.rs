@@ -79,23 +79,82 @@ pub fn spawn_detached(cmd: &LaunchCommand) -> io::Result<()> {
     if matches!(cmd.program.as_str(), "msteams:" | "zoommtg:") {
         return super::windows::open_uri(&cmd.args[0]).map_err(io::Error::other);
     }
-    let mut command = Command::new(&cmd.program);
-    command
-        .strip_linh_webkit_env()
+    #[cfg(target_os = "macos")]
+    {
+        spawn_macos(cmd)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut command = Command::new(&cmd.program);
+        command
+            .strip_linh_webkit_env()
+            .args(&cmd.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let mut child = command.spawn()?;
+        thread::spawn(move || {
+            let _ = child.wait();
+        });
+        Ok(())
+    }
+}
+
+/// Every macOS launch goes through `/usr/bin/open`, which — unlike a
+/// direct exec of the target app, or Linux's `flatpak run` (which execs
+/// into, and so blocks for, the app's entire lifetime) — asks
+/// LaunchServices to open the app/URL and returns immediately, without
+/// waiting for the app itself to quit. That makes waiting for its exit
+/// status here cheap, and it's the only way to learn that the bundle no
+/// longer exists or no handler is registered for a custom scheme, so the
+/// caller (`routing::open_app_target_with`) can fall back to the
+/// configured browser instead of silently dropping the link — `open`
+/// succeeding at the `Command::spawn()` level (it always exists) would
+/// otherwise look identical to it actually finding the app.
+#[cfg(target_os = "macos")]
+fn spawn_macos(cmd: &LaunchCommand) -> io::Result<()> {
+    let status = Command::new(&cmd.program)
         .args(&cmd.args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "{} exited with {status}",
+            cmd.program
+        )))
     }
-    let mut child = command.spawn()?;
-    thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+
+    #[test]
+    fn ok_when_the_launch_command_exits_successfully() {
+        let cmd = LaunchCommand {
+            program: "/usr/bin/true".to_string(),
+            args: Vec::new(),
+        };
+        assert!(spawn_macos(&cmd).is_ok());
+    }
+
+    #[test]
+    fn err_when_the_launch_command_exits_with_failure() {
+        let cmd = LaunchCommand {
+            program: "/usr/bin/false".to_string(),
+            args: Vec::new(),
+        };
+        assert!(spawn_macos(&cmd).is_err());
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
