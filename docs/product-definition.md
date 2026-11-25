@@ -2,7 +2,7 @@
 
 Status: đã chốt phạm vi · Ngày: 2026-11-08 · Tên sản phẩm: **Linh**
 
-Repo: `tkhieu/linh` (private) · License: proprietary, all rights reserved
+Repo: `tkhieu/linh` (public) · License: GPL-3.0-only
 
 Nguồn tham chiếu: https://sindresorhus.com/velja (đọc trực tiếp ngày 2026-11-08).
 
@@ -148,7 +148,7 @@ các tiêu chí dưới đây áp dụng khi đủ 3 OS.
 - Source app: có trong MVP **chỉ cho macOS**; Windows/Linux tắt, làm sau.
 - Config: **TOML** — có comment, là định dạng chuẩn của hệ Rust; YAML bị loại vì
   dễ lỗi thụt lề / ép kiểu ngầm và crate `serde_yaml` đã ngừng bảo trì.
-- Repo `tkhieu/linh`, private, license proprietary.
+- Repo `tkhieu/linh`, public, licensed under GPL-3.0-only.
 
 ## 9. Linux (Fedora) — quyết định riêng (2026-11-08)
 

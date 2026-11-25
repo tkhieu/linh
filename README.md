@@ -106,4 +106,6 @@ concurrent attacker racing a symlink into place at that exact path.
 
 ## License
 
-Proprietary. Copyright (c) 2026 tkhieu. All rights reserved. See `LICENSE`.
+Copyright (C) 2026 tkhieu. Linh is licensed under
+[GPL-3.0-only](LICENSE). Bundled IBM Plex and Martian Mono fonts are licensed
+under the SIL Open Font License 1.1; see [third-party notices](THIRD_PARTY_NOTICES.md).
