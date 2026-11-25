@@ -2,6 +2,8 @@ use std::process::Command;
 
 use linh_core::Browser;
 
+use crate::platform::launcher::StripLinhWebkitEnv;
+
 use super::LINH_DESKTOP_ID;
 
 fn desktop_id() -> String {
@@ -12,6 +14,7 @@ fn desktop_id() -> String {
 /// it reports, if any.
 pub fn current_default_browser_id() -> Option<String> {
     let output = Command::new("xdg-settings")
+        .strip_linh_webkit_env()
         .args(["get", "default-web-browser"])
         .output()
         .ok()?;
@@ -67,6 +70,7 @@ pub fn set_default_browser() -> Result<(), String> {
 
 fn run(cmd: &str, args: &[&str]) -> Result<(), String> {
     let status = Command::new(cmd)
+        .strip_linh_webkit_env()
         .args(args)
         .status()
         .map_err(|e| format!("failed to run {cmd}: {e}"))?;

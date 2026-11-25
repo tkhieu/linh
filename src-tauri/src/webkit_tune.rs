@@ -63,31 +63,42 @@ use webkit2gtk::{CacheModel, SettingsExt, WebContextExt, WebViewExt};
 /// further.
 ///
 /// Only set when not already present in the environment Linh was
-/// started with — [`vars_set_by_linh`] reports exactly those, so
-/// [`crate::platform::launcher::spawn_detached`] can strip them back out
-/// of processes Linh spawns (see its doc comment) without touching a
-/// value the user set themselves.
+/// started with — a var the user set themselves is left exactly as it
+/// was, never overwritten. [`vars_set_by_linh`] reports exactly the
+/// vars this actually set, so
+/// [`crate::platform::launcher::StripLinhWebkitEnv`] can strip them
+/// back out of processes Linh spawns (see its doc comment) without
+/// touching a value the user set themselves.
 #[cfg(target_os = "linux")]
 pub fn configure_before_tauri() {
-    let mut set_by_linh = Vec::with_capacity(RENDERER_ENV_VARS.len());
-    for var in RENDERER_ENV_VARS {
-        if std::env::var_os(var).is_none() {
-            set_by_linh.push(var);
-        }
-    }
+    let to_set = vars_to_set(|var| std::env::var_os(var).is_some());
     // SAFETY: called at the very top of `main`, before any thread is
     // spawned or GTK/WebKit touches the environment, so nothing else can
     // race this write.
     unsafe {
-        for var in RENDERER_ENV_VARS {
+        for var in &to_set {
             std::env::set_var(var, "1");
         }
     }
-    let _ = SET_BY_LINH.set(set_by_linh);
+    let _ = SET_BY_LINH.set(to_set);
 }
 
 #[cfg(not(target_os = "linux"))]
 pub fn configure_before_tauri() {}
+
+/// Pure logic behind [`configure_before_tauri`]: which of
+/// [`RENDERER_ENV_VARS`] it should actually set, given `already_present`
+/// (normally `|var| std::env::var_os(var).is_some()`). A var the user
+/// already has set is excluded — left untouched rather than overwritten
+/// — which is also exactly the list of vars Linh introduced itself, so
+/// the same `Vec` doubles as [`SET_BY_LINH`]'s value.
+#[cfg(target_os = "linux")]
+fn vars_to_set(already_present: impl Fn(&str) -> bool) -> Vec<&'static str> {
+    RENDERER_ENV_VARS
+        .into_iter()
+        .filter(|&var| !already_present(var))
+        .collect()
+}
 
 /// The WebKitGTK renderer-selection env vars [`configure_before_tauri`]
 /// sets process-wide (so they're visible to the `WebKitWebProcess` it
@@ -154,5 +165,34 @@ pub fn tune_webview(webview: webkit2gtk::WebView) {
     }
     if let Some(settings) = webview.settings() {
         settings.set_enable_page_cache(false);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sets_both_vars_when_neither_is_present() {
+        assert_eq!(
+            vars_to_set(|_| false),
+            vec![
+                "WEBKIT_DISABLE_DMABUF_RENDERER",
+                "WEBKIT_DISABLE_COMPOSITING_MODE"
+            ]
+        );
+    }
+
+    #[test]
+    fn leaves_out_a_var_the_user_already_set() {
+        assert_eq!(
+            vars_to_set(|var| var == "WEBKIT_DISABLE_COMPOSITING_MODE"),
+            vec!["WEBKIT_DISABLE_DMABUF_RENDERER"]
+        );
+    }
+
+    #[test]
+    fn sets_nothing_when_the_user_set_both() {
+        assert_eq!(vars_to_set(|_| true), Vec::<&str>::new());
     }
 }

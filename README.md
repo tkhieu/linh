@@ -131,12 +131,18 @@ single-purpose app that never browses between documents:
   to Cairo. Linh's UI uses only borders and `border-radius`, nothing
   that path depends on. GPU compositing is also what makes scrolling
   smooth, so that's the one thing the owner still needs to check
-  visually on Wayland. These two vars are process-wide, so
-  `spawn_detached` (`src-tauri/src/platform/launcher.rs`) strips them
-  back out of any process Linh spawns — browsers and app targets — so a
-  launched WebKitGTK app (e.g. GNOME Web) doesn't inherit Linh's own
-  rendering policy; a value the user already had set in their own
-  environment is left untouched.
+  visually on Wayland. These two vars are process-wide, so every
+  `Command` Linh runs on Linux chains
+  `.strip_linh_webkit_env()` (the `StripLinhWebkitEnv` extension trait in
+  `src-tauri/src/platform/launcher.rs`) right after `Command::new`, which
+  removes only the vars `configure_before_tauri` itself introduced (a
+  value the user already had set in their own environment before Linh
+  started is left exactly as it was). This covers every child process
+  Linh spawns: `spawn_detached` (browsers and app targets),
+  `xdg-settings get`/`xdg-settings set`/`xdg-mime default` in
+  `platform/linux/default_browser.rs`, and `notify-send` in
+  `platform/linux/notify.rs` — so a launched WebKitGTK app (e.g. GNOME
+  Web) never inherits Linh's own rendering policy.
 
 A fourth candidate — tuning the `WebKitNetworkProcess`'s own memory-
 pressure thresholds via
