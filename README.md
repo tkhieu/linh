@@ -104,6 +104,32 @@ losing the instant-reopen behavior.
 existing symlink or non-regular file, but it is not hardened against a
 concurrent attacker racing a symlink into place at that exact path.
 
+## WebKitGTK memory tuning
+
+`src-tauri/src/webkit_tune.rs` (Linux only) applies the WebKitGTK-level
+settings that measurably lower idle and picker-shown PSS for a
+single-purpose app that never browses between documents:
+
+- `webkit_web_context_set_cache_model(DOCUMENT_VIEWER)` instead of the
+  default `WEB_BROWSER` model's large object/page caches.
+- `WebKitSettings`' page cache and the legacy offline-application-cache
+  disabled — both only pay off across in-page navigations Linh never
+  performs.
+- `WEBKIT_DISABLE_COMPOSITING_MODE`/`WEBKIT_DISABLE_DMABUF_RENDERER` set
+  before Tauri launches its first `WebKitWebProcess`, forcing software
+  (Cairo) rendering instead of the GPU-accelerated DMA-BUF/EGL path —
+  Linh's UI uses only borders and `border-radius`, nothing that path
+  depends on.
+
+A fourth candidate — tuning the `WebKitNetworkProcess`'s own memory-
+pressure thresholds via
+`webkit_website_data_manager_set_memory_pressure_settings()` — was tried
+and dropped: it must run before Tauri builds its first
+`WebKitWebsiteDataManager`, which forced an explicit `gtk::init()` call
+before GTK would otherwise be initialized, and that made startup regress
+to tens of seconds. Not worth it for a few MB on an already-small
+process.
+
 ## License
 
 Proprietary. Copyright (c) 2026 tkhieu. All rights reserved. See `LICENSE`.
