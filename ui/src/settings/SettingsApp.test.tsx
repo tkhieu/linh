@@ -63,6 +63,39 @@ describe('SettingsApp', () => {
     }
   })
 
+  it('names the current platform in the source-app-rules hint', async () => {
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    expect(await screen.findByText(/Source app rules are unavailable on Linux\./)).toBeInTheDocument()
+  })
+
+  it('names macOS in the source-app-rules hint on a Mac', async () => {
+    const userAgent = vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+    )
+    try {
+      render(<SettingsApp />)
+      await screen.findByLabelText('Primary browser')
+      openSection('Rules')
+      expect(await screen.findByText(/Source app rules are unavailable on macOS\./)).toBeInTheDocument()
+    } finally {
+      userAgent.mockRestore()
+    }
+  })
+
+  it('names Windows, not Linux, in the source-app-rules hint on Windows', async () => {
+    const userAgent = vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Windows NT 10.0')
+    try {
+      render(<SettingsApp />)
+      await screen.findByLabelText('Primary browser')
+      openSection('Rules')
+      expect(await screen.findByText(/Source app rules are unavailable on Windows\./)).toBeInTheDocument()
+    } finally {
+      userAgent.mockRestore()
+    }
+  })
+
   it('adds, edits, reorders, deletes rules, and saves target settings', async () => {
     render(<SettingsApp />)
     await screen.findByLabelText('Primary browser')
@@ -373,7 +406,7 @@ describe('SettingsApp', () => {
   it('shows the app itself with a neutral note (never a guessed fallback) while availability is unknown, in both panels', async () => {
     let resolvePresets: ((value: Awaited<ReturnType<typeof api.listPresets>>) => void) | undefined
     api.listPresets.mockImplementation(() => new Promise((resolve) => { resolvePresets = resolve }))
-    api.getConfig.mockResolvedValue({ ...config, prompt_mode: 'always', rules: [{ name: 'Teams calls', match: ['teams.example.com/*'], open_in: { app: 'teams' } }] })
+    api.getConfig.mockResolvedValue({ ...config, rules: [{ name: 'Teams calls', match: ['teams.example.com/*'], open_in: { app: 'teams' } }] })
     render(<SettingsApp />)
     await screen.findByLabelText('Primary browser')
     openSection('Rules')

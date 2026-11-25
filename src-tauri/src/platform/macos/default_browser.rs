@@ -1,22 +1,78 @@
-//! Default-browser get/set. Not yet implemented on macOS.
+//! Default-browser get/set via LaunchServices.
 
 use linh_core::Browser;
 
+use super::launch_services;
+use super::LINH_BUNDLE_ID;
+
+/// Whichever bundle id is currently registered as `http`'s default
+/// handler (used by `app_config` to carry a previous default forward
+/// into a freshly created config).
 pub fn current_default_browser_id() -> Option<String> {
-    None
+    launch_services::default_handler_for_scheme("http")
 }
 
 pub fn is_default_browser() -> bool {
-    false
+    ["http", "https"].iter().all(|scheme| {
+        launch_services::default_handler_for_scheme(scheme)
+            .is_some_and(|id| id.eq_ignore_ascii_case(LINH_BUNDLE_ID))
+    })
 }
 
-// ported in a later change: setting the default browser on macOS needs
-// LaunchServices (`LSSetDefaultHandlerForURLScheme`) plus an
-// Info.plist-declared URL type.
+/// Requests that Linh become the default `http`/`https` handler. On
+/// macOS 12+ this makes the OS show its own confirmation UI rather than
+/// switching immediately — see
+/// [`launch_services::set_default_handler_for_scheme`]'s doc comment —
+/// so `Ok(())` means the request was accepted, not that the switch has
+/// actually happened; callers must re-check [`is_default_browser`]
+/// rather than assume success from this.
 pub fn set_default_browser() -> Result<(), String> {
-    Err("setting the default browser is not yet supported on macOS".to_string())
+    for scheme in ["http", "https"] {
+        launch_services::set_default_handler_for_scheme(scheme, LINH_BUNDLE_ID)?;
+    }
+    Ok(())
 }
 
-pub fn matches_desktop_id(_browser: &Browser, _id: &str) -> bool {
-    false
+/// Bundle ids are compared case-insensitively but otherwise exactly —
+/// unlike Windows' ProgID scheme, a macOS bundle id *is* the browser's
+/// own `browser.id`, so no family-specific guessing is needed.
+pub fn matches_desktop_id(browser: &Browser, id: &str) -> bool {
+    browser.id.eq_ignore_ascii_case(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use linh_core::{BrowserFamily, InstallKind};
+
+    fn browser(id: &str) -> Browser {
+        Browser {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            family: BrowserFamily::Chromium,
+            install: InstallKind::Native {
+                exec: "/Applications/Example.app".to_string(),
+            },
+            profiles: Vec::new(),
+            supports_private: true,
+            icon: None,
+            desktop_file: None,
+        }
+    }
+
+    #[test]
+    fn matches_by_bundle_id_case_insensitively() {
+        assert!(matches_desktop_id(
+            &browser("com.google.chrome"),
+            "com.Google.Chrome"
+        ));
+    }
+
+    #[test]
+    fn does_not_match_unrelated_bundle_id() {
+        assert!(!matches_desktop_id(
+            &browser("org.mozilla.firefox"),
+            "com.google.chrome"
+        ));
+    }
 }

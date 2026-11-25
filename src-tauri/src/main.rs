@@ -75,10 +75,37 @@ fn mark_ready(registry: &mut PendingRegistry) {
     *registry = None;
 }
 
+/// A macOS Apple Event can batch several URLs into one `Opened` event
+/// (e.g. the user selects several links and chooses "Open" at once, or
+/// several apps request an open in quick succession); an argv-based
+/// launch on Linux/Windows only ever carries one URL per process launch,
+/// so [`dispatch_launch`] (via [`url_intake::first_routable_url`])
+/// looking at only the first argument is correct there and intentional,
+/// not an oversight. This instead filters `urls` down to the routable
+/// (`http`/`https`) ones and, for each — one per `enqueue_if_pending`
+/// call, in order — either enqueues it or returns it for immediate
+/// dispatch, so a batch of N links behaves like N separate single-URL
+/// launches rather than only the first one.
+#[cfg(target_os = "macos")]
+fn routable_launches_to_dispatch(
+    registry: &mut PendingRegistry,
+    received_at: Instant,
+    urls: &[url::Url],
+) -> Vec<Vec<String>> {
+    urls.iter()
+        .filter_map(|url| url_intake::filter_routable_url(url.as_str()))
+        .filter_map(|routable| enqueue_if_pending(registry, received_at, vec![routable]))
+        .collect()
+}
+
 /// Routes `args`' first `http`/`https` URL (logged, timed from
 /// `received_at`), or shows the settings window if there is none —
 /// creating it on demand (see [`settings_window::show_or_create`]) the
-/// first time it's needed.
+/// first time it's needed. Only ever looks at the first routable URL in
+/// `args`, which is correct for every caller: argv (Linux/Windows) only
+/// ever carries one per launch, and macOS's own listener (see `setup`
+/// below) already splits a batched Apple Event into one single-URL call
+/// per URL before calling this.
 fn dispatch_launch(app: &AppHandle, state: &AppState, args: &[String], received_at: Instant) {
     match url_intake::first_routable_url(args) {
         Some(url) => routing::route_url(app, state, &url, received_at),
@@ -132,6 +159,36 @@ fn main() {
             app.manage(state);
             let app_handle = app.handle().clone();
             let state_handle = app.state::<AppState>();
+
+            // macOS delivers an http(s) link as an Apple Event
+            // (`kAEGetURL`), not argv: Tauri surfaces it as
+            // `RunEvent::Opened`, which `tauri-plugin-deep-link` forwards
+            // as a `deep-link://new-url` event. Feeding that into the
+            // very same `PENDING_LAUNCHES` queue the single-instance
+            // callback above uses — rather than also polling
+            // `deep_link().get_current()` for the launch that opened
+            // Linh in the first place — keeps there being exactly one
+            // dispatch per URL: once this listener is registered (here,
+            // before anything below that could block), every `Opened`
+            // event is either queued (not ready yet) or dispatched
+            // immediately (already ready), the same as a second launch.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let app_for_listener = app_handle.clone();
+                app_handle.deep_link().on_open_url(move |event| {
+                    let received_at = Instant::now();
+                    let to_dispatch = {
+                        let mut registry = PENDING_LAUNCHES.lock().unwrap();
+                        routable_launches_to_dispatch(&mut registry, received_at, &event.urls())
+                    };
+                    if let Some(state) = app_for_listener.try_state::<AppState>() {
+                        for args in to_dispatch {
+                            dispatch_launch(&app_for_listener, &state, &args, received_at);
+                        }
+                    }
+                });
+            }
 
             let menu = tray::build_initial(&app_handle, &state_handle)?;
             TrayIconBuilder::with_id(tray::TRAY_ID)
@@ -228,6 +285,55 @@ fn handle_primary_pick(app: &AppHandle, index_str: &str) {
         return;
     }
     tray::sync_checked_state(&state);
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+
+    fn url(s: &str) -> url::Url {
+        url::Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn each_routable_url_in_a_batch_dispatches_separately_in_order_when_ready() {
+        let mut registry: PendingRegistry = None; // ready
+        let urls = vec![url("https://a.example/one"), url("https://b.example/two")];
+
+        let dispatched = routable_launches_to_dispatch(&mut registry, Instant::now(), &urls);
+
+        assert_eq!(
+            dispatched,
+            vec![
+                vec!["https://a.example/one".to_string()],
+                vec!["https://b.example/two".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn a_batch_is_queued_in_order_as_separate_launches_when_not_ready() {
+        let mut registry: PendingRegistry = Some(Vec::new());
+        let urls = vec![url("https://a.example/one"), url("https://b.example/two")];
+
+        let dispatched = routable_launches_to_dispatch(&mut registry, Instant::now(), &urls);
+
+        assert!(dispatched.is_empty(), "nothing is ready to dispatch yet");
+        let queued = registry.unwrap();
+        assert_eq!(queued.len(), 2, "each URL queues as its own launch");
+        assert_eq!(queued[0].1, vec!["https://a.example/one".to_string()]);
+        assert_eq!(queued[1].1, vec!["https://b.example/two".to_string()]);
+    }
+
+    #[test]
+    fn non_routable_urls_in_the_batch_are_skipped_not_dropped_entirely() {
+        let mut registry: PendingRegistry = None; // ready
+        let urls = vec![url("mailto:foo@bar.com"), url("https://example.com/")];
+
+        let dispatched = routable_launches_to_dispatch(&mut registry, Instant::now(), &urls);
+
+        assert_eq!(dispatched, vec![vec!["https://example.com/".to_string()]]);
+    }
 }
 
 #[cfg(test)]
