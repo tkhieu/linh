@@ -5,6 +5,11 @@ each URL to the right browser, profile, or private window based on rules
 you configure. Native builds target Fedora, Ubuntu 24.04, and Windows 10
 version 1809 or later.
 
+Routes are checked in order before the prompt mode applies. The first matching
+route opens its configured destination, including an app or the picker. When no
+route matches, `prompt_mode = "always"` opens the picker and
+`prompt_mode = "never"` opens the primary browser.
+
 ## Repo layout
 
 - `crates/linh-core` — pure-Rust routing logic (config, URL matching,

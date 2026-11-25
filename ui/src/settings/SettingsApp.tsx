@@ -351,7 +351,7 @@ export function SettingsApp() {
                   </div>
                 </li>
                 <li className="settings-row">
-                  <div className="col-main"><label htmlFor="prompt-mode" className="primary" style={{ margin: 0 }}>Prompt mode</label><p className="secondary" style={{ margin: 0 }}>Always shows the picker for every link.</p></div>
+                  <div className="col-main"><label htmlFor="prompt-mode" className="primary" style={{ margin: 0 }}>Prompt mode</label><p className="secondary" style={{ margin: 0 }}>Always: unmatched links open the picker. Never: unmatched links open {primaryLabel}.</p></div>
                   <select id="prompt-mode" style={{ flex: '0 0 260px' }} value={config.prompt_mode} onChange={(event) => updateConfig({ prompt_mode: event.target.value as Config['prompt_mode'] })}>
                     <option value="never">Never</option>
                     <option value="always">Always</option>
@@ -505,22 +505,14 @@ interface SidePanelProps {
 function SidePanel({ section, config, caps, targets, primaryLabel, visible, installedApps, presetsStatus, traceInput, onTraceInputChange }: SidePanelProps) {
   if (section === 'general') {
     const keysShown = Math.min(visible.length, 9)
-    // routing.rs::decide returns Decision::Prompt immediately when
-    // prompt_mode is Always, before even looking at a rule — so routes
-    // are never checked and "no match" never happens; showing those
-    // steps here would describe a flow that cannot occur.
     const always = config.prompt_mode === 'always'
     return (
       <aside className="settings-side">
         <p className="eyebrow">Current behaviour</p>
         <div className="settings-side-flow">
           <div className="settings-side-step"><span className="step-no">01</span><span className="step-name">Link clicked</span><span className="step-tag">any app</span></div>
-          {always
-            ? <div className="settings-side-step match"><span className="step-no">02</span><span className="step-name">Prompt mode: Always</span><span className="step-tag">picker</span></div>
-            : <>
-              <div className="settings-side-step"><span className="step-no">02</span><span className="step-name">Check routes</span><span className="step-tag">{config.rules.length} routes</span></div>
-              <div className="settings-side-step"><span className="step-no">03</span><span className="step-name">No match</span><span className="step-tag">primary browser</span></div>
-            </>}
+          <div className="settings-side-step"><span className="step-no">02</span><span className="step-name">Check routes</span><span className="step-tag">{config.rules.length} routes</span></div>
+          <div className="settings-side-step"><span className="step-no">03</span><span className="step-name">No match</span><span className="step-tag">{always ? 'picker' : 'primary browser'}</span></div>
         </div>
         <div className="settings-side-spacer" />
         <div className="settings-side-result">
@@ -578,8 +570,7 @@ function SidePanel({ section, config, caps, targets, primaryLabel, visible, inst
       )}
       {trace && display && <>
         <div className="settings-side-flow">
-          {trace.decision.kind === 'prompt-always' && <p className="settings-side-note">Prompt mode is Always — every link opens the picker, routes are not checked.</p>}
-          {config.rules.length === 0 && trace.decision.kind !== 'prompt-always' && <p className="settings-side-note">No routes defined.</p>}
+          {config.rules.length === 0 && <p className="settings-side-note">No routes defined.</p>}
           {trace.steps.map((step) => (
             <div className={`settings-side-step${step.status === 'match' ? ' match' : ''}`} key={step.index}>
               <span className="step-no">{pad2(step.index + 1)}</span>
@@ -619,7 +610,7 @@ function resolveTraceDisplay(
 ): TraceDisplay {
   const viaRoute = trace.matchedIndex !== null ? `via route ${pad2(trace.matchedIndex + 1)} · ${parsed.host}` : 'no match · primary browser'
   const d = trace.decision
-  if (d.kind === 'prompt-always') return { value: 'Picker', caption: 'prompt mode: always' }
+  if (d.kind === 'prompt-always') return { value: 'Picker', caption: 'no match · prompt mode: always' }
   if (d.kind === 'prompt') return { value: 'Picker', caption: viaRoute }
   if (d.kind === 'open-app') {
     const resolution = resolveAppTarget(d.app, parsed.href, primary, installedApps[d.app.app])

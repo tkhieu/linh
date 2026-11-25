@@ -86,14 +86,24 @@ describe('parseTraceUrl', () => {
 })
 
 describe('traceRoute', () => {
-  it('prompt mode always wins over rules, with no steps evaluated', () => {
+  it('prompt mode always uses a matching rule', () => {
     const config: Config = {
       ...baseConfig(), prompt_mode: 'always',
       rules: [{ name: 'r1', match: ['example.com'], open_in: { browser: 'chrome', private: false } }],
     }
     const trace = traceRoute(config, caps, 'example.com', '/')
+    expect(trace.decision).toEqual({ kind: 'open', target: { browser: 'chrome', private: false } })
+    expect(trace.steps).toEqual([{ index: 0, name: 'r1', status: 'match' }])
+  })
+
+  it('prompt mode always prompts when no rule matches', () => {
+    const config: Config = {
+      ...baseConfig(), prompt_mode: 'always',
+      rules: [{ name: 'r1', match: ['example.com'], open_in: { browser: 'chrome', private: false } }],
+    }
+    const trace = traceRoute(config, caps, 'unmatched.example', '/')
     expect(trace.decision).toEqual({ kind: 'prompt-always' })
-    expect(trace.steps).toEqual([])
+    expect(trace.steps).toEqual([{ index: 0, name: 'r1', status: 'skip' }])
   })
 
   it('first matching rule wins', () => {
@@ -113,7 +123,7 @@ describe('traceRoute', () => {
     ])
   })
 
-  it('falls back to primary when no rule matches', () => {
+  it('prompt mode never opens primary when no rule matches', () => {
     const config = baseConfig()
     const trace = traceRoute(config, caps, 'unmatched.example', '/')
     expect(trace.decision).toEqual({ kind: 'open', target: config.primary })
@@ -123,7 +133,7 @@ describe('traceRoute', () => {
   it('rule can resolve to an app target', () => {
     const appTarget = { app: 'teams' as const, fallback: { browser: 'google-chrome', private: false } }
     const config: Config = {
-      ...baseConfig(),
+      ...baseConfig(), prompt_mode: 'always',
       rules: [{ name: 'teams', match: ['teams.microsoft.com/l/meetup-join/*'], open_in: appTarget }],
     }
     const trace = traceRoute(config, caps, 'teams.microsoft.com', '/l/meetup-join/19%3aabc')

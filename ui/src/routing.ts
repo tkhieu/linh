@@ -87,10 +87,6 @@ export function parseTraceUrl(raw: string): { host: string; path: string; href: 
 /** Ports routing.rs::decide, but reports every step along the way (not
  * just the final decision) so the UI can render the full trace. */
 export function traceRoute(config: Config, caps: PlatformCaps, host: string, path: string): Trace {
-  if (config.prompt_mode === 'always') {
-    return { steps: [], decision: { kind: 'prompt-always' }, matchedIndex: null }
-  }
-
   // Every rule gets exactly one step, even past the winner: once a rule
   // matches, routing.rs::decide returns immediately without evaluating
   // the rest, so later rules are unreachable rather than independently
@@ -118,7 +114,9 @@ export function traceRoute(config: Config, caps: PlatformCaps, host: string, pat
       steps.push({ index, name: rule.name, status: 'skip' })
     }
   }
-  return { steps, decision: decision ?? { kind: 'open', target: config.primary }, matchedIndex }
+  return { steps, decision: decision ?? (config.prompt_mode === 'always'
+    ? { kind: 'prompt-always' }
+    : { kind: 'open', target: config.primary }), matchedIndex }
 }
 
 function openInToDecision(openIn: OpenIn): TraceDecision {

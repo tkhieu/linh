@@ -51,13 +51,14 @@ sync/version.
    - Chỉ chạy **một instance**; lần mở thứ hai chuyển URL cho instance đang chạy.
 2. **Tự phát hiện browser đã cài** (Chrome, Edge, Brave, Vivaldi, Chromium,
    Firefox, Safari trên mac) và **profile Chromium** (đọc `Local State`).
-3. **Primary browser**: link không khớp rule nào mở ở đây.
+3. **Primary browser**: link không khớp rule nào mở ở đây khi chế độ prompt là `never`.
 4. **Rule theo URL**: match domain (kể cả subdomain) hoặc wildcard pattern →
    đích là browser, browser + profile, hoặc private window. Rule duyệt theo thứ
    tự, rule đầu tiên khớp thắng.
 5. **Prompt chọn browser**: cửa sổ nhỏ hiện gần con trỏ (trên Linux: giữa màn
-   hình), chọn bằng phím `1–9`, mũi tên + `Enter`, `Esc` để huỷ. Ba chế độ:
-   *luôn hiện* / *chỉ khi giữ phím modifier* / *không bao giờ*. Modifier mặc
+   hình), chọn bằng phím `1–9`, mũi tên + `Enter`, `Esc` để huỷ. Hai chế độ:
+   `always` mở prompt cho link không khớp rule; `never` mở Primary browser cho
+   link không khớp rule. Rule luôn được kiểm tra trước, theo thứ tự. Modifier mặc
    định: **`Ctrl`** trên Windows, **`Option`** trên macOS (đổi được trong
    Settings). Linux không có chế độ modifier (xem mục 9). Một rule cũng có thể chọn đích là "Prompt".
 6. **Tray / menu bar icon**: đổi Primary browser nhanh, mở Settings, Quit.
@@ -92,7 +93,7 @@ User click link trong app X
   → Linh: modifier đang giữ? (không áp dụng trên Linux) ── có ─→ Prompt
           rule nào khớp (URL, hoặc source app trên macOS)?
                                ── có ─→ đích của rule (có thể là Prompt)
-          còn lại             ───────→ Primary browser
+          còn lại             ───────→ `always`: Prompt / `never`: Primary browser
   → spawn browser với args phù hợp (profile / private)
 ```
 
@@ -119,9 +120,9 @@ các tiêu chí dưới đây áp dụng khi đủ 3 OS.
 1. Trên mỗi OS (macOS, Windows 11, một distro Linux desktop có GNOME hoặc KDE),
    sau onboarding, Linh là default browser và click link trong một app khác
    (vd. terminal `xdg-open` / `start` / `open`, hoặc app chat) đi qua Linh.
-2. Link không khớp rule mở trong Primary browser trong < 300 ms tính từ lúc Linh nhận URL (đo trên máy dev).
+2. Ở chế độ `never`, link không khớp rule mở trong Primary browser trong < 300 ms tính từ lúc Linh nhận URL (đo trên máy dev); ở chế độ `always`, link đó mở Prompt.
 3. Rule `meet.google.com → Chrome` và rule `*.company.com → Chrome profile "Work"` hoạt động; rule đầu tiên khớp thắng.
-4. Giữ modifier khi click (macOS/Windows; trên Linux: chế độ `always` hoặc rule → Prompt) → prompt hiện; chọn được bằng phím số và bằng chuột; `Esc` huỷ không mở gì.
+4. Giữ modifier khi click (macOS/Windows) → prompt hiện; trên Linux, link không khớp rule ở chế độ `always` hoặc rule có đích Prompt → prompt hiện. Chọn được bằng phím số và bằng chuột; `Esc` huỷ không mở gì.
 5. Mở link thứ hai khi Linh đang chạy không tạo instance mới.
 6. Sửa config bằng tay rồi khởi động lại thì thay đổi có hiệu lực; config hỏng → Linh báo lỗi và vẫn mở URL (không nuốt link). Vì config hỏng thì không đọc được Primary browser, Linh mở bằng browser đầu tiên phát hiện được.
 7. Trên macOS, rule "link click trong Slack → Chrome profile Work" hoạt động; trên
@@ -155,8 +156,8 @@ các tiêu chí dưới đây áp dụng khi đủ 3 OS.
 Bản đầu tiên chỉ build cho **Fedora 44, GNOME trên Wayland**. macOS và Windows làm sau.
 
 - **Không dùng phím modifier trên Linux.** Wayland không cho app thường đọc trạng
-  thái bàn phím toàn hệ thống. Prompt chỉ hiện khi chế độ prompt là `always`
-  hoặc khi rule có đích là Prompt. Modifier `Ctrl` vẫn là mặc định cho Windows.
+  thái bàn phím toàn hệ thống. Prompt chỉ hiện khi link không khớp rule ở chế độ
+  `always` hoặc khi rule có đích là Prompt. Modifier `Ctrl` vẫn là mặc định cho Windows.
 - **Prompt hiện giữa màn hình**, vì Wayland không cho app đặt cửa sổ cạnh con trỏ.
 - **Tray icon qua AppIndicator.** GNOME cần extension
   `gnome-shell-extension-appindicator` (`appindicatorsupport@rgcjonas.gmail.com`)
