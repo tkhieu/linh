@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod allocator;
 mod commands;
 mod mem_profile;
 mod platform;
@@ -85,6 +86,7 @@ fn dispatch_launch(app: &AppHandle, state: &AppState, args: &[String], received_
 }
 
 fn main() {
+    allocator::cap_arenas();
     // Captured before anything else so first-launch latency logging
     // honestly includes browser scanning and config load, not just the
     // final routing decision.

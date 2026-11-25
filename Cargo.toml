@@ -9,4 +9,8 @@ license = "LicenseRef-Proprietary"
 publish = false
 
 [profile.release]
-panic = "unwind"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
+panic = "abort"

@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
+use crate::allocator;
 use crate::mem_profile;
 use crate::platform::linux::{dirs::Dirs, logging};
 use crate::routing;
@@ -116,7 +117,9 @@ fn build(app: &AppHandle, dirs: &Dirs, related_view: Option<webkit2gtk::WebView>
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     if let Some(window) = app_for_close.get_webview_window(LABEL) {
-                        let _ = window.hide();
+                        if window.hide().is_ok() {
+                            allocator::trim();
+                        }
                     }
                 }
             });
