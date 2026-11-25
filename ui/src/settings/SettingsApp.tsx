@@ -95,6 +95,7 @@ function CheckIcon() {
 }
 
 export function SettingsApp() {
+  const isWindows = navigator.userAgent.includes('Windows')
   const [config, setConfig] = useState<Config | null>(null)
   const [browsers, setBrowsers] = useState<Browser[]>([])
   const [caps, setCaps] = useState<PlatformCaps | null>(null)
@@ -242,6 +243,7 @@ export function SettingsApp() {
       const isDefault = await isDefaultBrowser()
       setIsDefault(isDefault)
       if (isDefault) setDefaultMessage('Linh is your default browser.')
+      else if (isWindows) setDefaultMessage('Windows Settings is open. Choose Linh for HTTP and HTTPS, then return here.')
       else setError('Linh is not the default browser yet. Check your system settings and try again.')
     } catch (reason) {
       setError(errorMessage(reason))
@@ -325,8 +327,8 @@ export function SettingsApp() {
         <div className="settings-board">
           {section === 'general' && defaultBrowser === false && <section className="banner" aria-label="Default browser setup">
             <h2>Make Linh your default browser</h2>
-            <p>Let Linh receive links from other apps so it can apply your rules.</p>
-            <button type="button" disabled={busy} onClick={() => void makeDefault()}>Make Linh your default browser</button>
+            <p>{isWindows ? 'Open Windows Default Apps settings to choose Linh for HTTP and HTTPS.' : 'Let Linh receive links from other apps so it can apply your rules.'}</p>
+            <button type="button" disabled={busy} onClick={() => void makeDefault()}>{isWindows ? 'Open Windows Default Apps settings' : 'Make Linh your default browser'}</button>
           </section>}
           {section === 'general' && <>
             <div className="settings-heading">

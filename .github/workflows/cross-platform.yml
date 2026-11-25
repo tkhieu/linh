@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-latest]
+        os: [macos-15, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -64,3 +64,20 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace
+
+      - name: Install tauri-cli
+        if: matrix.os == 'windows-latest'
+        run: cargo install tauri-cli --version '^2' --locked
+
+      - name: Build unsigned NSIS installer
+        if: matrix.os == 'windows-latest'
+        working-directory: src-tauri
+        run: cargo tauri build --bundles nsis
+
+      - name: Upload unsigned NSIS installer
+        if: matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linh-windows-unsigned-nsis
+          path: target/release/bundle/nsis/*.exe
+          if-no-files-found: error

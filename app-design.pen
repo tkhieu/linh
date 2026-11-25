@@ -828,9 +828,9 @@
                                 {
                                   "type": "text",
                                   "id": "ABbyE",
-                                  "name": "Chrome — Hieu",
+                                  "name": "Chrome — Personal",
                                   "fill": "#2F86D6",
-                                  "content": "Chrome — Hieu",
+                                  "content": "Chrome — Personal",
                                   "fontFamily": "IBM Plex Mono",
                                   "fontSize": 13,
                                   "fontWeight": "600"
@@ -1268,9 +1268,9 @@
                     {
                       "type": "text",
                       "id": "U1Xk6z",
-                      "name": "Chrome — Hieu",
+                      "name": "Chrome — Personal",
                       "fill": "#FFFFFF",
-                      "content": "Chrome — Hieu",
+                      "content": "Chrome — Personal",
                       "fontFamily": "Martian Mono",
                       "fontSize": 20,
                       "fontWeight": "700",
@@ -2552,7 +2552,7 @@
                     {
                       "type": "frame",
                       "id": "oYkdP",
-                      "name": "Target Chrome — Hieu",
+                      "name": "Target Chrome — Personal",
                       "width": "fill_container",
                       "fill": "#EEF5FC",
                       "stroke": "#EEF0F2",
@@ -2610,9 +2610,9 @@
                             {
                               "type": "text",
                               "id": "RvsUH",
-                              "name": "Chrome — Hieu",
+                              "name": "Chrome — Personal",
                               "fill": "#1A1A1A",
-                              "content": "Chrome — Hieu",
+                              "content": "Chrome — Personal",
                               "fontFamily": "IBM Plex Sans",
                               "fontSize": 14,
                               "fontWeight": "500"
@@ -2673,7 +2673,7 @@
                     {
                       "type": "frame",
                       "id": "uxqpm",
-                      "name": "Target Chrome — regulator.ca",
+                      "name": "Target Chrome — example.com",
                       "width": "fill_container",
                       "fill": "#EEF5FC",
                       "stroke": "#EEF0F2",
@@ -2731,9 +2731,9 @@
                             {
                               "type": "text",
                               "id": "s0Tgvt",
-                              "name": "Chrome — regulator.c",
+                              "name": "Chrome — example.com",
                               "fill": "#1A1A1A",
-                              "content": "Chrome — regulator.ca",
+                              "content": "Chrome — example.com",
                               "fontFamily": "IBM Plex Sans",
                               "fontSize": 14,
                               "fontWeight": "500"
@@ -3260,7 +3260,7 @@
                     {
                       "type": "frame",
                       "id": "U7XZhD",
-                      "name": "Pick Chrome — Hieu",
+                      "name": "Pick Chrome — Personal",
                       "width": "fill_container",
                       "stroke": "#1E1E1E",
                       "strokeWidth": {
@@ -3286,11 +3286,11 @@
                         {
                           "type": "text",
                           "id": "euDXd",
-                          "name": "Chrome — Hieu",
+                          "name": "Chrome — Personal",
                           "fill": "#FFFFFF",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Chrome — Hieu",
+                          "content": "Chrome — Personal",
                           "fontFamily": "IBM Plex Mono",
                           "fontSize": 12,
                           "fontWeight": "normal"
@@ -3300,7 +3300,7 @@
                     {
                       "type": "frame",
                       "id": "NBr06",
-                      "name": "Pick Chrome — regulator.ca",
+                      "name": "Pick Chrome — example.com",
                       "width": "fill_container",
                       "stroke": "#1E1E1E",
                       "strokeWidth": {
@@ -3326,11 +3326,11 @@
                         {
                           "type": "text",
                           "id": "jYgQ4",
-                          "name": "Chrome — regulator.c",
+                          "name": "Chrome — example.com",
                           "fill": "#D0D0D0",
                           "textGrowth": "fixed-width",
                           "width": "fill_container",
-                          "content": "Chrome — regulator.ca",
+                          "content": "Chrome — example.com",
                           "fontFamily": "IBM Plex Mono",
                           "fontSize": 12,
                           "fontWeight": "normal"
@@ -3569,7 +3569,7 @@
             {
               "type": "frame",
               "id": "vYbey",
-              "name": "Option Chrome — Hieu",
+              "name": "Option Chrome — Personal",
               "width": "fill_container",
               "fill": "#EEF5FC",
               "stroke": "#EEF0F2",
@@ -3596,11 +3596,11 @@
                 {
                   "type": "text",
                   "id": "GZhgb",
-                  "name": "Chrome — Hieu",
+                  "name": "Chrome — Personal",
                   "fill": "#2F86D6",
                   "textGrowth": "fixed-width",
                   "width": "fill_container",
-                  "content": "Chrome — Hieu",
+                  "content": "Chrome — Personal",
                   "fontFamily": "IBM Plex Sans",
                   "fontSize": 15,
                   "fontWeight": "600"
@@ -3634,7 +3634,7 @@
             {
               "type": "frame",
               "id": "Sa6eN",
-              "name": "Option Chrome — regulator.ca",
+              "name": "Option Chrome — example.com",
               "width": "fill_container",
               "stroke": "#EEF0F2",
               "strokeWidth": {
@@ -3660,11 +3660,11 @@
                 {
                   "type": "text",
                   "id": "xybTs",
-                  "name": "Chrome — regulator.c",
+                  "name": "Chrome — example.com",
                   "fill": "#1A1A1A",
                   "textGrowth": "fixed-width",
                   "width": "fill_container",
-                  "content": "Chrome — regulator.ca",
+                  "content": "Chrome — example.com",
                   "fontFamily": "IBM Plex Sans",
                   "fontSize": 15,
                   "fontWeight": "normal"

@@ -1,6 +1,6 @@
 # Plan — Linh Fedora MVP
 
-Status: in progress · Created: 2026-11-08 · Repo: `tkhieu/linh` (private)
+Status: in progress · Created: 2026-11-08 · Repo: `tkhieu/linh` (public)
 Source: [product definition](../../docs/product-definition.md) · Brief confirmed via `/ak-atoz` gate 1.
 
 ## Objective
@@ -10,7 +10,7 @@ for Fedora 44 GNOME/Wayland.
 
 ## Done means
 
-1. Private repo `tkhieu/linh`; Linux CI (fedora:44 container) runs fmt, clippy, tests, build — green on `main`.
+1. Public repo `tkhieu/linh`; Linux CI (fedora:44 container) runs fmt, clippy, tests, build — green on `main`.
 2. Build produces `.rpm`; `sudo dnf install ./linh-*.rpm` works; Linh appears in app grid.
 3. After onboarding, `xdg-settings get default-web-browser` returns `linh.desktop`.
 4. `xdg-open <url>` with no matching rule opens Primary browser; rules `meet.google.com → Chrome` and `*.company.com → Chrome profile` work; first match wins; detects RPM Chrome and Flatpak Chrome/Firefox.
@@ -44,7 +44,7 @@ so phases 2 and 3 can run in parallel without touching each other's files.
 ## Defaults (reversible)
 
 React + Vite + TypeScript with pnpm; CI in `fedora:44`; Chrome profile
-"regulator.ca" stands in for "Work" in manual tests; max 2 concurrent build agents
+"example.com" stands in for "Work" in manual tests; max 2 concurrent build agents
 (~5 GB free RAM); broken-config fallback = first detected browser (Primary is unreadable when the config is broken); prompt
 window centered (Wayland cannot position windows).
 

@@ -1,10 +1,7 @@
 use std::env;
 use std::path::PathBuf;
 
-/// Where Linh's config/log files live on Windows. Holds only what is
-/// actually used today; unlike Linux's `Dirs`, there is no browser/app
-/// discovery yet to need a home dir or scan roots — those are added back
-/// once that is ported.
+/// Where Linh's config and log files live on Windows.
 #[derive(Debug, Clone)]
 pub struct Dirs {
     pub config_home: PathBuf,
