@@ -8,7 +8,7 @@ use winreg::RegKey;
 
 use super::command::parse_registry_command;
 use super::dirs::Dirs;
-use super::registry::{current_user, local_machine, read_string};
+use super::registry::{classes_root, current_user, local_machine, read_string};
 
 const CLIENTS: [&str; 2] = [
     r"SOFTWARE\Clients\StartMenuInternet",
@@ -83,6 +83,20 @@ fn read_profiles(path: &Path) -> Vec<BrowserProfile> {
     profiles
 }
 
+fn choose_launch_command(
+    https_progid: Option<&str>,
+    start_menu_command: Option<String>,
+    read_progid_command: impl FnOnce(&str) -> Option<String>,
+) -> Option<String> {
+    // StartMenuInternet's open command launches the browser UI; the HTTPS
+    // capability points to the ProgID command used for URL handoff.
+    // https://learn.microsoft.com/windows/win32/shell/default-programs
+    match https_progid.filter(|id| !id.is_empty() && !id.contains(['\\', '/'])) {
+        Some(id) => read_progid_command(id),
+        None => start_menu_command,
+    }
+}
+
 fn scan_root(root: &RegKey, prefix: &str, dirs: &Dirs, results: &mut BTreeMap<String, Browser>) {
     let Ok(clients) = root.open_subkey_with_flags(prefix, KEY_READ) else {
         return;
@@ -92,7 +106,17 @@ fn scan_root(root: &RegKey, prefix: &str, dirs: &Dirs, results: &mut BTreeMap<St
             continue;
         }
         let path = format!(r"{prefix}\{key}");
-        let Some(command) = read_string(root, &format!(r"{path}\shell\open\command"), "") else {
+        let https_progid = read_string(
+            root,
+            &format!(r"{path}\Capabilities\URLAssociations"),
+            "https",
+        );
+        let start_menu_command = read_string(root, &format!(r"{path}\shell\open\command"), "");
+        let Some(command) =
+            choose_launch_command(https_progid.as_deref(), start_menu_command, |id| {
+                read_string(&classes_root(), &format!(r"{id}\shell\open\command"), "")
+            })
+        else {
             continue;
         };
         let Some((exe, _)) = parse_registry_command(&command) else {
@@ -152,5 +176,34 @@ mod tests {
         }
         assert_eq!(classify("Mozilla Firefox"), (BrowserFamily::Firefox, true));
         assert_eq!(classify("Some Browser"), (BrowserFamily::Other, false));
+    }
+
+    #[test]
+    fn https_progid_command_takes_precedence_over_start_menu() {
+        let command = choose_launch_command(
+            Some("ChromeHTML"),
+            Some(r#""C:\chrome.exe""#.into()),
+            |id| {
+                assert_eq!(id, "ChromeHTML");
+                Some(r#""C:\chrome.exe" --single-argument "%1""#.into())
+            },
+        );
+        assert_eq!(
+            command.as_deref(),
+            Some(r#""C:\chrome.exe" --single-argument "%1""#)
+        );
+    }
+
+    #[test]
+    fn start_menu_fallback_only_when_https_progid_is_absent() {
+        let fallback = Some(r#""C:\chrome.exe""#.to_string());
+        assert_eq!(
+            choose_launch_command(None, fallback.clone(), |_| panic!("no ProgID lookup")),
+            fallback
+        );
+        assert_eq!(
+            choose_launch_command(Some("ChromeHTML"), fallback, |_| None),
+            None
+        );
     }
 }

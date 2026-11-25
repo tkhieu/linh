@@ -88,7 +88,7 @@ fn private_flag(browser: &Browser) -> Option<&'static str> {
     }
     match browser.family {
         BrowserFamily::Chromium => Some("--incognito"),
-        BrowserFamily::Firefox => Some("--private-window"),
+        BrowserFamily::Firefox => Some("-private-window"),
         BrowserFamily::Other => None,
     }
 }
@@ -98,6 +98,10 @@ pub fn build_launch_command(
     target: &Target,
     url: &str,
 ) -> Result<LaunchCommand, String> {
+    if url.starts_with('-') {
+        return Err("URL must not start with a command-line switch".into());
+    }
+    debug_assert!(!url.starts_with('-'));
     let InstallKind::Native { exec } = &browser.install else {
         return Err("Windows does not support Flatpak launches".into());
     };
@@ -111,7 +115,13 @@ pub fn build_launch_command(
         parse_registry_command(exec).ok_or("invalid Windows registry command")?;
     let mut args = Vec::new();
     for arg in source_args {
-        if matches!(arg.as_str(), "%1" | "%L" | "%l" | "%u" | "%U") {
+        if matches!(arg.as_str(), "%1" | "%L" | "%l" | "%u" | "%U")
+            || arg.eq_ignore_ascii_case("--single-argument")
+            || (browser.family == BrowserFamily::Firefox
+                && ["-osint", "-url", "-private-window"]
+                    .iter()
+                    .any(|flag| arg.eq_ignore_ascii_case(flag)))
+        {
             continue;
         }
         args.push(arg);
@@ -123,9 +133,27 @@ pub fn build_launch_command(
             args.push(format!("--profile-directory={profile}"));
         }
     }
-    if target.private {
-        if let Some(flag) = private_flag(browser) {
-            args.push(flag.to_string());
+    if browser.family == BrowserFamily::Firefox {
+        // Firefox's -osint sanitizer accepts only its registered -url or
+        // -private-window form, with the URL as the final argument.
+        // https://github.com/mozilla-firefox/firefox/blob/main/browser/docs/CommandLineParameters.md
+        args.push("-osint".to_string());
+        args.push(
+            if target.private && browser.supports_private {
+                "-private-window"
+            } else {
+                "-url"
+            }
+            .to_string(),
+        );
+    } else {
+        if target.private {
+            if let Some(flag) = private_flag(browser) {
+                args.push(flag.to_string());
+            }
+        }
+        if browser.family == BrowserFamily::Chromium {
+            args.push("--single-argument".to_string());
         }
     }
     args.push(url.to_string());
@@ -187,24 +215,30 @@ mod tests {
         );
         assert_eq!(
             private_flag(&mk("Firefox", BrowserFamily::Firefox)),
-            Some("--private-window")
+            Some("-private-window")
         );
     }
 
-    #[test]
-    fn builds_argv_without_shell_or_literal_placeholder() {
-        let browser = Browser {
-            id: "Google Chrome".into(),
-            display_name: "Chrome".into(),
-            family: BrowserFamily::Chromium,
-            install: InstallKind::Native {
-                exec: r#""C:\Program Files\Google\chrome.exe" --single-argument "%1""#.into(),
-            },
+    fn browser(id: &str, family: BrowserFamily, exec: &str) -> Browser {
+        Browser {
+            id: id.into(),
+            display_name: id.into(),
+            family,
+            install: InstallKind::Native { exec: exec.into() },
             profiles: vec![],
             supports_private: true,
             icon: None,
             desktop_file: None,
-        };
+        }
+    }
+
+    #[test]
+    fn chrome_progid_places_guard_after_profile_and_incognito() {
+        let browser = browser(
+            "Google Chrome",
+            BrowserFamily::Chromium,
+            r#""C:\Program Files\Google\Chrome\Application\chrome.exe" --single-argument "%1""#,
+        );
         let target = Target {
             browser: browser.id.clone(),
             profile: Some("Profile 1".into()),
@@ -212,15 +246,111 @@ mod tests {
         };
         let url = "https://example.com/a?x=1&y=2";
         let cmd = build_launch_command(&browser, &target, url).unwrap();
-        assert_eq!(cmd.program, r"C:\Program Files\Google\chrome.exe");
+        assert_eq!(
+            cmd.program,
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        );
         assert_eq!(
             cmd.args,
             [
-                "--single-argument",
                 "--profile-directory=Profile 1",
                 "--incognito",
+                "--single-argument",
                 url
             ]
         );
+    }
+
+    #[test]
+    fn edge_progid_keeps_fixed_args_before_guard() {
+        let browser = browser(
+            "Microsoft Edge",
+            BrowserFamily::Chromium,
+            r#""C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --profile-directory=Default --single-argument "%1""#,
+        );
+        let target = Target {
+            browser: browser.id.clone(),
+            profile: None,
+            private: true,
+        };
+        let cmd = build_launch_command(&browser, &target, "https://example.com/").unwrap();
+        assert_eq!(
+            cmd.program,
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+        );
+        assert_eq!(
+            cmd.args,
+            [
+                "--profile-directory=Default",
+                "--incognito",
+                "--single-argument",
+                "https://example.com/"
+            ]
+        );
+    }
+
+    #[test]
+    fn firefox_progid_uses_mozilla_osint_forms() {
+        let browser = browser(
+            "Mozilla Firefox",
+            BrowserFamily::Firefox,
+            r#""C:\Program Files\Mozilla Firefox\firefox.exe" -osint -url "%1""#,
+        );
+        let mut target = Target {
+            browser: browser.id.clone(),
+            profile: None,
+            private: false,
+        };
+        let normal = build_launch_command(&browser, &target, "https://example.com/").unwrap();
+        assert_eq!(
+            normal.program,
+            r"C:\Program Files\Mozilla Firefox\firefox.exe"
+        );
+        assert_eq!(normal.args, ["-osint", "-url", "https://example.com/"]);
+        target.private = true;
+        let private = build_launch_command(&browser, &target, "https://example.com/").unwrap();
+        assert_eq!(
+            private.args,
+            ["-osint", "-private-window", "https://example.com/"]
+        );
+    }
+
+    #[test]
+    fn start_menu_command_without_placeholder_still_guards_url() {
+        let browser = browser(
+            "Google Chrome",
+            BrowserFamily::Chromium,
+            r#""C:\Program Files\Google\Chrome\Application\chrome.exe""#,
+        );
+        let target = Target {
+            browser: browser.id.clone(),
+            profile: Some("Work".into()),
+            private: true,
+        };
+        let cmd = build_launch_command(&browser, &target, "https://example.com/").unwrap();
+        assert_eq!(
+            cmd.program,
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        );
+        assert_eq!(
+            cmd.args,
+            [
+                "--profile-directory=Work",
+                "--incognito",
+                "--single-argument",
+                "https://example.com/"
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_switch_shaped_url() {
+        let browser = browser("Google Chrome", BrowserFamily::Chromium, r"C:\chrome.exe");
+        let target = Target {
+            browser: browser.id.clone(),
+            profile: None,
+            private: false,
+        };
+        assert!(build_launch_command(&browser, &target, "--evil").is_err());
     }
 }

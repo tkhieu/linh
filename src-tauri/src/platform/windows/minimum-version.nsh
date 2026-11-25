@@ -9,3 +9,10 @@
     Abort
   supported:
 !macroend
+
+!macro NSIS_HOOK_POSTUNINSTALL
+  DeleteRegKey HKCU "Software\Classes\LinhURL"
+  DeleteRegKey HKCU "Software\Linh\Capabilities"
+  DeleteRegKey /ifempty HKCU "Software\Linh"
+  DeleteRegValue HKCU "Software\RegisteredApplications" "Linh"
+!macroend
