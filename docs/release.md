@@ -12,7 +12,8 @@ artifact is for Partner Center submission, not direct installation.
    unless all three versions equal the `vMAJOR.MINOR.PATCH` tag.
 2. Run **Release** with `workflow_dispatch` and `dry_run=true` on a branch
    after the workflow is available on the default branch. Inspect all four
-   build jobs and artifacts. Dry runs create no GitHub Release. The initial PR
+   build jobs and the complete `linh-release-assets` artifact, including
+   `SHA256SUMS`. Dry runs create no GitHub Release. The initial PR
    can use a temporary pull request trigger for verification before merge.
 3. Merge the change, then push the `vMAJOR.MINOR.PATCH` tag. The tag build
    creates a **draft** GitHub Release with `.rpm`, `.deb`, unsigned NSIS `.exe`,
