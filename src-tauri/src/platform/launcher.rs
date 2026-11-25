@@ -9,12 +9,33 @@ use linh_core::{Browser, Target};
 
 use crate::platform::current::dirs::Dirs;
 
-/// Something to run exactly once if a launch that already reported
-/// synchronous success is later confirmed to have actually failed (see
-/// [`spawn_detached`]'s doc comment). Only macOS ever invokes one today;
-/// Linux and Windows ignore it, since their `spawn_detached` only ever
-/// knows success/failure synchronously, as before.
-pub type AsyncFailureHandler = Box<dyn FnOnce() + Send + 'static>;
+/// What a launch that already reported synchronous success turned out
+/// to do, confirmed later (see [`spawn_detached`]'s doc comment). Only
+/// macOS's watcher ever constructs one of these; Linux and Windows never
+/// invoke the handler at all, since their `spawn_detached` only ever
+/// knows success/failure synchronously, as before — so on those
+/// platforms nothing ever constructs a value of this type, only
+/// `routing.rs`'s handlers match against it (as they must, to stay
+/// platform-agnostic code that still type-checks everywhere).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub enum LaunchOutcome {
+    /// Exited on its own with a successful status.
+    Succeeded,
+    /// Exited on its own with a failing status: a definite failure, safe
+    /// to fall back from (the original request was never duplicated).
+    DefiniteFailure,
+    /// Could not be confirmed either way — `try_wait` itself errored, or
+    /// the process was still running past a hard deadline and had to be
+    /// killed. Must never be treated as a failure worth falling back
+    /// from: the original launch may still have succeeded (or even
+    /// still be running), and opening a fallback on top of that risks
+    /// the link opening twice.
+    Unconfirmed,
+}
+
+/// Runs exactly once with the launch's [`LaunchOutcome`], once known.
+pub type AsyncOutcomeHandler = Box<dyn FnOnce(LaunchOutcome) + Send + 'static>;
 
 /// The Windows registry uses `%1` and CRT quoting, and macOS launches
 /// through `open(1)` rather than a `.desktop` `Exec=` line
@@ -94,21 +115,20 @@ fn strip_vars(command: &mut Command, vars: &[&str]) {
 /// `open`(1)-wrapped commands, for which [`spawn_macos_open`] additionally
 /// starts a worker thread that watches `open`'s own exit (cheap: `open`
 /// always returns quickly, whether or not the app it opens stays
-/// running) and, only if that watcher *confirms* a failure — a non-zero
-/// exit, or `open` itself hanging past a hard deadline — calls
-/// `on_confirmed_failure` once. The plain fire-and-forget path below is
-/// kept reachable for macOS too — rather than relying on the "every
-/// macOS command is `open`" invariant always holding — as a safe
-/// fallback for any command whose program isn't `open`, e.g. if that
-/// ever changes; `on_confirmed_failure` is simply dropped unused there,
-/// same as on Linux/Windows, which keep their exact existing
-/// fire-and-forget behavior with no later failure detection at all.
-/// `dirs` is only read on macOS, to log what the watcher found.
+/// running) and reports the [`LaunchOutcome`] it finds to `on_outcome`
+/// once. The plain fire-and-forget path below is kept reachable for
+/// macOS too — rather than relying on the "every macOS command is
+/// `open`" invariant always holding — as a safe fallback for any command
+/// whose program isn't `open`, e.g. if that ever changes; `on_outcome`
+/// is simply dropped unused there, same as on Linux/Windows, which keep
+/// their exact existing fire-and-forget behavior with no later outcome
+/// detection at all. `dirs` is only read on macOS, to log what the
+/// watcher found.
 #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
 pub fn spawn_detached(
     dirs: &Dirs,
     cmd: &LaunchCommand,
-    on_confirmed_failure: AsyncFailureHandler,
+    on_outcome: AsyncOutcomeHandler,
 ) -> io::Result<()> {
     #[cfg(target_os = "windows")]
     if matches!(cmd.program.as_str(), "msteams:" | "zoommtg:") {
@@ -116,7 +136,7 @@ pub fn spawn_detached(
     }
     #[cfg(target_os = "macos")]
     if cmd.program == super::macos::command::OPEN {
-        return spawn_macos_open(dirs, cmd, on_confirmed_failure);
+        return spawn_macos_open(dirs, cmd, on_outcome);
     }
     let mut command = Command::new(&cmd.program);
     command
@@ -172,7 +192,7 @@ const OPEN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis
 fn spawn_macos_open(
     dirs: &Dirs,
     cmd: &LaunchCommand,
-    on_confirmed_failure: AsyncFailureHandler,
+    on_outcome: AsyncOutcomeHandler,
 ) -> io::Result<()> {
     let mut command = Command::new(&cmd.program);
     command
@@ -187,7 +207,7 @@ fn spawn_macos_open(
         OPEN_POLL_INTERVAL,
         dirs.clone(),
         cmd.program.clone(),
-        on_confirmed_failure,
+        on_outcome,
     );
     Ok(())
 }
@@ -199,7 +219,10 @@ trait Waitable {
     /// Non-blocking: `Ok(None)` while still running.
     fn try_wait(&mut self) -> io::Result<Option<ExitStatus>>;
     /// Kills and reaps (waits for) the process, so it's never left as a
-    /// zombie even when forced to give up on it.
+    /// zombie even when forced to give up on it. Tolerates `kill`
+    /// itself failing (e.g. the process had already exited on its own
+    /// between the last poll and this call) — `wait` still always runs,
+    /// so the process is reaped either way.
     fn kill_and_reap(&mut self) -> io::Result<()>;
 }
 
@@ -210,7 +233,7 @@ impl Waitable for std::process::Child {
     }
 
     fn kill_and_reap(&mut self) -> io::Result<()> {
-        std::process::Child::kill(self)?;
+        let _ = std::process::Child::kill(self);
         std::process::Child::wait(self).map(|_| ())
     }
 }
@@ -225,7 +248,7 @@ fn spawn_watcher<W: Waitable + Send + 'static>(
     poll_interval: std::time::Duration,
     dirs: Dirs,
     program: String,
-    on_confirmed_failure: AsyncFailureHandler,
+    on_outcome: AsyncOutcomeHandler,
 ) {
     thread::spawn(move || {
         watch_and_report(
@@ -234,58 +257,56 @@ fn spawn_watcher<W: Waitable + Send + 'static>(
             poll_interval,
             &dirs,
             &program,
-            on_confirmed_failure,
+            on_outcome,
         );
     });
 }
 
-/// What watching `waitable` to resolution found.
-#[cfg(target_os = "macos")]
-enum WatchResult {
-    /// Exited on its own with a successful status.
-    Succeeded,
-    /// Exited on its own with a failing status, or `try_wait` itself
-    /// errored.
-    Failed,
-    /// Never exited before `deadline`; already killed and reaped.
-    TimedOut,
-}
-
 /// Polls `waitable` every `poll_interval` until it exits or `deadline`
 /// elapses (from this call, not from when the process actually
-/// started), in which case it's killed and reaped so it's never left
-/// running or as a zombie. Always terminates: either `waitable` exits
-/// (success or failure) or the deadline forces it.
+/// started). On a `try_wait` error, or once the deadline is hit, the
+/// process is killed and reaped (see [`Waitable::kill_and_reap`]) and
+/// the outcome is [`LaunchOutcome::Unconfirmed`] either way — a
+/// `try_wait` error means we genuinely don't know what happened, and a
+/// deadline kill is us *ending* the process, not it reporting a result,
+/// so neither can be treated as a definite failure worth falling back
+/// from. Always terminates: either `waitable` exits on its own, or the
+/// deadline forces it.
 #[cfg(target_os = "macos")]
 fn watch<W: Waitable>(
     mut waitable: W,
     deadline: std::time::Duration,
     poll_interval: std::time::Duration,
-) -> WatchResult {
+) -> LaunchOutcome {
     let start = std::time::Instant::now();
     loop {
         match waitable.try_wait() {
             Ok(Some(status)) => {
                 return if status.success() {
-                    WatchResult::Succeeded
+                    LaunchOutcome::Succeeded
                 } else {
-                    WatchResult::Failed
+                    LaunchOutcome::DefiniteFailure
                 };
             }
             Ok(None) => {}
-            Err(_) => return WatchResult::Failed,
+            Err(_) => {
+                let _ = waitable.kill_and_reap();
+                return LaunchOutcome::Unconfirmed;
+            }
         }
         if start.elapsed() >= deadline {
             let _ = waitable.kill_and_reap();
-            return WatchResult::TimedOut;
+            return LaunchOutcome::Unconfirmed;
         }
         thread::sleep(poll_interval);
     }
 }
 
-/// Runs [`watch`] and, only on a confirmed failure (not a success),
-/// logs it and calls `on_confirmed_failure` exactly once. A success logs
-/// nothing extra — the normal `receive->spawn` line already covers it.
+/// Runs [`watch`], logs what it found, and reports the
+/// [`LaunchOutcome`] to `on_outcome` exactly once — unconditionally,
+/// including on success, since callers (e.g. a fallback launch) may
+/// need to log a confirmed-opened line that `watch_and_report` itself
+/// has no context for.
 #[cfg(target_os = "macos")]
 fn watch_and_report<W: Waitable>(
     waitable: W,
@@ -293,25 +314,28 @@ fn watch_and_report<W: Waitable>(
     poll_interval: std::time::Duration,
     dirs: &Dirs,
     program: &str,
-    on_confirmed_failure: AsyncFailureHandler,
+    on_outcome: AsyncOutcomeHandler,
 ) {
-    match watch(waitable, deadline, poll_interval) {
-        WatchResult::Succeeded => {}
-        WatchResult::Failed => {
+    let outcome = watch(waitable, deadline, poll_interval);
+    match outcome {
+        LaunchOutcome::Succeeded => {}
+        LaunchOutcome::DefiniteFailure => {
             crate::platform::logging::log_line(
                 dirs,
-                &format!("{program}: confirmed failed after appearing to launch; falling back"),
+                &format!("{program}: confirmed exited with a failing status"),
             );
-            on_confirmed_failure();
         }
-        WatchResult::TimedOut => {
+        LaunchOutcome::Unconfirmed => {
             crate::platform::logging::log_line(
                 dirs,
-                &format!("{program}: still running after {deadline:?}; killed it and falling back"),
+                &format!(
+                    "{program}: could not confirm success (a try_wait error, or still running \
+                     past the {deadline:?} deadline, now killed)"
+                ),
             );
-            on_confirmed_failure();
         }
     }
+    on_outcome(outcome);
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -319,6 +343,7 @@ mod macos_tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::mpsc;
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
 
@@ -341,102 +366,199 @@ mod macos_tests {
         }
     }
 
-    /// Reports exactly the scripted sequence of poll results, then keeps
-    /// reporting "still running" forever (so a deadline test can run it
-    /// past its deadline).
+    fn record_outcome(slot: Arc<std::sync::Mutex<Vec<LaunchOutcome>>>) -> AsyncOutcomeHandler {
+        Box::new(move |outcome| slot.lock().unwrap().push(outcome))
+    }
+
+    /// Reports exactly the scripted sequence of poll results (an `Err`
+    /// step simulates `try_wait` itself failing), then keeps reporting
+    /// "still running" forever (so a deadline test can run it past its
+    /// deadline).
+    enum Step {
+        StillRunning,
+        Exited(ExitStatus),
+        TryWaitErrors,
+    }
+
     struct ScriptedWaitable {
-        remaining: std::collections::VecDeque<Option<ExitStatus>>,
+        remaining: std::collections::VecDeque<Step>,
         kill_called: Arc<AtomicBool>,
+        /// Whether `kill_and_reap` still calls through (reaps) even
+        /// when asked to simulate `kill` itself failing — mirrors the
+        /// real `Child` impl's "ignore kill's error, always wait"
+        /// contract, so this fake can stand in for it in `watch`-level
+        /// tests without spawning a real process.
+        reaped: Arc<AtomicBool>,
     }
 
     impl Waitable for ScriptedWaitable {
         fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
-            Ok(self.remaining.pop_front().flatten())
+            match self.remaining.pop_front() {
+                Some(Step::StillRunning) | None => Ok(None),
+                Some(Step::Exited(status)) => Ok(Some(status)),
+                Some(Step::TryWaitErrors) => Err(io::Error::other("try_wait failed")),
+            }
         }
 
         fn kill_and_reap(&mut self) -> io::Result<()> {
             self.kill_called.store(true, Ordering::SeqCst);
+            // Real `kill` failing (e.g. already exited) must not skip
+            // reaping — see the real impl's doc comment.
+            self.reaped.store(true, Ordering::SeqCst);
             Ok(())
         }
     }
 
-    fn still_running_forever() -> ScriptedWaitable {
+    fn waitable(steps: Vec<Step>) -> ScriptedWaitable {
         ScriptedWaitable {
-            remaining: std::collections::VecDeque::new(),
+            remaining: std::collections::VecDeque::from(steps),
             kill_called: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    fn exits_with(code: i32) -> ScriptedWaitable {
-        ScriptedWaitable {
-            remaining: std::collections::VecDeque::from([Some(exit_status(code))]),
-            kill_called: Arc::new(AtomicBool::new(false)),
+            reaped: Arc::new(AtomicBool::new(false)),
         }
     }
 
     #[test]
-    fn zero_exit_runs_no_fallback() {
-        let ran = Arc::new(AtomicBool::new(false));
-        let ran_for_closure = ran.clone();
+    fn zero_exit_reports_succeeded_and_never_kills() {
+        let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let w = waitable(vec![Step::Exited(exit_status(0))]);
+        let kill_called = w.kill_called.clone();
         watch_and_report(
-            exits_with(0),
+            w,
             Duration::from_millis(200),
             Duration::from_millis(5),
             &test_dirs(),
             "fake-open",
-            Box::new(move || ran_for_closure.store(true, Ordering::SeqCst)),
+            record_outcome(outcomes.clone()),
         );
-        assert!(
-            !ran.load(Ordering::SeqCst),
-            "a clean exit must not fall back"
-        );
+        assert_eq!(*outcomes.lock().unwrap(), vec![LaunchOutcome::Succeeded]);
+        assert!(!kill_called.load(Ordering::SeqCst));
     }
 
     #[test]
-    fn non_zero_exit_runs_fallback_exactly_once() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let calls_for_closure = calls.clone();
+    fn non_zero_exit_reports_definite_failure_exactly_once() {
+        let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        // Raw wait-status 256 => exit code 1.
+        let w = waitable(vec![Step::Exited(exit_status(256))]);
         watch_and_report(
-            exits_with(256), // raw wait-status 256 => exit code 1
+            w,
             Duration::from_millis(200),
             Duration::from_millis(5),
             &test_dirs(),
             "fake-open",
-            Box::new(move || {
-                calls_for_closure.fetch_add(1, Ordering::SeqCst);
-            }),
+            record_outcome(outcomes.clone()),
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *outcomes.lock().unwrap(),
+            vec![LaunchOutcome::DefiniteFailure]
+        );
     }
 
     #[test]
-    fn deadline_kills_reaps_and_runs_fallback_exactly_once() {
-        let waitable = still_running_forever();
-        let kill_called = waitable.kill_called.clone();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let calls_for_closure = calls.clone();
+    fn deadline_kills_reaps_and_reports_unconfirmed_exactly_once() {
+        let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let w = waitable(vec![]); // always "still running"
+        let kill_called = w.kill_called.clone();
+        let reaped = w.reaped.clone();
         watch_and_report(
-            waitable,
+            w,
             Duration::from_millis(60),
             Duration::from_millis(10),
             &test_dirs(),
             "fake-open",
-            Box::new(move || {
-                calls_for_closure.fetch_add(1, Ordering::SeqCst);
-            }),
+            record_outcome(outcomes.clone()),
         );
         assert!(
             kill_called.load(Ordering::SeqCst),
             "must kill a hung process"
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(reaped.load(Ordering::SeqCst), "must reap after killing");
+        assert_eq!(*outcomes.lock().unwrap(), vec![LaunchOutcome::Unconfirmed]);
     }
 
-    /// `try_wait` blocks on a two-party barrier until the test releases
-    /// it. If `spawn_watcher` ever waited for the watcher thread (rather
-    /// than only spawning it and returning), this test would deadlock —
-    /// a hang, not a flaky timing race — since nothing can release the
-    /// barrier until after `spawn_watcher` has already returned.
+    #[test]
+    fn try_wait_error_kills_reaps_and_reports_unconfirmed_exactly_once() {
+        let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let w = waitable(vec![Step::TryWaitErrors]);
+        let kill_called = w.kill_called.clone();
+        let reaped = w.reaped.clone();
+        watch_and_report(
+            w,
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+            &test_dirs(),
+            "fake-open",
+            record_outcome(outcomes.clone()),
+        );
+        assert!(
+            kill_called.load(Ordering::SeqCst),
+            "a try_wait error must still attempt to kill, not just give up"
+        );
+        assert!(reaped.load(Ordering::SeqCst), "must still reap");
+        assert_eq!(*outcomes.lock().unwrap(), vec![LaunchOutcome::Unconfirmed]);
+    }
+
+    /// Exercises the *real* `impl Waitable for Child`'s `kill_and_reap`
+    /// directly: spawns a real process that exits on its own almost
+    /// immediately, waits for that to happen, then calls
+    /// `kill_and_reap` — at which point the real `kill(2)` syscall is
+    /// expected to fail (nothing left to signal), and this must still
+    /// return `Ok(())` because `wait` always runs regardless.
+    #[test]
+    fn real_child_kill_and_reap_tolerates_kill_failing_on_an_already_exited_process() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn /bin/sh");
+        // Give it a moment to actually exit before we try to kill it.
+        for _ in 0..50 {
+            if matches!(Waitable::try_wait(&mut child), Ok(Some(_))) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            Waitable::kill_and_reap(&mut child).is_ok(),
+            "kill_and_reap must still succeed (and reap) even when kill() itself fails"
+        );
+    }
+
+    /// End-to-end with a real short-lived child that exits non-zero:
+    /// proves the whole spawn -> watch -> report pipeline reaps it and
+    /// reports a definite failure, without any scripted fake involved.
+    #[test]
+    fn real_child_with_nonzero_exit_is_reaped_and_reports_definite_failure() {
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exit 3"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn /bin/sh");
+        let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        watch_and_report(
+            child,
+            Duration::from_secs(5),
+            Duration::from_millis(10),
+            &test_dirs(),
+            "fake-open",
+            record_outcome(outcomes.clone()),
+        );
+        assert_eq!(
+            *outcomes.lock().unwrap(),
+            vec![LaunchOutcome::DefiniteFailure]
+        );
+    }
+
+    /// `try_wait` blocks on a two-party barrier until released. Runs
+    /// `spawn_watcher` on a helper thread and waits on a channel (bounded
+    /// to a generous 5s) for it to return: if `spawn_watcher` ever
+    /// regressed into waiting for the watcher thread (rather than only
+    /// spawning it), the helper thread would never reach the `tx.send`
+    /// below, and this test fails on the `recv_timeout` instead of
+    /// hanging forever.
     struct BlocksOnBarrier {
         barrier: Arc<Barrier>,
     }
@@ -458,18 +580,25 @@ mod macos_tests {
         let waitable = BlocksOnBarrier {
             barrier: barrier.clone(),
         };
-        spawn_watcher(
-            waitable,
-            Duration::from_secs(5),
-            Duration::from_millis(10),
-            test_dirs(),
-            "fake-open".to_string(),
-            Box::new(|| {}),
-        );
-        // Only reachable if `spawn_watcher` didn't block on the watcher
-        // thread's `try_wait`. Releases the watcher thread so it (and
-        // the test binary) can exit cleanly.
-        barrier.wait();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            spawn_watcher(
+                waitable,
+                Duration::from_secs(5),
+                Duration::from_millis(10),
+                test_dirs(),
+                "fake-open".to_string(),
+                Box::new(|_outcome| {}),
+            );
+            // Only reached if `spawn_watcher` didn't block on the
+            // watcher thread's `try_wait`.
+            let _ = tx.send(());
+            // Releases the still-blocked watcher thread so it (and this
+            // helper thread) can exit cleanly.
+            barrier.wait();
+        });
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("spawn_watcher must return promptly, without waiting for the child");
     }
 }
 
