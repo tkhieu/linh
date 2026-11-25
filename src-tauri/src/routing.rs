@@ -121,7 +121,16 @@ fn plan_app_open(
     // which isn't possible for every Zoom URL (see `zoom_app_url`).
     let launch_url = match app_target.app.as_str() {
         "zoom" => linh_core::zoom_app_url(url),
-        "teams" => Some(url.to_string()),
+        "teams" => {
+            #[cfg(target_os = "windows")]
+            {
+                apps::teams_app_url(url)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                Some(url.to_string())
+            }
+        }
         _ => None,
     };
     let Some(launch_url) = launch_url else {
@@ -136,7 +145,7 @@ fn plan_app_open(
         profile: None,
         private: false,
     };
-    match linh_core::build_launch_command(&app, &dummy_target, &launch_url) {
+    match launcher::build_launch_command(&app, &dummy_target, &launch_url) {
         Ok(cmd) => AppOpenPlan::Launch { cmd, fallback },
         Err(_) => AppOpenPlan::Fallback(fallback),
     }
@@ -190,7 +199,7 @@ fn open_target_with(
         .iter()
         .find(|b| b.id == target.browser)
         .ok_or_else(|| format!("browser '{}' is not installed", target.browser))?;
-    let cmd = linh_core::build_launch_command(browser, target, url).map_err(|e| e.to_string())?;
+    let cmd = launcher::build_launch_command(browser, target, url)?;
     drop(browsers);
     spawn(&cmd)
 }
@@ -209,7 +218,9 @@ pub fn show_and_focus(app: &AppHandle, label: &str) {
     }
 }
 
-#[cfg(test)]
+// These fixtures are Desktop Entry commands; Windows registry commands are
+// exercised in platform::windows::command tests.
+#[cfg(all(test, not(target_os = "windows")))]
 mod tests {
     use super::*;
     use linh_core::{BrowserFamily, Config, InstallKind};

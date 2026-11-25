@@ -57,6 +57,12 @@
       "rpm": {
         "desktopTemplate": "templates/main.desktop"
       }
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "src/platform/windows/minimum-version.nsh"
+      }
     }
   },
   "plugins": {

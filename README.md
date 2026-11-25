@@ -2,7 +2,8 @@
 
 A Velja-style browser picker: registers as the default browser and routes
 each URL to the right browser, profile, or private window based on rules
-you configure. This repo targets Fedora and Ubuntu 24.04 (GNOME/Wayland).
+you configure. Native builds target Fedora, Ubuntu 24.04, and Windows 10
+version 1809 or later.
 
 ## Repo layout
 
@@ -32,6 +33,30 @@ cargo tauri build --bundles rpm   # produce target/release/bundle/rpm/Linh-*.rpm
 ```
 
 Install on Ubuntu 24.04: download the CI `.deb` artifact and run `sudo apt install ./linh_*.deb`.
+
+## Build on Windows
+
+Install Rust, Node.js, and pnpm. From the repository root run
+`pnpm --dir ui install`; then run `cargo tauri build --bundles nsis`
+from `src-tauri`. The Windows CI job
+uploads an unsigned NSIS installer. It installs for the current user.
+
+Linh finds browsers registered under Windows' StartMenuInternet keys and
+uses each browser's HTTPS ProgID open command when available. Chrome, Edge, Brave, Vivaldi,
+and Firefox support private launches; Opera uses `--private`. Chromium
+profiles come from each browser's `Local State` file. Teams and Zoom use
+their registered `msteams:` and `zoommtg:` protocol handlers.
+
+To make Linh the default browser, click **Open Windows Default Apps settings**
+in Linh. Linh registers its HTTP/HTTPS capabilities for the current user
+and opens Windows Settings. Choose Linh for both HTTP and HTTPS there;
+Windows 10/11 requires this user selection. Return to Linh to confirm
+the default status. Browser icons are extracted from registered EXE/DLL
+resources as PNG data URLs. Windows notification errors are recorded in
+the Linh log under `%LOCALAPPDATA%\Linh\linh.log`.
+At startup, Linh repairs an existing per-user URL registration if it points
+to an older executable. Uninstall removes Linh's per-user ProgID,
+capabilities, and RegisteredApplications value.
 
 ## Tests and checks
 

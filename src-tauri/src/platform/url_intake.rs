@@ -63,4 +63,17 @@ mod tests {
         let args = vec!["/usr/bin/linh".to_string(), "--flag".to_string()];
         assert_eq!(first_routable_url(&args), None);
     }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_protocol_command_url_reaches_single_instance_dispatch() {
+        let args = vec![
+            r"C:\Users\Alice\AppData\Local\Programs\Linh\linh.exe".to_string(),
+            "https://example.com/path?q=1&n=2".to_string(),
+        ];
+        assert_eq!(
+            first_routable_url(&args),
+            Some("https://example.com/path?q=1&n=2".to_string())
+        );
+    }
 }

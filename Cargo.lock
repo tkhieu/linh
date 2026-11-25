@@ -1959,6 +1959,7 @@ dependencies = [
  "base64 0.22.1",
  "libc",
  "linh-core",
+ "png",
  "serde",
  "serde_json",
  "tauri",
@@ -1967,6 +1968,8 @@ dependencies = [
  "tauri-plugin-single-instance",
  "url",
  "webkit2gtk",
+ "windows-sys 0.61.2",
+ "winreg",
 ]
 
 [[package]]

@@ -41,6 +41,8 @@ impl AppState {
     /// notifying the user if the config file turned out to be broken.
     pub fn init() -> Self {
         let dirs = Dirs::from_env();
+        #[cfg(target_os = "windows")]
+        default_browser::refresh_registration_if_stale(&dirs);
         let detected = browsers::detect_browsers(&dirs);
         let previous_default = default_browser::current_default_browser_id();
         let config_path = dirs.config_path();

@@ -49,6 +49,20 @@ describe('SettingsApp', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Registration failed')
   })
 
+  it('explains the Windows Default Apps handoff without claiming success', async () => {
+    const userAgent = vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue('Windows NT 10.0')
+    try {
+      api.isDefaultBrowser.mockResolvedValue(false)
+      api.setDefaultBrowser.mockResolvedValue(undefined)
+      render(<SettingsApp />)
+      fireEvent.click(await screen.findByRole('button', { name: 'Open Windows Default Apps settings' }))
+      expect(await screen.findByRole('status')).toHaveTextContent('Choose Linh for HTTP and HTTPS')
+      expect(api.setDefaultBrowser).toHaveBeenCalledOnce()
+    } finally {
+      userAgent.mockRestore()
+    }
+  })
+
   it('adds, edits, reorders, deletes rules, and saves target settings', async () => {
     render(<SettingsApp />)
     await screen.findByLabelText('Primary browser')
