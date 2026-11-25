@@ -57,18 +57,18 @@ describe('SettingsApp', () => {
     openSection('Browsers')
     fireEvent.click(screen.getByLabelText('Show Google Chrome — Work'))
     openSection('Rules')
-    fireEvent.click(screen.getByRole('button', { name: 'Add rule' }))
+    fireEvent.click(screen.getByRole('button', { name: '+ New route' }))
     fireEvent.change(screen.getByLabelText('Rule name'), { target: { value: 'Meet' } })
     fireEvent.change(screen.getByLabelText('URL patterns'), { target: { value: 'meet.google.com\n*.company.com' } })
     fireEvent.change(screen.getByLabelText('Open in'), { target: { value: targetKey(work) } })
     fireEvent.click(screen.getByRole('button', { name: 'Save rule' }))
     expect(screen.getByText('Meet')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Add rule' }))
+    fireEvent.click(screen.getByRole('button', { name: '+ New route' }))
     fireEvent.change(screen.getByLabelText('Rule name'), { target: { value: 'Other' } })
     fireEvent.change(screen.getByLabelText('URL patterns'), { target: { value: 'example.com' } })
     fireEvent.click(screen.getByRole('button', { name: 'Save rule' }))
     fireEvent.click(screen.getByRole('button', { name: 'Move Other up' }))
-    const ruleList = screen.getByRole('list', { name: 'Rules' })
+    const ruleList = screen.getByRole('list', { name: 'Routes' })
     expect(within(ruleList).getAllByRole('heading', { level: 3 }).map((node) => node.textContent)).toEqual(['Other', 'Meet'])
     fireEvent.click(screen.getByRole('button', { name: 'Edit Meet' }))
     fireEvent.change(screen.getByLabelText('Rule name'), { target: { value: 'Meetings' } })
@@ -106,7 +106,7 @@ describe('SettingsApp', () => {
     render(<SettingsApp />)
     await screen.findByLabelText('Primary browser')
     openSection('Browsers')
-    await screen.findByRole('heading', { name: 'Shown browsers' })
+    await screen.findByRole('heading', { name: 'Targets' })
     expect(screen.getByLabelText('Show Google Chrome — Work')).not.toBeChecked()
     fireEvent.click(screen.getByLabelText('Show Google Chrome — Work'))
     fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
@@ -120,7 +120,7 @@ describe('SettingsApp', () => {
     render(<SettingsApp />)
     await screen.findByLabelText('Primary browser')
     openSection('Browsers')
-    await screen.findByRole('heading', { name: 'Shown browsers' })
+    await screen.findByRole('heading', { name: 'Targets' })
     const staleCheckbox = screen.getByLabelText('Show Not installed: retired-browser/Profile 9')
     expect(staleCheckbox).toBeChecked()
     fireEvent.click(staleCheckbox)
@@ -135,7 +135,7 @@ describe('SettingsApp', () => {
     render(<SettingsApp />)
     await screen.findByLabelText('Primary browser')
     openSection('Rules')
-    await screen.findByRole('heading', { name: 'Rules' })
+    await screen.findByRole('heading', { name: 'Routes' })
     fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('Invalid rule')
   })
@@ -143,11 +143,11 @@ describe('SettingsApp', () => {
   it('navigates between General, Browsers, and Rules', async () => {
     render(<SettingsApp />)
     await screen.findByLabelText('Primary browser')
-    expect(screen.queryByRole('heading', { name: 'Rules' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Routes' })).not.toBeInTheDocument()
     openSection('Browsers')
-    expect(screen.getByRole('heading', { name: 'Shown browsers' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Targets' })).toBeInTheDocument()
     openSection('Rules')
-    expect(screen.getByRole('heading', { name: 'Rules' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Routes' })).toBeInTheDocument()
     expect(screen.queryByLabelText('Primary browser')).not.toBeInTheDocument()
   })
 
@@ -155,7 +155,7 @@ describe('SettingsApp', () => {
     render(<SettingsApp />)
     await screen.findByLabelText('Primary browser')
     openSection('Rules')
-    fireEvent.click(screen.getByRole('button', { name: 'Add preset' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Presets' }))
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Google Meet' }))
     expect(screen.getByLabelText('URL patterns')).toHaveValue('meet.google.com')
     fireEvent.change(screen.getByLabelText('URL patterns'), { target: { value: 'meet.google.com\nmeet.example.com' } })
@@ -172,7 +172,7 @@ describe('SettingsApp', () => {
     render(<SettingsApp />)
     await screen.findByLabelText('Primary browser')
     openSection('Rules')
-    fireEvent.click(screen.getByRole('button', { name: 'Add preset' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Presets' }))
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Microsoft Teams' }))
     expect(screen.getByLabelText('Open in')).toHaveValue('app:teams')
     expect(screen.getByText('App installed')).toBeInTheDocument()
@@ -278,5 +278,142 @@ describe('SettingsApp', () => {
     await waitFor(() => expect(document.querySelectorAll('.checklist img.browser-icon')).toHaveLength(4))
     expect(screen.getAllByText('◎').length).toBeGreaterThan(0)
     expect(api.getIcon).toHaveBeenCalledTimes(2)
+  })
+
+  it('rescan refreshes detected browsers without discarding an unsaved edit', async () => {
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    fireEvent.change(screen.getByLabelText('Primary browser'), { target: { value: targetKey(work) } })
+    openSection('Browsers')
+    const listBrowsersCallsBeforeRescan = api.listBrowsers.mock.calls.length
+    fireEvent.click(screen.getByRole('button', { name: 'Rescan' }))
+    await waitFor(() => expect(api.listBrowsers.mock.calls.length).toBeGreaterThan(listBrowsersCallsBeforeRescan))
+    // getConfig must not be called again by rescan — only the detected
+    // browsers/caps/default-status, never the edited config draft.
+    expect(api.getConfig).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'General' }))
+    expect(screen.getByLabelText('Primary browser')).toHaveValue(targetKey(work))
+    fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
+    await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith(expect.objectContaining({ primary: work })))
+  })
+
+  it('shows the picker step, not route checking, in Current behaviour when prompt mode is Always', async () => {
+    api.getConfig.mockResolvedValue({ ...config, prompt_mode: 'always' })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    expect(screen.getByText('Prompt mode: Always')).toBeInTheDocument()
+    expect(screen.queryByText('Check routes')).not.toBeInTheDocument()
+    expect(screen.queryByText('No match')).not.toBeInTheDocument()
+    expect(screen.getByText('Picker')).toBeInTheDocument()
+  })
+
+  it('test a link shows Picker and skips route evaluation when prompt mode is Always', async () => {
+    api.getConfig.mockResolvedValue({
+      ...config, prompt_mode: 'always',
+      rules: [{ name: 'Meet', match: ['meet.google.com'], open_in: work }],
+    })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    fireEvent.change(screen.getByLabelText('Test a link'), { target: { value: 'https://meet.google.com' } })
+    expect(await screen.findByText('Prompt mode is Always — every link opens the picker, routes are not checked.')).toBeInTheDocument()
+    expect(screen.getByText('prompt mode: always')).toBeInTheDocument()
+    const sidePanel = screen.getByText('Test a link').closest('aside')!
+    expect(within(sidePanel).getByText('Picker')).toBeInTheDocument()
+    expect(within(sidePanel).queryByText('Meet')).not.toBeInTheDocument()
+  })
+
+  it('shows "not a routable link" for a non-http(s) link, and never prefixes https:// onto a bare host', async () => {
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    const input = screen.getByLabelText('Test a link')
+    fireEvent.change(input, { target: { value: 'mailto:foo@bar.com' } })
+    expect(await screen.findByText('Not a routable link — only http:// and https:// links are routed.')).toBeInTheDocument()
+    fireEvent.change(input, { target: { value: 'github.com/owner/repo' } })
+    expect(await screen.findByText('Not a routable link — only http:// and https:// links are routed.')).toBeInTheDocument()
+  })
+
+  it('falls back consistently in the Routes table and Test a link once the Zoom app is confirmed not installed', async () => {
+    api.getConfig.mockResolvedValue({ ...config, rules: [{ name: 'Zoom calls', match: ['zoom.us/j/*'], open_in: { app: 'zoom' } }] })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    const routesList = screen.getByRole('list', { name: 'Routes' })
+    const zoomRow = screen.getByText('Zoom calls').closest('li')!
+    // listPresets() is still in flight: shows the app itself with a
+    // neutral note, never a guessed fallback.
+    expect(within(zoomRow).getByText('checking…')).toBeInTheDocument()
+    expect(within(zoomRow).queryByText('Firefox')).not.toBeInTheDocument()
+    await waitFor(() => expect(within(zoomRow).getByText('Firefox')).toBeInTheDocument())
+    expect(routesList).toContainElement(zoomRow)
+
+    const sidePanel = screen.getByText('Test a link').closest('aside')!
+    fireEvent.change(within(sidePanel).getByLabelText('Test a link'), { target: { value: 'https://zoom.us/j/123456789' } })
+    expect(await within(sidePanel).findByText('Zoom app not installed')).toBeInTheDocument()
+    expect(within(sidePanel).getByText('Firefox')).toBeInTheDocument()
+  })
+
+  it('shows the app itself with a neutral note (never a guessed fallback) while availability is unknown, in both panels', async () => {
+    let resolvePresets: ((value: Awaited<ReturnType<typeof api.listPresets>>) => void) | undefined
+    api.listPresets.mockImplementation(() => new Promise((resolve) => { resolvePresets = resolve }))
+    api.getConfig.mockResolvedValue({ ...config, rules: [{ name: 'Teams calls', match: ['teams.example.com/*'], open_in: { app: 'teams' } }] })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    const zoomRow = screen.getByText('Teams calls').closest('li')!
+    expect(within(zoomRow).getByText('Teams')).toBeInTheDocument()
+    expect(within(zoomRow).getByText('checking…')).toBeInTheDocument()
+
+    const sidePanel = screen.getByText('Test a link').closest('aside')!
+    fireEvent.change(within(sidePanel).getByLabelText('Test a link'), { target: { value: 'https://teams.example.com/meet' } })
+    expect(await within(sidePanel).findByText('checking…')).toBeInTheDocument()
+    expect(within(sidePanel).getByText('Teams')).toBeInTheDocument()
+
+    resolvePresets?.([{ id: 'teams', name: 'Microsoft Teams', patterns: ['teams.example.com/*'], app: 'teams', app_installed: true }])
+    await waitFor(() => expect(within(zoomRow).queryByText('checking…')).not.toBeInTheDocument())
+    expect(within(zoomRow).getByText('Teams')).toBeInTheDocument()
+  })
+
+  it('shows "app availability unknown" (not a guessed fallback) when listPresets() fails', async () => {
+    api.listPresets.mockRejectedValue('network error')
+    api.getConfig.mockResolvedValue({ ...config, rules: [{ name: 'Zoom calls', match: ['zoom.us/j/*'], open_in: { app: 'zoom' } }] })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    const zoomRow = screen.getByText('Zoom calls').closest('li')!
+    await waitFor(() => expect(within(zoomRow).getByText('app availability unknown')).toBeInTheDocument())
+    expect(within(zoomRow).getByText('Zoom')).toBeInTheDocument()
+    expect(within(zoomRow).queryByText('Firefox')).not.toBeInTheDocument()
+
+    const sidePanel = screen.getByText('Test a link').closest('aside')!
+    fireEvent.change(within(sidePanel).getByLabelText('Test a link'), { target: { value: 'https://zoom.us/j/123456789' } })
+    expect(await within(sidePanel).findByText('app availability unknown')).toBeInTheDocument()
+    expect(within(sidePanel).getByText('Zoom')).toBeInTheDocument()
+  })
+
+  it('still falls back for a non-convertible Zoom link while availability is unknown — that part is a url fact', async () => {
+    api.listPresets.mockImplementation(() => new Promise(() => { /* never resolves */ }))
+    api.getConfig.mockResolvedValue({ ...config, rules: [{ name: 'Zoom calls', match: ['zoom.us/*'], open_in: { app: 'zoom' } }] })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    const sidePanel = screen.getByText('Test a link').closest('aside')!
+    fireEvent.change(within(sidePanel).getByLabelText('Test a link'), { target: { value: 'https://zoom.us/pricing' } })
+    expect(await within(sidePanel).findByText('link not a Zoom meeting')).toBeInTheDocument()
+    expect(within(sidePanel).getByText('Firefox')).toBeInTheDocument()
+  })
+
+  it('reports "link not a Zoom meeting" (not app-not-installed) for a non-convertible Zoom url, even when the app is installed', async () => {
+    api.listPresets.mockResolvedValue([
+      { id: 'zoom', name: 'Zoom', patterns: ['zoom.us/j/*'], app: 'zoom', app_installed: true },
+    ])
+    api.getConfig.mockResolvedValue({ ...config, rules: [{ name: 'Zoom calls', match: ['zoom.us/*'], open_in: { app: 'zoom' } }] })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+    const sidePanel = screen.getByText('Test a link').closest('aside')!
+    fireEvent.change(within(sidePanel).getByLabelText('Test a link'), { target: { value: 'https://zoom.us/pricing' } })
+    expect(await within(sidePanel).findByText('link not a Zoom meeting')).toBeInTheDocument()
   })
 })

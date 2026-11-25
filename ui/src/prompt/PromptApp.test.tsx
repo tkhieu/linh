@@ -59,13 +59,13 @@ describe('PromptApp', () => {
   it('resizes after targets load and after a prompt URL refresh', async () => {
     render(<PromptApp />)
     await screen.findByRole('button', { name: /Google Chrome — Work/ })
-    await waitFor(() => expect(tauriWindow.setSize).toHaveBeenCalledWith({ width: 360, height: 300 }))
+    await waitFor(() => expect(tauriWindow.setSize).toHaveBeenCalledWith({ width: 420, height: 300 }))
     const initialCalls = tauriWindow.setSize.mock.calls.length
 
     api.getConfig.mockResolvedValue(config)
     emit('prompt-url-changed', 'https://example.com/next')
     await screen.findByRole('button', { name: /Firefox \(Private\)/ })
-    await waitFor(() => expect(tauriWindow.setSize).toHaveBeenCalledWith({ width: 360, height: 600 }))
+    await waitFor(() => expect(tauriWindow.setSize).toHaveBeenCalledWith({ width: 420, height: 600 }))
     expect(tauriWindow.setSize.mock.calls.length).toBeGreaterThan(initialCalls)
     await waitFor(() => expect(tauriWindow.center).toHaveBeenCalled())
   })
@@ -208,9 +208,21 @@ describe('PromptApp', () => {
     await screen.findByRole('button', { name: /Firefox \(Private\)/ })
     expect(screen.getByText('meet.google.com')).toBeInTheDocument()
     expect(screen.getByText('https://meet.google.com/abc').parentElement).toHaveAttribute('title', 'https://meet.google.com/abc')
-    expect(screen.getByText('1–9 to open')).toBeInTheDocument()
+    expect(screen.getByText('1–9 open')).toBeInTheDocument()
     await waitFor(() => expect(document.querySelectorAll('.prompt img.browser-icon')).toHaveLength(4))
     expect(document.querySelectorAll('.prompt .browser-icon-placeholder')).toHaveLength(2)
     expect(api.getIcon).toHaveBeenCalledTimes(2)
+  })
+
+  it('renders the rounded card as the sole mounted element, so nothing outside it can add to the measured height', async () => {
+    const { container } = render(<PromptApp />)
+    await screen.findByRole('button', { name: /Google Chrome — Work/ })
+    // The window is sized from this element's own scrollHeight (see the
+    // useLayoutEffect above); a wrapper sibling or extra ancestor here
+    // would silently throw that measurement off by its own height, and
+    // since the window is now transparent with the card's own rounded
+    // corners/outline, it would also show as a visible gap past the card.
+    expect(container.children).toHaveLength(1)
+    expect(container.firstElementChild).toHaveClass('prompt')
   })
 })

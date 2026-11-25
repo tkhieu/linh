@@ -1,4 +1,4 @@
-export const PROMPT_WIDTH = 360
+export const PROMPT_WIDTH = 420
 const MONITOR_MARGIN = 48
 
 /** CSS pixels throughout; monitor work area must already be converted to logical pixels. */

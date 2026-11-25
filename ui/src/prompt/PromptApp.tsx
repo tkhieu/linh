@@ -193,31 +193,39 @@ export function PromptApp() {
 
   return (
     <main className="prompt" ref={mainRef} tabIndex={-1}>
-      <h1>Choose a browser</h1>
-      {url === undefined && !error && <p>Loading link…</p>}
-      {url === null && <p>No link is waiting to be opened.</p>}
+      <h1 className="sr-only">Choose a browser</h1>
+      {url === undefined && !error && <p className="prompt-loading">Loading link…</p>}
+      {url === null && <p className="prompt-loading">No link is waiting to be opened.</p>}
       {url && <>
-        <div className="pending-url" title={url}><strong>{urlHost(url)}</strong><span>{url}</span></div>
-        {choices.length === 0 && <p>No browser targets are available.</p>}
-        <ol className="prompt-choices" ref={listRef}>
-          {choices.map(({ key, label, icon }, index) => (
-            <li key={key}>
-              <button
-                type="button"
-                className={index === selected ? 'selected' : ''}
-                aria-current={index === selected ? 'true' : undefined}
-                disabled={busy}
-                onMouseEnter={() => setSelected(index)}
-                onClick={() => void choose(index)}
-              >
-                {index < 9 && <kbd>{index + 1}</kbd>}<BrowserIcon icon={icon} /><span>{label}</span>
-              </button>
-            </li>
-          ))}
-        </ol>
+        <div className="prompt-incoming">
+          <p className="eyebrow">Incoming link</p>
+          <p className="prompt-host">{urlHost(url)}</p>
+          <p className="prompt-url" title={url}><span>{url}</span></p>
+        </div>
+        {choices.length === 0
+          ? <p className="prompt-empty">No browser targets are available.</p>
+          : <div className="prompt-targets">
+            <div className="prompt-head-row"><span className="eyebrow">Depart via</span><span className="eyebrow">Key</span></div>
+            <ol className="prompt-choices" ref={listRef}>
+              {choices.map(({ key, label, icon }, index) => (
+                <li key={key}>
+                  <button
+                    type="button"
+                    className={index === selected ? 'selected' : ''}
+                    aria-current={index === selected ? 'true' : undefined}
+                    disabled={busy}
+                    onMouseEnter={() => setSelected(index)}
+                    onClick={() => void choose(index)}
+                  >
+                    {index < 9 && <kbd>{index + 1}</kbd>}<BrowserIcon icon={icon} /><span className="prompt-choice-label">{label}</span>
+                  </button>
+                </li>
+              ))}
+            </ol>
+          </div>}
       </>}
       {error && <p role="alert" className="error">{error}</p>}
-      <p className="hint prompt-shortcuts"><span>1–9 to open</span><span>↑ ↓ to select</span><span>Enter to open</span><span>Esc to cancel</span></p>
+      <p className="hint prompt-shortcuts"><span>1–9 open</span><span>↑↓ select</span><span>↵ open</span><span>esc cancel</span></p>
     </main>
   )
 }
