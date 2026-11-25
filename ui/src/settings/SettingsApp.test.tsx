@@ -311,17 +311,17 @@ describe('SettingsApp', () => {
     await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith(expect.objectContaining({ primary: work })))
   })
 
-  it('shows the picker step, not route checking, in Current behaviour when prompt mode is Always', async () => {
+  it('shows routes before the unmatched picker in Current behaviour under Always', async () => {
     api.getConfig.mockResolvedValue({ ...config, prompt_mode: 'always' })
     render(<SettingsApp />)
     await screen.findByLabelText('Primary browser')
-    expect(screen.getByText('Prompt mode: Always')).toBeInTheDocument()
-    expect(screen.queryByText('Check routes')).not.toBeInTheDocument()
-    expect(screen.queryByText('No match')).not.toBeInTheDocument()
+    expect(screen.getByText('Check routes')).toBeInTheDocument()
+    expect(screen.getByText('No match')).toBeInTheDocument()
     expect(screen.getByText('Picker')).toBeInTheDocument()
+    expect(screen.getByText('Always: unmatched links open the picker. Never: unmatched links open Firefox.')).toBeInTheDocument()
   })
 
-  it('test a link shows Picker and skips route evaluation when prompt mode is Always', async () => {
+  it('test a link follows a matching route under Always, then prompts for an unmatched link', async () => {
     api.getConfig.mockResolvedValue({
       ...config, prompt_mode: 'always',
       rules: [{ name: 'Meet', match: ['meet.google.com'], open_in: work }],
@@ -330,11 +330,13 @@ describe('SettingsApp', () => {
     await screen.findByLabelText('Primary browser')
     openSection('Rules')
     fireEvent.change(screen.getByLabelText('Test a link'), { target: { value: 'https://meet.google.com' } })
-    expect(await screen.findByText('Prompt mode is Always — every link opens the picker, routes are not checked.')).toBeInTheDocument()
-    expect(screen.getByText('prompt mode: always')).toBeInTheDocument()
     const sidePanel = screen.getByText('Test a link').closest('aside')!
+    expect(within(sidePanel).getByText('Meet')).toBeInTheDocument()
+    expect(within(sidePanel).getByText('Google Chrome — Work')).toBeInTheDocument()
+    expect(within(sidePanel).getByText('via route 01 · meet.google.com')).toBeInTheDocument()
+    fireEvent.change(within(sidePanel).getByLabelText('Test a link'), { target: { value: 'https://unmatched.example' } })
     expect(within(sidePanel).getByText('Picker')).toBeInTheDocument()
-    expect(within(sidePanel).queryByText('Meet')).not.toBeInTheDocument()
+    expect(within(sidePanel).getByText('no match · prompt mode: always')).toBeInTheDocument()
   })
 
   it('shows "not a routable link" for a non-http(s) link, and never prefixes https:// onto a bare host', async () => {
@@ -371,7 +373,7 @@ describe('SettingsApp', () => {
   it('shows the app itself with a neutral note (never a guessed fallback) while availability is unknown, in both panels', async () => {
     let resolvePresets: ((value: Awaited<ReturnType<typeof api.listPresets>>) => void) | undefined
     api.listPresets.mockImplementation(() => new Promise((resolve) => { resolvePresets = resolve }))
-    api.getConfig.mockResolvedValue({ ...config, rules: [{ name: 'Teams calls', match: ['teams.example.com/*'], open_in: { app: 'teams' } }] })
+    api.getConfig.mockResolvedValue({ ...config, prompt_mode: 'always', rules: [{ name: 'Teams calls', match: ['teams.example.com/*'], open_in: { app: 'teams' } }] })
     render(<SettingsApp />)
     await screen.findByLabelText('Primary browser')
     openSection('Rules')

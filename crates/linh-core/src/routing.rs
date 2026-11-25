@@ -26,16 +26,11 @@ pub enum Decision {
 /// Decides where a URL should be opened, given the config and the
 /// platform's capabilities.
 ///
-/// - If `prompt_mode` is `Always`, always prompts.
-/// - Otherwise, the first rule whose patterns match the URL wins. Rules
+/// - The first rule whose patterns match the URL wins. Rules
 ///   that declare `source_apps` are skipped entirely when the platform
 ///   does not support source-app detection (silently, no error).
-/// - If no rule matches, the URL opens in the primary target.
+/// - If no rule matches, `Always` prompts and `Never` opens the primary target.
 pub fn decide(config: &Config, url: &Url, caps: PlatformCaps) -> Decision {
-    if config.prompt_mode == PromptMode::Always {
-        return Decision::Prompt;
-    }
-
     let host = url.host_str().unwrap_or("").to_string();
     let path = url.path();
 
@@ -58,7 +53,10 @@ pub fn decide(config: &Config, url: &Url, caps: PlatformCaps) -> Decision {
         }
     }
 
-    Decision::Open(config.primary.clone())
+    match config.prompt_mode {
+        PromptMode::Always => Decision::Prompt,
+        PromptMode::Never => Decision::Open(config.primary.clone()),
+    }
 }
 
 #[cfg(test)]
@@ -89,7 +87,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_mode_always_wins_over_rules() {
+    fn prompt_mode_always_uses_matching_rule() {
         let mut config = Config {
             prompt_mode: PromptMode::Always,
             ..Config::default()
@@ -103,6 +101,20 @@ mod tests {
         let decision = decide(
             &config,
             &url("https://example.com"),
+            PlatformCaps::default(),
+        );
+        assert_eq!(decision, Decision::Open(target("chrome")));
+    }
+
+    #[test]
+    fn prompt_mode_always_prompts_when_no_rule_matches() {
+        let config = Config {
+            prompt_mode: PromptMode::Always,
+            ..Config::default()
+        };
+        let decision = decide(
+            &config,
+            &url("https://unmatched.example"),
             PlatformCaps::default(),
         );
         assert_eq!(decision, Decision::Prompt);
@@ -131,7 +143,7 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_primary_when_no_rule_matches() {
+    fn prompt_mode_never_opens_primary_when_no_rule_matches() {
         let config = Config::default();
         let decision = decide(
             &config,
@@ -143,7 +155,10 @@ mod tests {
 
     #[test]
     fn rule_can_resolve_to_an_app_target() {
-        let mut config = Config::default();
+        let mut config = Config {
+            prompt_mode: PromptMode::Always,
+            ..Config::default()
+        };
         let app_target = AppTarget {
             app: "teams".to_string(),
             fallback: Some(target("google-chrome")),
