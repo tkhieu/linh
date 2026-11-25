@@ -112,14 +112,31 @@ single-purpose app that never browses between documents:
 
 - `webkit_web_context_set_cache_model(DOCUMENT_VIEWER)` instead of the
   default `WEB_BROWSER` model's large object/page caches.
-- `WebKitSettings`' page cache and the legacy offline-application-cache
-  disabled — both only pay off across in-page navigations Linh never
-  performs.
+- `WebKitSettings`' page cache disabled — it only pays off across
+  in-page navigations Linh never performs. A second knob, the legacy
+  offline-application-cache, was tried alongside it but turned out to be
+  a no-op in the installed WebKitGTK 2.54.2 (setter does nothing, getter
+  always reports `false`), so it was dropped; the measured saving
+  belongs to the page cache alone. Because `with_related_view` makes
+  `prompt` and `settings` share one `WebKitSettings`, and wry
+  unconditionally re-enables the page cache while constructing each new
+  `WebKitWebView`, this setting is re-applied right after the Settings
+  window is built — otherwise opening Settings once would silently turn
+  the page cache back on for both windows.
 - `WEBKIT_DISABLE_COMPOSITING_MODE`/`WEBKIT_DISABLE_DMABUF_RENDERER` set
-  before Tauri launches its first `WebKitWebProcess`, forcing software
-  (Cairo) rendering instead of the GPU-accelerated DMA-BUF/EGL path —
-  Linh's UI uses only borders and `border-radius`, nothing that path
-  depends on.
+  before Tauri launches its first `WebKitWebProcess`, forcing WebKitGTK's
+  Skia backend to rasterize on the CPU instead of using GPU-accelerated
+  (DMA-BUF/EGL) compositing — WebKitGTK 2.54 removed the old Cairo 2D
+  backend entirely, so this is a GPU/CPU split within Skia, not a switch
+  to Cairo. Linh's UI uses only borders and `border-radius`, nothing
+  that path depends on. GPU compositing is also what makes scrolling
+  smooth, so that's the one thing the owner still needs to check
+  visually on Wayland. These two vars are process-wide, so
+  `spawn_detached` (`src-tauri/src/platform/launcher.rs`) strips them
+  back out of any process Linh spawns — browsers and app targets — so a
+  launched WebKitGTK app (e.g. GNOME Web) doesn't inherit Linh's own
+  rendering policy; a value the user already had set in their own
+  environment is left untouched.
 
 A fourth candidate — tuning the `WebKitNetworkProcess`'s own memory-
 pressure thresholds via

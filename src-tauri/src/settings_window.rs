@@ -124,10 +124,48 @@ fn build(app: &AppHandle, dirs: &Dirs, related_view: Option<webkit2gtk::WebView>
     }
 
     match builder.build() {
-        Ok(window) => install_close_handler(app, window),
+        Ok(window) => {
+            reapply_page_cache_off(&window, dirs);
+            install_close_handler(app, window);
+        }
         Err(err) => {
             logging::log_line(dirs, &format!("settings: failed to build window: {err}"));
         }
+    }
+}
+
+/// wry 0.57.1 unconditionally calls `set_enable_page_cache(true)` while
+/// constructing *every* `WebKitWebView` it builds (see
+/// `wry-0.57.1/src/webkitgtk/mod.rs`'s `new_webview`). Since this
+/// window's webview shares `prompt`'s `WebKitSettings` via
+/// `with_related_view` (this module's doc comment), building it flips
+/// the page cache back on for *both* windows, undoing
+/// `webkit_tune::tune_webview`'s setting the moment Settings is first
+/// created. Re-apply it immediately after the window exists, and log if
+/// it somehow doesn't stick, so a future wry upgrade that changes this
+/// ordering fails loudly instead of silently reverting the saving.
+#[cfg(target_os = "linux")]
+fn reapply_page_cache_off(window: &tauri::WebviewWindow, dirs: &Dirs) {
+    use webkit2gtk::{SettingsExt, WebViewExt};
+
+    let dirs_for_log = dirs.clone();
+    let scheduled = window.with_webview(move |webview| {
+        let Some(settings) = webview.inner().settings() else {
+            return;
+        };
+        settings.set_enable_page_cache(false);
+        if settings.enables_page_cache() {
+            logging::log_line(
+                &dirs_for_log,
+                "settings: page cache still enabled after re-apply",
+            );
+        }
+    });
+    if let Err(err) = scheduled {
+        logging::log_line(
+            dirs,
+            &format!("settings: failed to re-apply page cache setting: {err}"),
+        );
     }
 }
 
