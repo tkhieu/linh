@@ -124,11 +124,6 @@ pub fn vars_set_by_linh() -> &'static [&'static str] {
     SET_BY_LINH.get().map(Vec::as_slice).unwrap_or(&[])
 }
 
-#[cfg(not(target_os = "linux"))]
-pub fn vars_set_by_linh() -> &'static [&'static str] {
-    &[]
-}
-
 /// Tunes the WebKitGTK behavior that's only reachable once a webview
 /// exists. `settings` is shared by every `WebKitWebView` created with
 /// `with_related_view` from this one (confirmed in the WebKitGTK docs
