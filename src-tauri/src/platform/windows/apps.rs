@@ -7,15 +7,20 @@ use url::Url;
 /// Microsoft documents msteams:// for Teams deep links under /l/.
 /// Other Teams web URLs stay on the browser fallback path.
 pub fn teams_app_url(url: &str) -> Option<String> {
-    let mut parsed = Url::parse(url).ok()?;
+    let parsed = Url::parse(url).ok()?;
     if parsed.scheme() != "https"
         || parsed.host_str()? != "teams.microsoft.com"
         || !parsed.path().starts_with("/l/")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port().is_some()
     {
         return None;
     }
-    parsed.set_scheme("msteams").ok()?;
-    Some(parsed.to_string())
+    Some(format!(
+        "msteams://{}",
+        parsed.as_str().strip_prefix("https://")?
+    ))
 }
 
 fn scheme(app_id: &str) -> Option<&'static str> {

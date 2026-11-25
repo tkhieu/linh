@@ -155,8 +155,12 @@ mod tests {
     #[test]
     fn handles_windows_backslash_quote() {
         assert_eq!(
-            split_command_line(r#""C:\Program Files\app.exe" "a\\\"b""#),
+            split_command_line(r#""C:\Program Files\app.exe" "a\"b""#),
             Some(vec![r"C:\Program Files\app.exe".into(), "a\"b".into()])
+        );
+        assert_eq!(
+            split_command_line(r#""C:\Program Files\app.exe" "a\\\"b""#),
+            Some(vec![r"C:\Program Files\app.exe".into(), "a\\\"b".into()])
         );
     }
     #[test]
