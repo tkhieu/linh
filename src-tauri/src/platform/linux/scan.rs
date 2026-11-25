@@ -3,9 +3,10 @@ use std::fs;
 
 use linh_core::{Browser, BrowserFamily, InstallKind, Target};
 
+use crate::platform::logging::log_line;
+
 use super::desktop::{self, DesktopEntry};
 use super::dirs::Dirs;
-use super::logging::log_line;
 use super::LINH_DESKTOP_ID;
 
 const CHROMIUM_KEYWORDS: [&str; 5] = ["chrome", "chromium", "brave", "edge", "vivaldi"];

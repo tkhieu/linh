@@ -15,7 +15,8 @@ use std::time::Instant;
 use linh_core::{Browser, Config, PlatformCaps, Preset, Target};
 use tauri::{AppHandle, State};
 
-use crate::platform::linux::{apps, default_browser, icons, logging};
+use crate::platform::current::{apps, default_browser, icons};
+use crate::platform::logging;
 use crate::routing;
 use crate::state::AppState;
 use crate::tray;

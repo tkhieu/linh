@@ -4,7 +4,8 @@ use linh_core::{AppTarget, Browser, Decision, LaunchCommand, Target};
 use tauri::{AppHandle, Manager};
 use url::Url;
 
-use crate::platform::linux::{apps, launcher, logging, url_intake};
+use crate::platform::current::apps;
+use crate::platform::{launcher, logging, url_intake};
 use crate::state::AppState;
 
 /// Decides where `raw_url` should go (per `linh_core::decide`, with Linux
@@ -215,7 +216,7 @@ mod tests {
     use std::cell::RefCell;
     use std::path::PathBuf;
 
-    use crate::platform::linux::dirs::Dirs;
+    use crate::platform::current::dirs::Dirs;
 
     fn target(browser: &str) -> Target {
         Target {

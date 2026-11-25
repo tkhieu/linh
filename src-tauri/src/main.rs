@@ -16,7 +16,7 @@ use std::time::Instant;
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager};
 
-use platform::linux::url_intake;
+use platform::url_intake;
 use state::AppState;
 
 /// Registry for launches (argv + the moment each was received) that race
@@ -205,7 +205,7 @@ fn handle_primary_pick(app: &AppHandle, index_str: &str) {
     };
 
     if let Err(err) = state.update_config(|cfg| cfg.primary = target) {
-        platform::linux::logging::log_line(&state.dirs, &format!("failed to save config: {err}"));
+        platform::logging::log_line(&state.dirs, &format!("failed to save config: {err}"));
         return;
     }
     tray::sync_checked_state(&state);

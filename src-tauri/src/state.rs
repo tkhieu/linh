@@ -5,7 +5,7 @@ use linh_core::{Browser, Config, PlatformCaps, Target};
 use tauri::menu::CheckMenuItem;
 use tauri::Wry;
 
-use crate::platform::linux::{app_config, browsers, default_browser, dirs::Dirs, notify};
+use crate::platform::current::{app_config, browsers, default_browser, dirs::Dirs, notify};
 use crate::prompt_state::PromptState;
 
 /// Shared, mutable application state, managed by Tauri and reachable from
