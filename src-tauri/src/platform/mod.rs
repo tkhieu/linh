@@ -4,9 +4,8 @@
 //! Each OS module (`linux`, `macos`, `windows`) exposes the same set of
 //! submodules — `app_config`, `apps`, `browsers`, `default_browser`,
 //! `dirs`, `icons`, `notify` — so callers reach the active one through
-//! [`current`] rather than naming an OS directly. Only `macos` and
-//! `windows` exist as compiling skeletons today; every function in them
-//! returns an explicit "unsupported" result instead of a guess.
+//! [`current`] rather than naming an OS directly. The macOS implementation
+//! remains a compiling skeleton.
 //!
 //! Logic that behaves identically on every OS (process spawning, URL
 //! scheme filtering, log-line writing) lives directly here instead of

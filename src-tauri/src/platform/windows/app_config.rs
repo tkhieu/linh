@@ -1,7 +1,4 @@
-//! `linh.toml` load/save. The file format and atomic-write logic are
-//! OS-agnostic and already fully working; only resolving a *previous*
-//! system default browser (via [`super::default_browser::matches_desktop_id`],
-//! not yet implemented on Windows) is a stub for now.
+//! `linh.toml` load/save with atomic replacement and previous default mapping.
 
 use std::fs;
 use std::io::{self, Write};
