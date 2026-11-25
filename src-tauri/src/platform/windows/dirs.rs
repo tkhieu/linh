@@ -1,16 +1,14 @@
 use std::env;
 use std::path::PathBuf;
 
-/// Where Linh's config/log files live on Windows. Same shape as
-/// [`crate::platform::linux::dirs::Dirs`] so the rest of `src-tauri` can
-/// stay platform-agnostic; `application_dirs` is unused until Windows
-/// browser/app discovery is ported.
+/// Where Linh's config/log files live on Windows. Holds only what is
+/// actually used today; unlike Linux's `Dirs`, there is no browser/app
+/// discovery yet to need a home dir or scan roots — those are added back
+/// once that is ported.
 #[derive(Debug, Clone)]
 pub struct Dirs {
-    pub home: PathBuf,
     pub config_home: PathBuf,
     pub state_home: PathBuf,
-    pub application_dirs: Vec<PathBuf>,
 }
 
 impl Dirs {
@@ -27,8 +25,6 @@ impl Dirs {
         Dirs {
             config_home: appdata.join("Linh"),
             state_home: local_appdata.join("Linh"),
-            application_dirs: Vec::new(),
-            home,
         }
     }
 

@@ -44,7 +44,8 @@ pub fn parse_sample_count(value: Option<&str>) -> Option<u32> {
 }
 
 /// min/median/max (in whatever unit `samples` is already in). `None` if
-/// `samples` is empty.
+/// `samples` is empty. Only called from the Linux-only profiling below.
+#[cfg(target_os = "linux")]
 pub fn stats(mut samples: Vec<u128>) -> Option<(u128, u128, u128)> {
     if samples.is_empty() {
         return None;
@@ -606,26 +607,31 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn stats_of_empty_is_none() {
         assert_eq!(stats(Vec::new()), None);
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn stats_of_single_sample() {
         assert_eq!(stats(vec![42]), Some((42, 42, 42)));
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn stats_odd_count_median_is_middle_element() {
         assert_eq!(stats(vec![5, 1, 3]), Some((1, 3, 5)));
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn stats_even_count_median_is_average_of_middle_two() {
         assert_eq!(stats(vec![10, 20, 30, 40]), Some((10, 25, 40)));
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn stats_does_not_depend_on_input_order() {
         assert_eq!(stats(vec![3, 1, 2]), stats(vec![1, 2, 3]));
     }

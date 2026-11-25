@@ -144,19 +144,28 @@ mod tests {
         root
     }
 
+    #[cfg(target_os = "linux")]
+    fn test_dirs(root: &std::path::Path) -> Dirs {
+        Dirs {
+            home: root.join("home"),
+            config_home: root.join("home/.config"),
+            state_home: root.join("home/.local/state"),
+            application_dirs: Vec::new(),
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn test_dirs(root: &std::path::Path) -> Dirs {
+        Dirs {
+            config_home: root.join("home/.config"),
+            state_home: root.join("home/.local/state"),
+        }
+    }
+
     /// A minimal `AppState` pointed at a disposable temp dir, so these
     /// tests stay hermetic.
     fn test_state(root: &std::path::Path) -> AppState {
-        AppState::for_test(
-            Dirs {
-                home: root.join("home"),
-                config_home: root.join("home/.config"),
-                state_home: root.join("home/.local/state"),
-                application_dirs: Vec::new(),
-            },
-            Config::default(),
-            Vec::new(),
-        )
+        AppState::for_test(test_dirs(root), Config::default(), Vec::new())
     }
 
     fn target(browser: &str) -> Target {
