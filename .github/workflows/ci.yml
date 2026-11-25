@@ -110,10 +110,21 @@ jobs:
 
       - name: Verify .desktop file in RPM
         shell: bash
-        run: |
+        env:
+          BUNDLE_FORMAT: rpm
+        run: &verify_desktop |
           set -euo pipefail
-          rpm="$(find target/release/bundle/rpm -name '*.rpm' | head -n1)"
-          desktop="$(rpm2cpio "$rpm" | cpio -i --to-stdout ./usr/share/applications/linh.desktop 2>/dev/null)"
+          if [ "$BUNDLE_FORMAT" = deb ]; then
+            deb="$(find target/release/bundle/deb -name '*.deb' | head -n1)"
+            dpkg-deb -I "$deb"
+            dpkg-deb -c "$deb"
+            desktop="$(dpkg-deb --fsys-tarfile "$deb" | tar -xO usr/share/applications/linh.desktop)"
+            # Check that Ubuntu can resolve the package's runtime dependencies.
+            sudo apt-get --simulate install "$PWD/$deb"
+          else
+            rpm="$(find target/release/bundle/rpm -name '*.rpm' | head -n1)"
+            desktop="$(rpm2cpio "$rpm" | cpio -i --to-stdout ./usr/share/applications/linh.desktop 2>/dev/null)"
+          fi
           echo "$desktop"
 
           fail() { echo "::error::$1"; exit 1; }
@@ -141,4 +152,78 @@ jobs:
         with:
           name: linh-rpm
           path: target/release/bundle/rpm/*.rpm
+          if-no-files-found: error
+
+  deb:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            file
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install pnpm
+        run: npm install -g pnpm@12.11.2
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-ubuntu24.04-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-ubuntu24.04-
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ runner.os }}-${{ hashFiles('ui/pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-
+
+      - name: Install UI dependencies
+        working-directory: ui
+        run: pnpm install
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version '^2' --locked
+
+      - name: Build DEB bundle
+        working-directory: src-tauri
+        run: |
+          rm -rf ../target/release/bundle/deb
+          cargo tauri build --bundles deb
+
+      - name: Verify .desktop file and dependencies in DEB
+        shell: bash
+        env:
+          BUNDLE_FORMAT: deb
+        run: *verify_desktop
+
+      - name: Upload DEB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linh-deb
+          path: target/release/bundle/deb/*.deb
           if-no-files-found: error

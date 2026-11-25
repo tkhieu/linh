@@ -32,7 +32,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["rpm"],
+    "targets": ["rpm", "deb"],
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png"],
     "fileAssociations": [
       {
@@ -43,6 +43,10 @@
       }
     ],
     "linux": {
+      "deb": {
+        "desktopTemplate": "templates/main.desktop",
+        "depends": ["libgtk-3-0t64"]
+      },
       "rpm": {
         "desktopTemplate": "templates/main.desktop"
       }
