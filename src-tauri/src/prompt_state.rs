@@ -177,7 +177,9 @@ impl PromptState {
                 }
             },
             PromptAction::Hide => {
-                let _ = window.hide();
+                if window.hide().is_ok() {
+                    crate::allocator::trim();
+                }
             }
         }
     }
