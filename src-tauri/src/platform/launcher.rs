@@ -1,5 +1,6 @@
 use std::io;
 use std::process::{Command, Stdio};
+#[cfg(not(target_os = "macos"))]
 use std::thread;
 
 use linh_core::LaunchCommand;
@@ -44,11 +45,15 @@ use crate::webkit_tune;
 /// inherit Linh's own rendering policy. Only vars Linh itself introduced
 /// are removed; one already present in the user's own environment
 /// before Linh started is left alone, since that's the user's own
-/// choice. A no-op on other platforms.
+/// choice. A no-op on Windows; unused (and so not compiled at all) on
+/// macOS, which never reaches the generic `Command::new` path below —
+/// every macOS launch goes through [`spawn_macos`] instead.
+#[cfg(not(target_os = "macos"))]
 pub trait StripLinhWebkitEnv {
     fn strip_linh_webkit_env(&mut self) -> &mut Self;
 }
 
+#[cfg(not(target_os = "macos"))]
 impl StripLinhWebkitEnv for Command {
     #[cfg(target_os = "linux")]
     fn strip_linh_webkit_env(&mut self) -> &mut Self {
