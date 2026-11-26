@@ -31,7 +31,9 @@ function domainMatches(domainPattern: string, host: string): boolean {
 
 /** Ports matching.rs::pattern_matches. */
 export function patternMatches(pattern: string, host: string, path: string): boolean {
-  const loweredPattern = pattern.toLowerCase()
+  const trimmedPattern = pattern.trim().toLowerCase()
+  const loweredPattern = trimmedPattern.startsWith('https://') ? trimmedPattern.slice(8)
+    : trimmedPattern.startsWith('http://') ? trimmedPattern.slice(7) : trimmedPattern
   const loweredHost = host.toLowerCase()
   const slashAt = loweredPattern.indexOf('/')
   const domainPattern = slashAt === -1 ? loweredPattern : loweredPattern.slice(0, slashAt)

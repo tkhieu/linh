@@ -372,6 +372,31 @@ describe('SettingsApp', () => {
     expect(within(sidePanel).getByText('no match · prompt mode: always')).toBeInTheDocument()
   })
 
+  it('shows the stored scheme verbatim and previews its Github route to Chrome', async () => {
+    const macChrome = { ...chrome, id: 'com.google.chrome' }
+    const macTarget = { browser: macChrome.id, private: false }
+    api.listBrowsers.mockResolvedValue([macChrome])
+    api.getConfig.mockResolvedValue({
+      primary: macTarget, prompt_mode: 'always', shown_browsers: [],
+      rules: [{ name: 'Github', match: ['https://github.com/*'], open_in: macTarget }],
+    })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Rules')
+
+    const route = screen.getByText('Github').closest('li')!
+    expect(within(route).getByText('https://github.com/*')).toBeInTheDocument()
+    const sidePanel = screen.getByText('Test a link').closest('aside')!
+    fireEvent.change(within(sidePanel).getByLabelText('Test a link'), {
+      target: { value: 'https://github.com/tkhieu/linh/pull/29' },
+    })
+    expect(within(sidePanel).getByText('Google Chrome')).toBeInTheDocument()
+    expect(within(sidePanel).getByText('via route 01 · github.com')).toBeInTheDocument()
+
+    fireEvent.click(within(route).getByRole('button', { name: 'Edit Github' }))
+    expect(screen.getByLabelText('URL patterns')).toHaveValue('https://github.com/*')
+  })
+
   it('shows "not a routable link" for a non-http(s) link, and never prefixes https:// onto a bare host', async () => {
     render(<SettingsApp />)
     await screen.findByLabelText('Primary browser')

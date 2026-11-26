@@ -12,14 +12,19 @@
 /// - either of the above followed by `/` and a path glob, e.g.
 ///   `example.com/path*`.
 ///
-/// Host comparison is case-insensitive.
+/// An optional `http://` or `https://` prefix and surrounding whitespace
+/// are ignored. Host comparison is case-insensitive.
 pub fn pattern_matches(pattern: &str, host: &str, path: &str) -> bool {
-    let pattern = pattern.to_lowercase();
+    let pattern = pattern.trim().to_lowercase();
+    let pattern = pattern
+        .strip_prefix("https://")
+        .or_else(|| pattern.strip_prefix("http://"))
+        .unwrap_or(&pattern);
     let host = host.to_lowercase();
 
     let (domain_pattern, path_pattern) = match pattern.split_once('/') {
         Some((domain, rest)) => (domain, Some(rest)),
-        None => (pattern.as_str(), None),
+        None => (pattern, None),
     };
 
     if !domain_matches(domain_pattern, &host) {
@@ -124,5 +129,25 @@ mod tests {
     fn meet_google_com_matches() {
         assert!(pattern_matches("meet.google.com", "meet.google.com", "/"));
         assert!(!pattern_matches("meet.google.com", "google.com", "/"));
+    }
+
+    #[test]
+    fn scheme_prefixed_pattern_matches_host_and_path() {
+        assert!(pattern_matches(
+            "https://github.com/*",
+            "github.com",
+            "/tkhieu/linh/pull/29"
+        ));
+        assert!(pattern_matches("http://github.com/*", "github.com", "/x"));
+    }
+
+    #[test]
+    fn surrounding_whitespace_does_not_change_pattern() {
+        assert!(pattern_matches("  github.com/* \n", "github.com", "/x"));
+        assert!(pattern_matches(
+            " \thttps://github.com/*\n",
+            "github.com",
+            "/x"
+        ));
     }
 }
