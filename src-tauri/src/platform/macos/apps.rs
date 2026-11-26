@@ -16,6 +16,16 @@ fn scheme(app_id: &str) -> Option<&'static str> {
     }
 }
 
+/// The name shown to the user for `app_id` (e.g. in a "could not confirm
+/// opening in ..." notification) — never the bare internal id.
+fn friendly_name(app_id: &str) -> &str {
+    match app_id {
+        "teams" => "Microsoft Teams",
+        "zoom" => "Zoom",
+        other => other,
+    }
+}
+
 /// Microsoft documents `msteams://` for Teams deep links under `/l/`.
 /// Other Teams web URLs stay on the browser fallback path — the official
 /// Teams client on macOS, like on Windows, is a handler for `msteams:`,
@@ -49,7 +59,7 @@ pub fn find_app(_dirs: &Dirs, app_id: &str) -> Option<Browser> {
     }
     Some(Browser {
         id: app_id.to_string(),
-        display_name: app_id.to_string(),
+        display_name: friendly_name(app_id).to_string(),
         family: BrowserFamily::Other,
         install: InstallKind::Native {
             exec: format!("{scheme}:"),
@@ -74,6 +84,13 @@ mod tests {
         assert_eq!(scheme("teams"), Some("msteams"));
         assert_eq!(scheme("zoom"), Some("zoommtg"));
         assert_eq!(scheme("slack"), None);
+    }
+
+    #[test]
+    fn friendly_names_are_shown_not_internal_ids() {
+        assert_eq!(friendly_name("teams"), "Microsoft Teams");
+        assert_eq!(friendly_name("zoom"), "Zoom");
+        assert_eq!(friendly_name("slack"), "slack");
     }
 
     #[test]

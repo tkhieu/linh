@@ -93,10 +93,14 @@ pub fn open_target(state: &AppState, target: &Target, url: &str) -> Result<(), S
 #[derive(Debug, Clone, PartialEq)]
 enum AppOpenPlan {
     /// Launch the app with `cmd`; if spawning it fails, the caller must
-    /// still fall through to `fallback`.
+    /// still fall through to `fallback`. `app_display_name` is the
+    /// launched app's own name (e.g. "Microsoft Teams"), carried along
+    /// so an `Unconfirmed` outcome can name the app that was actually
+    /// launched, not `fallback`.
     Launch {
         cmd: LaunchCommand,
         fallback: Target,
+        app_display_name: String,
     },
     /// The app isn't installed, or `url` can't be converted for it:
     /// open `fallback` directly, with the original (unconverted) URL.
@@ -149,13 +153,18 @@ fn plan_app_open(
     let Some(app) = find_app(&app_target.app) else {
         return AppOpenPlan::Fallback(fallback);
     };
+    let app_display_name = app.display_name.clone();
     let dummy_target = Target {
         browser: app_target.app.clone(),
         profile: None,
         private: false,
     };
     match launcher::build_launch_command(&app, &dummy_target, &launch_url) {
-        Ok(cmd) => AppOpenPlan::Launch { cmd, fallback },
+        Ok(cmd) => AppOpenPlan::Launch {
+            cmd,
+            fallback,
+            app_display_name,
+        },
         Err(_) => AppOpenPlan::Fallback(fallback),
     }
 }
@@ -186,8 +195,17 @@ fn open_app_target_with(
 ) -> Result<(), String> {
     let primary = state.config.lock().unwrap().primary.clone();
     match plan_app_open(app_target, url, find_app, &primary) {
-        AppOpenPlan::Launch { cmd, fallback } => {
-            let on_outcome = app_launch_outcome_handler(state, fallback.clone(), url.to_string());
+        AppOpenPlan::Launch {
+            cmd,
+            fallback,
+            app_display_name,
+        } => {
+            let on_outcome = app_launch_outcome_handler(
+                state,
+                fallback.clone(),
+                app_display_name,
+                url.to_string(),
+            );
             if spawn(&cmd, on_outcome).is_ok() {
                 Ok(())
             } else {
@@ -246,9 +264,12 @@ fn direct_open_outcome_handler(
 /// Outcome handler for an app-target's launch attempt: a
 /// [`LaunchOutcome::DefiniteFailure`] runs `fallback` exactly once (see
 /// [`run_watched_fallback`], which never chains a further fallback of
-/// its own); [`LaunchOutcome::Unconfirmed`] only notifies — `open` may
-/// still succeed on its own, and falling back too risks the link
-/// opening twice. Nothing extra on success.
+/// its own); [`LaunchOutcome::Unconfirmed`] only notifies, naming the
+/// app that was launched (`app_display_name`, e.g. "Microsoft Teams"),
+/// never `fallback` — nothing has actually tried `fallback` yet, so
+/// naming it there would blame the wrong target. `open` may still
+/// succeed on its own, and falling back too risks the link opening
+/// twice. Nothing extra on success.
 ///
 /// Snapshots `state.dirs`/`state.browsers` now rather than reading the
 /// live `AppState` when this eventually runs (possibly seconds later,
@@ -264,13 +285,14 @@ fn direct_open_outcome_handler(
 fn app_launch_outcome_handler(
     state: &AppState,
     fallback: Target,
+    app_display_name: String,
     url: String,
 ) -> AsyncOutcomeHandler {
     let dirs = state.dirs.clone();
     let browsers = state.browsers.lock().unwrap().clone();
     Box::new(move |outcome| match outcome {
         LaunchOutcome::Succeeded => {}
-        LaunchOutcome::Unconfirmed => notify_could_not_confirm(&dirs, &url, &fallback.browser),
+        LaunchOutcome::Unconfirmed => notify_could_not_confirm(&dirs, &url, &app_display_name),
         LaunchOutcome::DefiniteFailure => run_watched_fallback(dirs, browsers, fallback, url),
     })
 }
@@ -444,13 +466,18 @@ mod tests {
         );
 
         match plan {
-            AppOpenPlan::Launch { cmd, fallback } => {
+            AppOpenPlan::Launch {
+                cmd,
+                fallback,
+                app_display_name,
+            } => {
                 assert_eq!(cmd.program, "/usr/bin/teams-for-linux");
                 assert_eq!(
                     cmd.args,
                     vec!["https://teams.microsoft.com/l/meetup-join/abc".to_string()]
                 );
                 assert_eq!(fallback, target("google-chrome"));
+                assert_eq!(app_display_name, "teams");
             }
             other => panic!("expected Launch, got {other:?}"),
         }
@@ -601,6 +628,59 @@ mod tests {
         assert_eq!(calls[0].program, "/usr/bin/teams-for-linux");
         assert_eq!(calls[1].program, "/usr/bin/x");
         assert_eq!(calls[1].args.last().unwrap(), original_url);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn unconfirmed_app_launch_names_the_app_not_the_fallback() {
+        let root = temp_root("unconfirmed-app-name");
+        let state = test_state(
+            &root,
+            vec![native_browser("google-chrome", "/usr/bin/x %u")],
+        );
+        let app_target = app_target("teams", Some(target("google-chrome")));
+        let app = Browser {
+            id: "teams".to_string(),
+            display_name: "Teams for Linux".to_string(),
+            family: BrowserFamily::Other,
+            install: InstallKind::Native {
+                exec: "/usr/bin/teams-for-linux %u".to_string(),
+            },
+            profiles: vec![],
+            supports_private: false,
+            icon: None,
+            desktop_file: None,
+        };
+        let original_url = "https://teams.microsoft.com/l/meetup-join/abc";
+        let captured: RefCell<Option<AsyncOutcomeHandler>> = RefCell::new(None);
+
+        let result = open_app_target_with(
+            &state,
+            &app_target,
+            original_url,
+            |_| Some(app.clone()),
+            |cmd, on_outcome| {
+                assert_eq!(cmd.program, "/usr/bin/teams-for-linux");
+                *captured.borrow_mut() = Some(on_outcome);
+                Ok(())
+            },
+        );
+        assert!(result.is_ok());
+
+        let on_outcome = captured
+            .into_inner()
+            .expect("the app spawn must hand the outcome handler to the caller");
+        on_outcome(LaunchOutcome::Unconfirmed);
+
+        let log = std::fs::read_to_string(test_dirs(&root).log_path()).unwrap_or_default();
+        assert!(
+            log.contains("could not confirm opening in Teams for Linux"),
+            "must name the launched app, not the fallback browser; log: {log}"
+        );
+        assert!(
+            !log.contains("could not confirm opening in google-chrome"),
+            "must never name the fallback for the original launch's own outcome; log: {log}"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 

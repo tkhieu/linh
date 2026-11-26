@@ -11,10 +11,39 @@ import tomllib
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
+def is_msix_compatible(version: str) -> bool:
+    """MSIX package versions must be a plain numeric Major.Minor.Patch."""
+    parts = version.split(".")
+    return len(parts) == 3 and all(
+        part.isdecimal() and int(part) <= 65535 for part in parts
+    )
+
+
+def msix_error(version: str, tag: str | None) -> str:
+    given = f" (from tag {tag})" if tag else ""
+    return (
+        f"ERROR: version '{version}'{given} is not MSIX-compatible: MSIX packages "
+        "require a numeric Major.Minor.Patch version, so pre-release and build "
+        "suffixes (e.g. '-beta', '+build') are not supported."
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tag", help="tag to validate, e.g. v0.2.0")
     args = parser.parse_args()
+
+    # Validate the tag's own format before comparing it with the files:
+    # a pre-release/build tag must be rejected with the MSIX-specific
+    # message even when the files happen to disagree with it too.
+    tag_version = None
+    if args.tag:
+        if not args.tag.startswith("v"):
+            parser.error(f"release tag must start with v: {args.tag}")
+        tag_version = args.tag[1:]
+        if not is_msix_compatible(tag_version):
+            print(msix_error(tag_version, args.tag), file=sys.stderr)
+            return 1
 
     with (ROOT / "Cargo.toml").open("rb") as cargo_file:
         cargo = tomllib.load(cargo_file)
@@ -27,10 +56,8 @@ def main() -> int:
             (ROOT / "ui/package.json").read_text(encoding="utf-8")
         )["version"],
     }
-    if args.tag:
-        if not args.tag.startswith("v"):
-            parser.error(f"release tag must start with v: {args.tag}")
-        versions["release tag"] = args.tag[1:]
+    if tag_version is not None:
+        versions["release tag"] = tag_version
 
     for source, version in versions.items():
         print(f"{source}: {version}")
@@ -38,10 +65,8 @@ def main() -> int:
         print("ERROR: release versions differ; update all three files before tagging", file=sys.stderr)
         return 1
     version = next(iter(versions.values()))
-    if len(version.split(".")) != 3 or not all(
-        part.isdecimal() and int(part) <= 65535 for part in version.split(".")
-    ):
-        print("ERROR: version must have three numeric MSIX-compatible parts", file=sys.stderr)
+    if not is_msix_compatible(version):
+        print(msix_error(version, args.tag), file=sys.stderr)
         return 1
     print(f"VERSION={version}")
     return 0
