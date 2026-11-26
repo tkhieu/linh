@@ -7,9 +7,21 @@ use crate::platform::logging::log_line;
 
 use super::command::parse_registry_command;
 use super::dirs::Dirs;
+use super::packaging::is_packaged;
 use super::registry::{current_user, read_string};
 use super::shell::open_uri;
 
+/// Must equal the `desktop7:ProgId` declared for `http`/`https` in
+/// `packaging/windows/AppxManifest.xml.in`'s `uap:Protocol` extensions.
+/// A packaged (MSIX/Store) install registers its protocol handlers
+/// through that manifest rather than through this file's HKCU writes
+/// (see [`refresh_registration_if_stale`] and [`set_default_browser`]),
+/// and without an explicit `desktop7:ProgId` Windows would assign it an
+/// opaque, package-specific ProgID instead of this one — which would
+/// make [`is_default_browser`]/[`current_default_browser_id`] (both of
+/// which just read this ProgID back out of `UserChoice`) report the
+/// wrong status for a packaged install.
+/// <https://learn.microsoft.com/en-us/uwp/schemas/appxpackage/uapmanifestschema/element-desktop7-progid>
 const PROG_ID: &str = "LinhURL";
 const APP_NAME: &str = "Linh";
 const ASSOCIATIONS: &str = r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations";
@@ -63,7 +75,17 @@ fn points_to_exe(command: &str, exe: &str) -> bool {
 
 /// Repair a per-user registration left pointing at an older installation.
 /// No registration is created at startup if the user has never opted in.
+/// A packaged (MSIX/Store) install's `http`/`https` registration lives in
+/// the AppX manifest and is virtualized by Windows — see [`is_packaged`]
+/// — so there is nothing of Linh's own to repair there.
 pub fn refresh_registration_if_stale(dirs: &Dirs) {
+    refresh_registration_if_stale_impl(dirs, is_packaged());
+}
+
+fn refresh_registration_if_stale_impl(dirs: &Dirs, packaged: bool) {
+    if packaged {
+        return;
+    }
     let Some(existing) = read_string(&current_user(), OPEN_COMMAND, "") else {
         return;
     };
@@ -100,6 +122,31 @@ pub fn refresh_registration_if_stale(dirs: &Dirs) {
 }
 
 pub fn set_default_browser() -> Result<(), String> {
+    set_default_browser_impl(is_packaged())
+}
+
+/// The `ms-settings:` URI [`set_default_browser`] opens: the plain
+/// Default Apps page for a packaged install, since there's no
+/// `RegisteredApplications` entry (packaged installs never write one —
+/// see [`set_default_browser_impl`]) for the deep link's
+/// `registeredAppUser` to resolve; the deep link straight to Linh's own
+/// entry otherwise.
+fn settings_uri(packaged: bool) -> &'static str {
+    if packaged {
+        "ms-settings:defaultapps"
+    } else {
+        "ms-settings:defaultapps?registeredAppUser=Linh"
+    }
+}
+
+fn set_default_browser_impl(packaged: bool) -> Result<(), String> {
+    if packaged {
+        // A packaged install's protocol registration comes from the AppX
+        // manifest and HKCU\Software\Classes is virtualized for it, so
+        // there's nothing of Linh's own to write; just surface the
+        // system picker so the user can choose Linh there.
+        return open_uri(settings_uri(true));
+    }
     let exe = env::current_exe().map_err(|e| e.to_string())?;
     let exe = exe.to_str().ok_or("Linh executable path is not UTF-8")?;
     let command = command_for_exe(exe);
@@ -129,7 +176,7 @@ pub fn set_default_browser() -> Result<(), String> {
         APP_NAME,
         r"Software\Linh\Capabilities",
     )?;
-    open_uri("ms-settings:defaultapps?registeredAppUser=Linh")
+    open_uri(settings_uri(false))
 }
 
 pub fn matches_desktop_id(browser: &Browser, id: &str) -> bool {
@@ -194,5 +241,21 @@ mod tests {
             r"C:\New\linh.exe"
         ));
         assert!(!points_to_exe("unparseable", r"C:\New\linh.exe"));
+    }
+
+    #[test]
+    fn packaged_skips_the_stale_registration_repair() {
+        // `packaged: true` must return before touching the registry at
+        // all, so this is safe to call even though nothing was set up.
+        refresh_registration_if_stale_impl(&Dirs::from_env(), true);
+    }
+
+    #[test]
+    fn packaged_opens_generic_settings_without_the_registered_app_deep_link() {
+        assert_eq!(settings_uri(true), "ms-settings:defaultapps");
+        assert_eq!(
+            settings_uri(false),
+            "ms-settings:defaultapps?registeredAppUser=Linh"
+        );
     }
 }
