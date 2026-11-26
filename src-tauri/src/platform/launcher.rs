@@ -161,7 +161,10 @@ pub fn spawn_detached(
     }
     let mut child = command.spawn()?;
     thread::spawn(move || {
-        let _ = child.wait();
+        // Fully qualified: on macOS, `Waitable` (same module, consuming
+        // `self`) is also in scope and would otherwise be preferred by
+        // method-call resolution over this inherent, `&mut self` one.
+        let _ = std::process::Child::wait(&mut child);
     });
     Ok(())
 }

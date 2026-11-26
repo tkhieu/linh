@@ -8,6 +8,7 @@
 //! - Any other value is an error, not a third kind of identity — treated
 //!   as unpackaged (the safer default: it skips Linh's own HKCU writes
 //!   only when we are sure a packaged install's manifest covers them).
+//!
 //! <https://learn.microsoft.com/en-us/windows/msix/detect-package-identity>
 //! <https://learn.microsoft.com/en-us/windows/win32/api/appmodel/nf-appmodel-getcurrentpackagefullname>
 
