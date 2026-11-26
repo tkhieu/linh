@@ -212,28 +212,25 @@ fn spawn_macos_open(
     Ok(())
 }
 
-/// The subset of [`std::process::Child`] the watcher needs, so tests can
-/// inject a fake instead of a real OS process.
+/// The subset of [`std::process::Child`] a bounded wait needs: a
+/// non-blocking poll, a non-blocking kill, and a *consuming*, blocking
+/// `wait` used only from the detached thread [`kill_and_detach`] spawns
+/// — never from the waiting caller's own thread. `Send + 'static` so a
+/// still-alive one can be handed to that thread. Lets tests inject a
+/// fake instead of a real OS process. Shared by this module's launch
+/// watcher and `platform::macos::notify`'s bounded `osascript` wait, so
+/// there is exactly one "kill, then reap without blocking the caller"
+/// implementation.
 #[cfg(target_os = "macos")]
-trait Waitable {
+pub(crate) trait Waitable: Send + 'static {
     /// Non-blocking: `Ok(None)` while still running.
     fn try_wait(&mut self) -> io::Result<Option<ExitStatus>>;
-    /// Kills and reaps (waits for) the process, so it's never left as a
-    /// zombie even when forced to give up on it. Tolerates `kill`
-    /// itself failing (e.g. the process had already exited on its own
-    /// between the last poll and this call) — `wait` still always runs,
-    /// so the process is reaped either way.
-    fn kill_and_reap(&mut self) -> io::Result<()>;
+    /// Non-blocking. Tolerates failing (e.g. the process had already
+    /// exited on its own between the last poll and this call).
+    fn kill(&mut self);
+    /// Consumes `self`, blocking until it exits.
+    fn wait(self) -> io::Result<ExitStatus>;
 }
-
-/// How long [`Waitable::kill_and_reap`]'s real `Child` impl polls for a
-/// killed process to actually exit before giving up.
-#[cfg(target_os = "macos")]
-const KILL_REAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// How often that poll checks `try_wait` while within [`KILL_REAP_TIMEOUT`].
-#[cfg(target_os = "macos")]
-const KILL_REAP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 #[cfg(target_os = "macos")]
 impl Waitable for std::process::Child {
@@ -241,52 +238,77 @@ impl Waitable for std::process::Child {
         std::process::Child::try_wait(self)
     }
 
-    /// Tolerates `kill` itself failing (e.g. the process had already
-    /// exited on its own between the last poll and this call) — reaping
-    /// is always attempted either way. Bounds that reap to
-    /// [`KILL_REAP_TIMEOUT`] by polling `try_wait` ([`reap_within`])
-    /// rather than making one unbounded blocking `Child::wait()` call: a
-    /// `kill()` that doesn't take (the process wedged in, say, an
-    /// uninterruptible syscall) must never stall this worker thread
-    /// forever. Trade-off: giving up after the timeout can leave a
-    /// zombie behind (nothing will ever call `wait` on it again) —
-    /// accepted, since a watcher thread stuck forever is worse.
-    fn kill_and_reap(&mut self) -> io::Result<()> {
+    fn kill(&mut self) {
         let _ = std::process::Child::kill(self);
-        reap_within(self, KILL_REAP_TIMEOUT, KILL_REAP_POLL_INTERVAL)
+    }
+
+    fn wait(mut self) -> io::Result<ExitStatus> {
+        std::process::Child::wait(&mut self)
     }
 }
 
-/// Polls `waitable` (via [`Waitable::try_wait`], never a second `kill`)
-/// every `poll_interval` until it exits or `bound` elapses, instead of
-/// one unbounded blocking wait — see [`Waitable::kill_and_reap`]'s doc
-/// comment for why. Returns `Ok(())` once reaped, or an error if it's
-/// still running when `bound` elapses.
+/// What [`wait_bounded`] found.
 #[cfg(target_os = "macos")]
-fn reap_within<W: Waitable>(
-    waitable: &mut W,
+pub(crate) enum BoundedWaitOutcome {
+    Exited(ExitStatus),
+    /// Not confirmed either way within the bound — a `try_wait` error,
+    /// or still running once the bound elapsed. Either way the process
+    /// has been killed and handed off to a detached reaper thread (see
+    /// [`kill_and_detach`]); nothing further to wait on here.
+    GaveUp,
+}
+
+/// Polls `waitable` every `poll_interval` until it exits or `bound`
+/// elapses (from this call, not from when the process actually
+/// started), instead of one unbounded blocking wait. On a `try_wait`
+/// error, or once `bound` is hit while still running, the process is
+/// killed and handed to [`kill_and_detach`] rather than waited on here —
+/// so this always returns within `bound`, whatever `waitable` does.
+#[cfg(target_os = "macos")]
+pub(crate) fn wait_bounded<W: Waitable>(
+    mut waitable: W,
     bound: std::time::Duration,
     poll_interval: std::time::Duration,
-) -> io::Result<()> {
+) -> BoundedWaitOutcome {
     let start = std::time::Instant::now();
     loop {
-        if matches!(waitable.try_wait(), Ok(Some(_))) {
-            return Ok(());
+        match waitable.try_wait() {
+            Ok(Some(status)) => return BoundedWaitOutcome::Exited(status),
+            Ok(None) => {}
+            Err(_) => {
+                kill_and_detach(waitable);
+                return BoundedWaitOutcome::GaveUp;
+            }
         }
         if start.elapsed() >= bound {
-            return Err(io::Error::other(
-                "gave up waiting for the killed process to exit",
-            ));
+            kill_and_detach(waitable);
+            return BoundedWaitOutcome::GaveUp;
         }
         thread::sleep(poll_interval);
     }
+}
+
+/// Kills `waitable` and hands it to a new, detached thread that blocks
+/// on its (consuming) [`Waitable::wait`] — so it's still reaped
+/// whenever it actually exits, without the caller of [`wait_bounded`]
+/// ever blocking past its own bound. Trade-off: if `kill` doesn't take
+/// (the process is wedged in, say, an uninterruptible syscall), that
+/// thread stays parked in `wait` for as long as the process survives —
+/// accepted, since only that one isolated thread pays for it, never the
+/// caller, and a `kill` that never takes is the rare, pathological case.
+#[cfg(target_os = "macos")]
+fn kill_and_detach<W: Waitable>(mut waitable: W) {
+    waitable.kill();
+    thread::spawn(move || {
+        let _ = waitable.wait();
+    });
 }
 
 /// Spawns exactly one worker thread that calls [`watch_and_report`] and
 /// then terminates — it never lingers, however `waitable` resolves.
 /// Returns immediately; the thread itself does all the waiting.
 #[cfg(target_os = "macos")]
-fn spawn_watcher<W: Waitable + Send + 'static>(
+fn spawn_watcher<W: Waitable>(
     waitable: W,
     deadline: std::time::Duration,
     poll_interval: std::time::Duration,
@@ -306,58 +328,30 @@ fn spawn_watcher<W: Waitable + Send + 'static>(
     });
 }
 
-/// Polls `waitable` every `poll_interval` until it exits or `deadline`
-/// elapses (from this call, not from when the process actually
-/// started). On a `try_wait` error, or once the deadline is hit, the
-/// process is killed and reaped (see [`Waitable::kill_and_reap`]) and
-/// the outcome is [`LaunchOutcome::Unconfirmed`] either way — a
-/// `try_wait` error means we genuinely don't know what happened, and a
-/// deadline kill is us *ending* the process, not it reporting a result,
-/// so neither can be treated as a definite failure worth falling back
-/// from. Always terminates: either `waitable` exits on its own, or the
-/// deadline forces it.
+/// Waits (bounded by [`wait_bounded`]) for `waitable` to exit and maps
+/// that to a [`LaunchOutcome`]: an exit status becomes
+/// [`LaunchOutcome::Succeeded`]/[`LaunchOutcome::DefiniteFailure`], and
+/// not confirming either way within `deadline` becomes
+/// [`LaunchOutcome::Unconfirmed`] — a `try_wait` error means we
+/// genuinely don't know what happened, and a deadline kill is us
+/// *ending* the process, not it reporting a result, so neither can be
+/// treated as a definite failure worth falling back from. Always
+/// terminates within `deadline`.
 #[cfg(target_os = "macos")]
 fn watch<W: Waitable>(
-    mut waitable: W,
+    waitable: W,
     deadline: std::time::Duration,
     poll_interval: std::time::Duration,
-    dirs: &Dirs,
-    program: &str,
 ) -> LaunchOutcome {
-    let start = std::time::Instant::now();
-    loop {
-        match waitable.try_wait() {
-            Ok(Some(status)) => {
-                return if status.success() {
-                    LaunchOutcome::Succeeded
-                } else {
-                    LaunchOutcome::DefiniteFailure
-                };
-            }
-            Ok(None) => {}
-            Err(_) => {
-                log_if_still_alive_after_kill(waitable.kill_and_reap(), dirs, program);
-                return LaunchOutcome::Unconfirmed;
+    match wait_bounded(waitable, deadline, poll_interval) {
+        BoundedWaitOutcome::Exited(status) => {
+            if status.success() {
+                LaunchOutcome::Succeeded
+            } else {
+                LaunchOutcome::DefiniteFailure
             }
         }
-        if start.elapsed() >= deadline {
-            log_if_still_alive_after_kill(waitable.kill_and_reap(), dirs, program);
-            return LaunchOutcome::Unconfirmed;
-        }
-        thread::sleep(poll_interval);
-    }
-}
-
-/// Logs when [`Waitable::kill_and_reap`] gave up rather than confirming
-/// the process actually exited — its `Err` case, surfaced here since
-/// `kill_and_reap` itself has no `Dirs`/program name to log with.
-#[cfg(target_os = "macos")]
-fn log_if_still_alive_after_kill(reaped: io::Result<()>, dirs: &Dirs, program: &str) {
-    if let Err(err) = reaped {
-        crate::platform::logging::log_line(
-            dirs,
-            &format!("{program}: gave up reaping the killed process: {err}"),
-        );
+        BoundedWaitOutcome::GaveUp => LaunchOutcome::Unconfirmed,
     }
 }
 
@@ -375,7 +369,7 @@ fn watch_and_report<W: Waitable>(
     program: &str,
     on_outcome: AsyncOutcomeHandler,
 ) {
-    let outcome = watch(waitable, deadline, poll_interval, dirs, program);
+    let outcome = watch(waitable, deadline, poll_interval);
     match outcome {
         LaunchOutcome::Succeeded => {}
         LaunchOutcome::DefiniteFailure => {
@@ -441,12 +435,11 @@ mod macos_tests {
     struct ScriptedWaitable {
         remaining: std::collections::VecDeque<Step>,
         kill_called: Arc<AtomicBool>,
-        /// Whether `kill_and_reap` still calls through (reaps) even
-        /// when asked to simulate `kill` itself failing — mirrors the
-        /// real `Child` impl's "ignore kill's error, always wait"
-        /// contract, so this fake can stand in for it in `watch`-level
-        /// tests without spawning a real process.
-        reaped: Arc<AtomicBool>,
+        /// Signaled from [`Waitable::wait`], which — once this is
+        /// handed to [`kill_and_detach`] — runs on a detached thread,
+        /// not synchronously with the caller. Tests must `recv` this
+        /// rather than check a flag right after the caller returns.
+        reaped_tx: mpsc::Sender<()>,
     }
 
     impl Waitable for ScriptedWaitable {
@@ -458,84 +451,154 @@ mod macos_tests {
             }
         }
 
-        fn kill_and_reap(&mut self) -> io::Result<()> {
+        fn kill(&mut self) {
             self.kill_called.store(true, Ordering::SeqCst);
-            // Real `kill` failing (e.g. already exited) must not skip
-            // reaping — see the real impl's doc comment.
-            self.reaped.store(true, Ordering::SeqCst);
-            Ok(())
+        }
+
+        fn wait(self) -> io::Result<ExitStatus> {
+            let _ = self.reaped_tx.send(());
+            Ok(exit_status(0))
         }
     }
 
-    fn waitable(steps: Vec<Step>) -> ScriptedWaitable {
-        ScriptedWaitable {
-            remaining: std::collections::VecDeque::from(steps),
-            kill_called: Arc::new(AtomicBool::new(false)),
-            reaped: Arc::new(AtomicBool::new(false)),
+    fn waitable(steps: Vec<Step>) -> (ScriptedWaitable, Arc<AtomicBool>, mpsc::Receiver<()>) {
+        let kill_called = Arc::new(AtomicBool::new(false));
+        let (reaped_tx, reaped_rx) = mpsc::channel();
+        (
+            ScriptedWaitable {
+                remaining: std::collections::VecDeque::from(steps),
+                kill_called: kill_called.clone(),
+                reaped_tx,
+            },
+            kill_called,
+            reaped_rx,
+        )
+    }
+
+    /// `recv`s with a generous bound, rather than asserting a flag right
+    /// after the caller returns — [`kill_and_detach`] reaps on its own
+    /// thread, asynchronously with `watch`/`watch_and_report` returning.
+    fn expect_reaped(reaped_rx: &mpsc::Receiver<()>) {
+        reaped_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the detached reaper must still call wait()");
+    }
+
+    // --- `wait_bounded`: tested directly with a short bound instead of
+    // the real 5s/10s constants the real call sites use, so this never
+    // sleeps more than a few tens of milliseconds. ---
+
+    #[test]
+    fn wait_bounded_reports_exited_as_soon_as_try_wait_does() {
+        let (w, kill_called, _reaped_rx) = waitable(vec![Step::Exited(exit_status(0))]);
+        match wait_bounded(w, Duration::from_secs(5), Duration::from_millis(5)) {
+            BoundedWaitOutcome::Exited(status) => assert!(status.success()),
+            BoundedWaitOutcome::GaveUp => panic!("expected Exited"),
         }
-    }
-
-    // --- `reap_within`: the bound behind `kill_and_reap`, tested
-    // directly with a short bound instead of the real 5s constant, so
-    // this never sleeps more than a few tens of milliseconds. ---
-
-    #[test]
-    fn reap_within_succeeds_as_soon_as_try_wait_reports_exited() {
-        let mut w = waitable(vec![Step::Exited(exit_status(0))]);
-        assert!(reap_within(&mut w, Duration::from_secs(5), Duration::from_millis(5)).is_ok());
-    }
-
-    #[test]
-    fn reap_within_gives_up_rather_than_blocking_forever() {
-        let mut w = waitable(vec![]); // always "still running"
-        let result = reap_within(&mut w, Duration::from_millis(30), Duration::from_millis(5));
         assert!(
-            result.is_err(),
-            "must give up once the bound elapses, not hang"
+            !kill_called.load(Ordering::SeqCst),
+            "never ran, never killed"
         );
     }
 
-    /// Never exits and its `kill_and_reap` always gives up — stands in
-    /// for a process whose `kill(2)` never takes, so `watch` (not
-    /// `reap_within`, which this bypasses) must still terminate and log
-    /// it rather than hang the worker thread forever.
-    struct NeverReapsWaitable;
+    #[test]
+    fn wait_bounded_gives_up_kills_and_detaches_rather_than_blocking_forever() {
+        let (w, kill_called, reaped_rx) = waitable(vec![]); // always "still running"
+        let outcome = wait_bounded(w, Duration::from_millis(30), Duration::from_millis(5));
+        assert!(matches!(outcome, BoundedWaitOutcome::GaveUp));
+        assert!(
+            kill_called.load(Ordering::SeqCst),
+            "must kill once the bound elapses, not hang"
+        );
+        expect_reaped(&reaped_rx);
+    }
 
-    impl Waitable for NeverReapsWaitable {
+    #[test]
+    fn wait_bounded_kills_and_detaches_on_a_try_wait_error_too() {
+        let (w, kill_called, reaped_rx) = waitable(vec![Step::TryWaitErrors]);
+        let outcome = wait_bounded(w, Duration::from_secs(5), Duration::from_millis(5));
+        assert!(matches!(outcome, BoundedWaitOutcome::GaveUp));
+        assert!(
+            kill_called.load(Ordering::SeqCst),
+            "a try_wait error must still attempt to kill, not just give up silently"
+        );
+        expect_reaped(&reaped_rx);
+    }
+
+    /// Never exits, and blocks in `wait` until explicitly released —
+    /// stands in for a `kill(2)` that doesn't take right away. Proves
+    /// that [`watch_and_report`] (and so the routing worker calling it)
+    /// returns within its own deadline regardless, while the detached
+    /// reaper this hands off to keeps its own, separate hold on the
+    /// still-alive child until released.
+    struct SlowToReapWaitable {
+        release: Arc<Barrier>,
+        reaped: Arc<AtomicBool>,
+    }
+
+    impl Waitable for SlowToReapWaitable {
         fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
             Ok(None)
         }
 
-        fn kill_and_reap(&mut self) -> io::Result<()> {
-            Err(io::Error::other("still alive"))
+        fn kill(&mut self) {}
+
+        fn wait(self) -> io::Result<ExitStatus> {
+            self.release.wait();
+            self.reaped.store(true, Ordering::SeqCst);
+            Ok(exit_status(0))
         }
     }
 
     #[test]
-    fn watch_logs_and_still_terminates_when_kill_and_reap_gives_up() {
+    fn routing_worker_returns_promptly_while_a_slow_reaper_still_owns_the_child() {
+        let release = Arc::new(Barrier::new(2));
+        let reaped = Arc::new(AtomicBool::new(false));
+        let w = SlowToReapWaitable {
+            release: release.clone(),
+            reaped: reaped.clone(),
+        };
         let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let dirs = test_dirs();
+
+        let started = std::time::Instant::now();
         watch_and_report(
-            NeverReapsWaitable,
-            Duration::from_millis(20),
+            w,
+            Duration::from_millis(30),
             Duration::from_millis(5),
             &dirs,
             "fake-open",
             record_outcome(outcomes.clone()),
         );
-        assert_eq!(*outcomes.lock().unwrap(), vec![LaunchOutcome::Unconfirmed]);
-        let log = std::fs::read_to_string(dirs.log_path()).unwrap_or_default();
         assert!(
-            log.contains("gave up reaping the killed process"),
-            "log: {log}"
+            started.elapsed() < Duration::from_secs(2),
+            "must not block on the detached reaper"
+        );
+        assert_eq!(*outcomes.lock().unwrap(), vec![LaunchOutcome::Unconfirmed]);
+        assert!(
+            !reaped.load(Ordering::SeqCst),
+            "the reaper must still be blocked on its own thread, separate from the caller"
+        );
+
+        // Release the detached thread so it (and this test) can exit
+        // cleanly, and confirm it does go on to reap the child.
+        release.wait();
+        for _ in 0..200 {
+            if reaped.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            reaped.load(Ordering::SeqCst),
+            "the detached thread must eventually reap it"
         );
     }
 
     #[test]
     fn zero_exit_reports_succeeded_and_never_kills() {
         let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let w = waitable(vec![Step::Exited(exit_status(0))]);
-        let kill_called = w.kill_called.clone();
+        let (w, kill_called, _reaped_rx) = waitable(vec![Step::Exited(exit_status(0))]);
         watch_and_report(
             w,
             Duration::from_millis(200),
@@ -552,7 +615,7 @@ mod macos_tests {
     fn non_zero_exit_reports_definite_failure_exactly_once() {
         let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
         // Raw wait-status 256 => exit code 1.
-        let w = waitable(vec![Step::Exited(exit_status(256))]);
+        let (w, _kill_called, _reaped_rx) = waitable(vec![Step::Exited(exit_status(256))]);
         watch_and_report(
             w,
             Duration::from_millis(200),
@@ -568,11 +631,9 @@ mod macos_tests {
     }
 
     #[test]
-    fn deadline_kills_reaps_and_reports_unconfirmed_exactly_once() {
+    fn deadline_kills_detaches_a_reaper_and_reports_unconfirmed_exactly_once() {
         let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let w = waitable(vec![]); // always "still running"
-        let kill_called = w.kill_called.clone();
-        let reaped = w.reaped.clone();
+        let (w, kill_called, reaped_rx) = waitable(vec![]); // always "still running"
         watch_and_report(
             w,
             Duration::from_millis(60),
@@ -585,16 +646,14 @@ mod macos_tests {
             kill_called.load(Ordering::SeqCst),
             "must kill a hung process"
         );
-        assert!(reaped.load(Ordering::SeqCst), "must reap after killing");
+        expect_reaped(&reaped_rx);
         assert_eq!(*outcomes.lock().unwrap(), vec![LaunchOutcome::Unconfirmed]);
     }
 
     #[test]
-    fn try_wait_error_kills_reaps_and_reports_unconfirmed_exactly_once() {
+    fn try_wait_error_kills_detaches_a_reaper_and_reports_unconfirmed_exactly_once() {
         let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let w = waitable(vec![Step::TryWaitErrors]);
-        let kill_called = w.kill_called.clone();
-        let reaped = w.reaped.clone();
+        let (w, kill_called, reaped_rx) = waitable(vec![Step::TryWaitErrors]);
         watch_and_report(
             w,
             Duration::from_secs(5),
@@ -607,18 +666,18 @@ mod macos_tests {
             kill_called.load(Ordering::SeqCst),
             "a try_wait error must still attempt to kill, not just give up"
         );
-        assert!(reaped.load(Ordering::SeqCst), "must still reap");
+        expect_reaped(&reaped_rx);
         assert_eq!(*outcomes.lock().unwrap(), vec![LaunchOutcome::Unconfirmed]);
     }
 
-    /// Exercises the *real* `impl Waitable for Child`'s `kill_and_reap`
+    /// Exercises the *real* `impl Waitable for Child`'s `kill`/`wait`
     /// directly: spawns a real process that exits on its own almost
-    /// immediately, waits for that to happen, then calls
-    /// `kill_and_reap` — at which point the real `kill(2)` syscall is
-    /// expected to fail (nothing left to signal), and this must still
-    /// return `Ok(())` because `wait` always runs regardless.
+    /// immediately, waits for that to happen, then calls `kill` (whose
+    /// underlying `kill(2)` is expected to fail — nothing left to
+    /// signal) followed by `wait`, which must still succeed and reap it
+    /// regardless of `kill`'s own result.
     #[test]
-    fn real_child_kill_and_reap_tolerates_kill_failing_on_an_already_exited_process() {
+    fn real_child_kill_tolerates_failing_on_an_already_exited_process() {
         let mut child = Command::new("/bin/sh")
             .args(["-c", "exit 0"])
             .stdin(Stdio::null())
@@ -633,9 +692,10 @@ mod macos_tests {
             }
             thread::sleep(Duration::from_millis(10));
         }
+        Waitable::kill(&mut child);
         assert!(
-            Waitable::kill_and_reap(&mut child).is_ok(),
-            "kill_and_reap must still succeed (and reap) even when kill() itself fails"
+            Waitable::wait(child).is_ok(),
+            "wait must still succeed (and reap) even when kill() itself failed"
         );
     }
 
@@ -683,8 +743,10 @@ mod macos_tests {
             Ok(Some(exit_status(0)))
         }
 
-        fn kill_and_reap(&mut self) -> io::Result<()> {
-            Ok(())
+        fn kill(&mut self) {}
+
+        fn wait(self) -> io::Result<ExitStatus> {
+            Ok(exit_status(0))
         }
     }
 
