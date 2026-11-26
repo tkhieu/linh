@@ -62,7 +62,7 @@ pub fn decide(config: &Config, url: &Url, caps: PlatformCaps) -> Decision {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Rule;
+    use crate::config::{parse_config, Rule};
 
     fn target(browser: &str) -> Target {
         Target {
@@ -104,6 +104,49 @@ mod tests {
             PlatformCaps::default(),
         );
         assert_eq!(decision, Decision::Open(target("chrome")));
+    }
+
+    #[test]
+    fn saved_macos_github_route_with_scheme_opens_chrome() {
+        let config = parse_config(
+            r#"
+prompt_mode = "always"
+
+[primary]
+browser = "com.google.chrome"
+private = false
+
+[[rules]]
+name = "Google Meet"
+match = ["meet.google.com"]
+[rules.open_in]
+browser = "com.google.chrome"
+private = false
+
+[[rules]]
+name = "Microsoft Teams"
+match = ["teams.microsoft.com/l/meetup-join/*", "teams.microsoft.com/meet/*", "teams.live.com/meet/*", "teams.live.com/l/meetup-join/*"]
+[rules.open_in]
+app = "teams"
+
+[[rules]]
+name = "Github"
+match = ["https://github.com/*"]
+[rules.open_in]
+browser = "com.google.chrome"
+private = false
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            decide(
+                &config,
+                &url("https://github.com/tkhieu/linh/pull/29"),
+                PlatformCaps::default(),
+            ),
+            Decision::Open(target("com.google.chrome"))
+        );
     }
 
     #[test]

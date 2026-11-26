@@ -42,6 +42,13 @@ describe('patternMatches', () => {
     expect(patternMatches('meet.google.com', 'meet.google.com', '/')).toBe(true)
     expect(patternMatches('meet.google.com', 'google.com', '/')).toBe(false)
   })
+
+  it('accepts optional HTTP scheme and surrounding whitespace', () => {
+    expect(patternMatches('https://github.com/*', 'github.com', '/tkhieu/linh/pull/29')).toBe(true)
+    expect(patternMatches('http://github.com/*', 'github.com', '/x')).toBe(true)
+    expect(patternMatches('  github.com/* \n', 'github.com', '/x')).toBe(true)
+    expect(patternMatches(' \thttps://github.com/*\n', 'github.com', '/x')).toBe(true)
+  })
 })
 
 describe('parseTraceUrl', () => {
@@ -86,6 +93,24 @@ describe('parseTraceUrl', () => {
 })
 
 describe('traceRoute', () => {
+  it('routes the saved macOS Github rule with a scheme to Chrome', () => {
+    const chrome = { browser: 'com.google.chrome', private: false }
+    const config: Config = {
+      primary: chrome, prompt_mode: 'always', shown_browsers: [],
+      rules: [
+        { name: 'Google Meet', match: ['meet.google.com'], open_in: chrome },
+        { name: 'Microsoft Teams', match: [
+          'teams.microsoft.com/l/meetup-join/*', 'teams.microsoft.com/meet/*',
+          'teams.live.com/meet/*', 'teams.live.com/l/meetup-join/*',
+        ], open_in: { app: 'teams' } },
+        { name: 'Github', match: ['https://github.com/*'], open_in: chrome },
+      ],
+    }
+    const trace = traceRoute(config, caps, 'github.com', '/tkhieu/linh/pull/29')
+    expect(trace.decision).toEqual({ kind: 'open', target: chrome })
+    expect(trace.matchedIndex).toBe(2)
+  })
+
   it('prompt mode always uses a matching rule', () => {
     const config: Config = {
       ...baseConfig(), prompt_mode: 'always',
