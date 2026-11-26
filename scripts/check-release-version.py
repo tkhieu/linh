@@ -41,7 +41,13 @@ def main() -> int:
     if len(version.split(".")) != 3 or not all(
         part.isdecimal() and int(part) <= 65535 for part in version.split(".")
     ):
-        print("ERROR: version must have three numeric MSIX-compatible parts", file=sys.stderr)
+        given = f" (from tag {args.tag})" if args.tag else ""
+        print(
+            f"ERROR: version '{version}'{given} is not MSIX-compatible: MSIX packages "
+            "require a numeric Major.Minor.Patch version, so pre-release and build "
+            "suffixes (e.g. '-beta', '+build') are not supported.",
+            file=sys.stderr,
+        )
         return 1
     print(f"VERSION={version}")
     return 0

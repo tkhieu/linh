@@ -9,7 +9,9 @@ artifact is for Partner Center submission, not direct installation.
 1. Set the same `MAJOR.MINOR.PATCH` version in `Cargo.toml` under
    `[workspace.package]`, `src-tauri/tauri.conf.json`, and `ui/package.json`.
    Run `python3 scripts/check-release-version.py`. The workflow rejects a tag
-   unless all three versions equal the `vMAJOR.MINOR.PATCH` tag.
+   unless all three versions equal the `vMAJOR.MINOR.PATCH` tag. Pre-release
+   and build suffixes (`v1.2.3-beta`, `v1.2.3+build`) are rejected too: MSIX
+   package versions must be a plain numeric `Major.Minor.Patch`.
 2. Run **Release** with `workflow_dispatch` and `dry_run=true` on a branch
    after the workflow is available on the default branch. Inspect all four
    build jobs and the complete `linh-release-assets` artifact, including
@@ -67,19 +69,21 @@ capability declarations, certification, and submission options in Partner
 Center. `runFullTrust` is a restricted capability and may require Store
 review. The unsigned `.msix` is not a GitHub direct-download installer.
 
-**Runtime follow-up before Store publication:** Store-installed packages
-register URL and HTML handlers through the manifest's `uap:Protocol` and
-`uap:FileTypeAssociation` extensions, rather than Linh's current HKCU
-`LinhURL` and `RegisteredApplications` writes. Linh's Windows
-`set_default_browser()` and `refresh_registration_if_stale()` currently write
-HKCU, and `is_default_browser()` checks only the `LinhURL` ProgID. A packaged
-install may therefore make duplicate/stale registrations and report the wrong
-default status. Detect package identity with `GetCurrentPackageFullName`
-(`APPMODEL_ERROR_NO_PACKAGE` means an unpackaged NSIS install), skip HKCU
-registration and repair in packaged mode, and read the packaged association
-when checking default status. Verify HTTP and HTTPS selection, activation,
-update, and uninstall on an actual Store-installed package. This release task
-does not change Rust runtime behavior.
+**Packaged runtime behavior:** Store-installed packages register URL and HTML
+handlers through the manifest's `uap:Protocol` and `uap:FileTypeAssociation`
+extensions, rather than Linh's unpackaged HKCU `LinhURL` and
+`RegisteredApplications` writes, and HKCU\Software\Classes is virtualized for
+a packaged process regardless. `platform::windows::packaging::is_packaged()`
+detects package identity with `GetCurrentPackageFullName`
+(`APPMODEL_ERROR_NO_PACKAGE` means an unpackaged NSIS install); when packaged,
+`refresh_registration_if_stale()` is a no-op and `set_default_browser()` only
+opens the Default Apps settings page instead of writing HKCU. The manifest's
+`uap:Protocol` extensions declare an explicit `desktop7:ProgId` of `LinhURL`
+for `http`/`https` (matching `platform::windows::default_browser::PROG_ID`),
+so `is_default_browser()`'s existing `UserChoice` ProgID read reports the
+correct status for a packaged install too, with no separate code path needed.
+Verify HTTP and HTTPS selection, activation, update, and uninstall on an
+actual Store-installed package before submission.
 
 References: [Tauri macOS signing and notarization](https://v2.tauri.app/distribute/sign/macos/),
 [Tauri environment variables](https://v2.tauri.app/reference/environment-variables/),
@@ -89,4 +93,5 @@ References: [Tauri macOS signing and notarization](https://v2.tauri.app/distribu
 [Store package uploads](https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msix/upload-app-packages),
 [Store readiness](https://learn.microsoft.com/en-us/windows/apps/publish/store-readiness-checklist),
 [Store signing](https://learn.microsoft.com/en-us/windows/msix/package/sign-msix-package-guide),
-[package identity detection](https://learn.microsoft.com/en-us/windows/win32/api/appmodel/nf-appmodel-getcurrentpackagefullname).
+[package identity detection](https://learn.microsoft.com/en-us/windows/win32/api/appmodel/nf-appmodel-getcurrentpackagefullname),
+[desktop7:ProgId](https://learn.microsoft.com/en-us/uwp/schemas/appxpackage/uapmanifestschema/element-desktop7-progid).
