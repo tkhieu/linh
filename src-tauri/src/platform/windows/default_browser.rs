@@ -7,21 +7,22 @@ use crate::platform::logging::log_line;
 
 use super::command::parse_registry_command;
 use super::dirs::Dirs;
-use super::packaging::is_packaged;
-use super::registry::{current_user, read_string};
+use super::packaging::{current_application_user_model_id, is_packaged};
+use super::registry::{classes_root, current_user, read_string};
 use super::shell::open_uri;
 
-/// Must equal the `desktop7:ProgId` declared for `http`/`https` in
-/// `packaging/windows/AppxManifest.xml.in`'s `uap:Protocol` extensions.
-/// A packaged (MSIX/Store) install registers its protocol handlers
-/// through that manifest rather than through this file's HKCU writes
-/// (see [`refresh_registration_if_stale`] and [`set_default_browser`]),
-/// and without an explicit `desktop7:ProgId` Windows would assign it an
-/// opaque, package-specific ProgID instead of this one — which would
-/// make [`is_default_browser`]/[`current_default_browser_id`] (both of
-/// which just read this ProgID back out of `UserChoice`) report the
-/// wrong status for a packaged install.
-/// <https://learn.microsoft.com/en-us/uwp/schemas/appxpackage/uapmanifestschema/element-desktop7-progid>
+/// The ProgID Linh's own (unpackaged) HKCU writes in
+/// [`set_default_browser`] register, and that [`is_default_browser`]/
+/// [`current_default_browser_id`] compare `UserChoice` against — for an
+/// *unpackaged* install only. A packaged (MSIX/Store) install's
+/// `http`/`https` registration instead comes from the AppX manifest's
+/// `uap:Protocol` extensions, which (keeping the package's declared
+/// `MinVersion` at Windows 10 1809, below the `desktop7:ProgId` element's
+/// own Windows 10 Build 19645 minimum — see
+/// <https://learn.microsoft.com/en-us/uwp/schemas/appxpackage/uapmanifestschema/element-desktop7-progid>)
+/// gets an opaque, Windows-generated ProgID rather than this one; see
+/// [`progid_identifies_linh`] for how a packaged install is matched
+/// instead.
 const PROG_ID: &str = "LinhURL";
 const APP_NAME: &str = "Linh";
 const ASSOCIATIONS: &str = r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations";
@@ -39,14 +40,68 @@ fn is_linh_progid(progid: &str) -> bool {
     progid.eq_ignore_ascii_case(PROG_ID)
 }
 
+/// `HKCR\<progid>\Application`'s `AppUserModelId` value — the AUMID a
+/// packaged app's generated ProgID was registered under, per the
+/// "Application User Model ID" / "ProgID" registration documented at
+/// <https://learn.microsoft.com/en-us/windows/win32/shell/appids>. Files
+/// Community's default-browser detection reads this exact key the same
+/// way: <https://github.com/files-community/Files/pull/17394/files>.
+fn progid_application_user_model_id(progid: &str) -> Option<String> {
+    read_string(
+        &classes_root(),
+        &format!(r"{progid}\Application"),
+        "AppUserModelId",
+    )
+}
+
+/// Pure decision behind [`is_default_browser`]: does `progid` (a
+/// scheme's `UserChoice` ProgID) identify Linh? An unpackaged install
+/// always registers as the fixed [`PROG_ID`]. A packaged install gets an
+/// opaque, Windows-generated ProgID instead (see [`PROG_ID`]'s doc
+/// comment), so it's identified by resolving that ProgID's own AUMID
+/// (via `lookup_aumid`, injected so this is testable without touching
+/// the registry) and comparing it against this process' own AUMID
+/// (`our_aumid`, also injected) — never by name.
+fn progid_identifies_linh(
+    progid: &str,
+    packaged: bool,
+    lookup_aumid: impl FnOnce(&str) -> Option<String>,
+    our_aumid: Option<&str>,
+) -> bool {
+    if packaged {
+        let Some(our_aumid) = our_aumid else {
+            return false;
+        };
+        return lookup_aumid(progid)
+            .is_some_and(|registry_aumid| registry_aumid.eq_ignore_ascii_case(our_aumid));
+    }
+    is_linh_progid(progid)
+}
+
 pub fn current_default_browser_id() -> Option<String> {
     user_choice("http")
 }
 
 pub fn is_default_browser() -> bool {
-    ["http", "https"]
-        .iter()
-        .all(|scheme| user_choice(scheme).is_some_and(|id| is_linh_progid(&id)))
+    is_default_browser_impl(is_packaged())
+}
+
+fn is_default_browser_impl(packaged: bool) -> bool {
+    let our_aumid = if packaged {
+        current_application_user_model_id()
+    } else {
+        None
+    };
+    ["http", "https"].iter().all(|scheme| {
+        user_choice(scheme).is_some_and(|id| {
+            progid_identifies_linh(
+                &id,
+                packaged,
+                progid_application_user_model_id,
+                our_aumid.as_deref(),
+            )
+        })
+    })
 }
 
 fn create_value(path: &str, name: &str, value: &str) -> Result<(), String> {
@@ -241,6 +296,77 @@ mod tests {
             r"C:\New\linh.exe"
         ));
         assert!(!points_to_exe("unparseable", r"C:\New\linh.exe"));
+    }
+
+    #[test]
+    fn unpackaged_matches_the_bare_progid_and_never_looks_up_an_aumid() {
+        assert!(progid_identifies_linh(
+            "linhurl",
+            false,
+            |_| panic!("unpackaged must never look up an AUMID"),
+            None,
+        ));
+        assert!(!progid_identifies_linh(
+            "AppX1a2b3c4d5e6f!App",
+            false,
+            |_| panic!("unpackaged must never look up an AUMID"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn packaged_never_matches_by_the_bare_progid_name() {
+        // A packaged install's generated ProgID is never "linhurl" --
+        // if it somehow were, that alone must still not be enough.
+        assert!(!progid_identifies_linh(
+            "linhurl",
+            true,
+            |_| None,
+            Some("Publisher.Linh_8wekyb3d8bbwe!App"),
+        ));
+    }
+
+    #[test]
+    fn packaged_matches_when_the_progids_aumid_equals_our_own() {
+        assert!(progid_identifies_linh(
+            "AppX1a2b3c4d5e6f!App",
+            true,
+            |progid| {
+                assert_eq!(progid, "AppX1a2b3c4d5e6f!App");
+                Some("Publisher.Linh_8wekyb3d8bbwe!App".to_string())
+            },
+            Some("Publisher.Linh_8wekyb3d8bbwe!App"),
+        ));
+    }
+
+    #[test]
+    fn packaged_aumid_match_is_case_insensitive() {
+        assert!(progid_identifies_linh(
+            "whatever",
+            true,
+            |_| Some("PUBLISHER.LINH_8WEKYB3D8BBWE!APP".to_string()),
+            Some("publisher.linh_8wekyb3d8bbwe!app"),
+        ));
+    }
+
+    #[test]
+    fn packaged_does_not_match_a_different_apps_aumid() {
+        assert!(!progid_identifies_linh(
+            "AppXsomeoneelse!App",
+            true,
+            |_| Some("Publisher.SomeoneElse_8wekyb3d8bbwe!App".to_string()),
+            Some("Publisher.Linh_8wekyb3d8bbwe!App"),
+        ));
+    }
+
+    #[test]
+    fn packaged_without_our_own_resolvable_aumid_never_matches() {
+        assert!(!progid_identifies_linh(
+            "whatever",
+            true,
+            |_| Some("anything".to_string()),
+            None,
+        ));
     }
 
     #[test]

@@ -75,15 +75,20 @@ extensions, rather than Linh's unpackaged HKCU `LinhURL` and
 `RegisteredApplications` writes, and HKCU\Software\Classes is virtualized for
 a packaged process regardless. `platform::windows::packaging::is_packaged()`
 detects package identity with `GetCurrentPackageFullName`
-(`APPMODEL_ERROR_NO_PACKAGE` means an unpackaged NSIS install); when packaged,
-`refresh_registration_if_stale()` is a no-op and `set_default_browser()` only
-opens the Default Apps settings page instead of writing HKCU. The manifest's
-`uap:Protocol` extensions declare an explicit `desktop7:ProgId` of `LinhURL`
-for `http`/`https` (matching `platform::windows::default_browser::PROG_ID`),
-so `is_default_browser()`'s existing `UserChoice` ProgID read reports the
-correct status for a packaged install too, with no separate code path needed.
-Verify HTTP and HTTPS selection, activation, update, and uninstall on an
-actual Store-installed package before submission.
+(`ERROR_INSUFFICIENT_BUFFER` means packaged, `APPMODEL_ERROR_NO_PACKAGE` means
+an unpackaged NSIS install); when packaged, `refresh_registration_if_stale()`
+is a no-op and `set_default_browser()` only opens the Default Apps settings
+page instead of writing HKCU. The manifest does **not** declare an explicit
+ProgID for its `uap:Protocol` extensions (`desktop7:ProgId` needs Windows 10
+Build 19645, above this package's `MinVersion` of 1809 — do not raise it just
+for that), so a packaged install gets an opaque, Windows-generated ProgID
+instead of `platform::windows::default_browser::PROG_ID`.
+`is_default_browser()` therefore resolves a packaged scheme's `UserChoice`
+ProgID under `HKCR\<ProgId>\Application`'s `AppUserModelId` value and compares
+it against this process' own AUMID (`GetCurrentApplicationUserModelId()`)
+instead of comparing ProgID names. Verify HTTP and HTTPS selection,
+activation, update, and uninstall on an actual Store-installed package before
+submission.
 
 References: [Tauri macOS signing and notarization](https://v2.tauri.app/distribute/sign/macos/),
 [Tauri environment variables](https://v2.tauri.app/reference/environment-variables/),
@@ -93,5 +98,5 @@ References: [Tauri macOS signing and notarization](https://v2.tauri.app/distribu
 [Store package uploads](https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msix/upload-app-packages),
 [Store readiness](https://learn.microsoft.com/en-us/windows/apps/publish/store-readiness-checklist),
 [Store signing](https://learn.microsoft.com/en-us/windows/msix/package/sign-msix-package-guide),
-[package identity detection](https://learn.microsoft.com/en-us/windows/win32/api/appmodel/nf-appmodel-getcurrentpackagefullname),
-[desktop7:ProgId](https://learn.microsoft.com/en-us/uwp/schemas/appxpackage/uapmanifestschema/element-desktop7-progid).
+[package identity detection](https://learn.microsoft.com/en-us/windows/msix/detect-package-identity),
+[Application User Model IDs](https://learn.microsoft.com/en-us/windows/win32/shell/appids).
