@@ -226,15 +226,59 @@ trait Waitable {
     fn kill_and_reap(&mut self) -> io::Result<()>;
 }
 
+/// How long [`Waitable::kill_and_reap`]'s real `Child` impl polls for a
+/// killed process to actually exit before giving up.
+#[cfg(target_os = "macos")]
+const KILL_REAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How often that poll checks `try_wait` while within [`KILL_REAP_TIMEOUT`].
+#[cfg(target_os = "macos")]
+const KILL_REAP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
 #[cfg(target_os = "macos")]
 impl Waitable for std::process::Child {
     fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         std::process::Child::try_wait(self)
     }
 
+    /// Tolerates `kill` itself failing (e.g. the process had already
+    /// exited on its own between the last poll and this call) — reaping
+    /// is always attempted either way. Bounds that reap to
+    /// [`KILL_REAP_TIMEOUT`] by polling `try_wait` ([`reap_within`])
+    /// rather than making one unbounded blocking `Child::wait()` call: a
+    /// `kill()` that doesn't take (the process wedged in, say, an
+    /// uninterruptible syscall) must never stall this worker thread
+    /// forever. Trade-off: giving up after the timeout can leave a
+    /// zombie behind (nothing will ever call `wait` on it again) —
+    /// accepted, since a watcher thread stuck forever is worse.
     fn kill_and_reap(&mut self) -> io::Result<()> {
         let _ = std::process::Child::kill(self);
-        std::process::Child::wait(self).map(|_| ())
+        reap_within(self, KILL_REAP_TIMEOUT, KILL_REAP_POLL_INTERVAL)
+    }
+}
+
+/// Polls `waitable` (via [`Waitable::try_wait`], never a second `kill`)
+/// every `poll_interval` until it exits or `bound` elapses, instead of
+/// one unbounded blocking wait — see [`Waitable::kill_and_reap`]'s doc
+/// comment for why. Returns `Ok(())` once reaped, or an error if it's
+/// still running when `bound` elapses.
+#[cfg(target_os = "macos")]
+fn reap_within<W: Waitable>(
+    waitable: &mut W,
+    bound: std::time::Duration,
+    poll_interval: std::time::Duration,
+) -> io::Result<()> {
+    let start = std::time::Instant::now();
+    loop {
+        if matches!(waitable.try_wait(), Ok(Some(_))) {
+            return Ok(());
+        }
+        if start.elapsed() >= bound {
+            return Err(io::Error::other(
+                "gave up waiting for the killed process to exit",
+            ));
+        }
+        thread::sleep(poll_interval);
     }
 }
 
@@ -277,6 +321,8 @@ fn watch<W: Waitable>(
     mut waitable: W,
     deadline: std::time::Duration,
     poll_interval: std::time::Duration,
+    dirs: &Dirs,
+    program: &str,
 ) -> LaunchOutcome {
     let start = std::time::Instant::now();
     loop {
@@ -290,15 +336,28 @@ fn watch<W: Waitable>(
             }
             Ok(None) => {}
             Err(_) => {
-                let _ = waitable.kill_and_reap();
+                log_if_still_alive_after_kill(waitable.kill_and_reap(), dirs, program);
                 return LaunchOutcome::Unconfirmed;
             }
         }
         if start.elapsed() >= deadline {
-            let _ = waitable.kill_and_reap();
+            log_if_still_alive_after_kill(waitable.kill_and_reap(), dirs, program);
             return LaunchOutcome::Unconfirmed;
         }
         thread::sleep(poll_interval);
+    }
+}
+
+/// Logs when [`Waitable::kill_and_reap`] gave up rather than confirming
+/// the process actually exited — its `Err` case, surfaced here since
+/// `kill_and_reap` itself has no `Dirs`/program name to log with.
+#[cfg(target_os = "macos")]
+fn log_if_still_alive_after_kill(reaped: io::Result<()>, dirs: &Dirs, program: &str) {
+    if let Err(err) = reaped {
+        crate::platform::logging::log_line(
+            dirs,
+            &format!("{program}: gave up reaping the killed process: {err}"),
+        );
     }
 }
 
@@ -316,7 +375,7 @@ fn watch_and_report<W: Waitable>(
     program: &str,
     on_outcome: AsyncOutcomeHandler,
 ) {
-    let outcome = watch(waitable, deadline, poll_interval);
+    let outcome = watch(waitable, deadline, poll_interval, dirs, program);
     match outcome {
         LaunchOutcome::Succeeded => {}
         LaunchOutcome::DefiniteFailure => {
@@ -414,6 +473,62 @@ mod macos_tests {
             kill_called: Arc::new(AtomicBool::new(false)),
             reaped: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    // --- `reap_within`: the bound behind `kill_and_reap`, tested
+    // directly with a short bound instead of the real 5s constant, so
+    // this never sleeps more than a few tens of milliseconds. ---
+
+    #[test]
+    fn reap_within_succeeds_as_soon_as_try_wait_reports_exited() {
+        let mut w = waitable(vec![Step::Exited(exit_status(0))]);
+        assert!(reap_within(&mut w, Duration::from_secs(5), Duration::from_millis(5)).is_ok());
+    }
+
+    #[test]
+    fn reap_within_gives_up_rather_than_blocking_forever() {
+        let mut w = waitable(vec![]); // always "still running"
+        let result = reap_within(&mut w, Duration::from_millis(30), Duration::from_millis(5));
+        assert!(
+            result.is_err(),
+            "must give up once the bound elapses, not hang"
+        );
+    }
+
+    /// Never exits and its `kill_and_reap` always gives up — stands in
+    /// for a process whose `kill(2)` never takes, so `watch` (not
+    /// `reap_within`, which this bypasses) must still terminate and log
+    /// it rather than hang the worker thread forever.
+    struct NeverReapsWaitable;
+
+    impl Waitable for NeverReapsWaitable {
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            Ok(None)
+        }
+
+        fn kill_and_reap(&mut self) -> io::Result<()> {
+            Err(io::Error::other("still alive"))
+        }
+    }
+
+    #[test]
+    fn watch_logs_and_still_terminates_when_kill_and_reap_gives_up() {
+        let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dirs = test_dirs();
+        watch_and_report(
+            NeverReapsWaitable,
+            Duration::from_millis(20),
+            Duration::from_millis(5),
+            &dirs,
+            "fake-open",
+            record_outcome(outcomes.clone()),
+        );
+        assert_eq!(*outcomes.lock().unwrap(), vec![LaunchOutcome::Unconfirmed]);
+        let log = std::fs::read_to_string(dirs.log_path()).unwrap_or_default();
+        assert!(
+            log.contains("gave up reaping the killed process"),
+            "log: {log}"
+        );
     }
 
     #[test]
