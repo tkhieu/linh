@@ -9,6 +9,13 @@ on:
         description: Build and upload artifacts without creating a GitHub Release
         type: boolean
         default: true
+      skip_signing:
+        description: >-
+          Force an unsigned build to prove the no-secrets path, even though
+          signing secrets are configured. Only honored together with
+          dry_run=true; ignored otherwise.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -38,8 +45,34 @@ jobs:
           version="$(python3 scripts/check-release-version.py | sed -n 's/^VERSION=//p')"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+  signing:
+    runs-on: ubuntu-24.04
+    outputs:
+      sign: ${{ steps.policy.outputs.sign }}
+    steps:
+      - name: Resolve updater signing policy
+        id: policy
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" == "true" && "${{ inputs.skip_signing }}" == "true" ]]; then
+            echo "::notice::skip_signing=true on a dry run; forcing an unsigned build to prove the no-secrets path."
+            echo "sign=false" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$TAURI_SIGNING_PRIVATE_KEY" && -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]]; then
+            echo "sign=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" == "true" ]]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY/_PASSWORD are not set; this dry run will skip signing updater artifacts."
+            echo "sign=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD are required to sign updater artifacts for a release." >&2
+            exit 1
+          fi
+
   build:
-    needs: version
+    needs: [version, signing]
     strategy:
       fail-fast: false
       matrix:
@@ -48,24 +81,32 @@ jobs:
             os: ubuntu-latest
             container: fedora:44
             artifact: linh-fedora-rpm
-            files: target/release/bundle/rpm/*.rpm
+            files: |
+              target/release/bundle/rpm/*.rpm
+              target/release/bundle/rpm/*.rpm.sig
           - platform: ubuntu
             os: ubuntu-24.04
             container: ''
             artifact: linh-ubuntu-deb
-            files: target/release/bundle/deb/*.deb
+            files: |
+              target/release/bundle/deb/*.deb
+              target/release/bundle/deb/*.deb.sig
           - platform: windows
             os: windows-latest
             container: ''
             artifact: linh-windows
             files: |
               target/release/bundle/nsis/*.exe
+              target/release/bundle/nsis/*.exe.sig
               target/release/msix/*.msix
           - platform: macos
             os: macos-15
             container: ''
             artifact: linh-macos-universal-dmg
-            files: target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            files: |
+              target/universal-apple-darwin/release/bundle/dmg/*.dmg
+              target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+              target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     steps:
@@ -131,6 +172,25 @@ jobs:
           key: release-cargo-${{ matrix.platform }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: release-cargo-${{ matrix.platform }}-
 
+      - name: Remove stale bundle outputs from a previous cached run
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The cache above restores the whole `target` tree, including any
+          # installer, `.sig`, or macOS `.app.tar.gz` a previous (possibly
+          # signed, possibly older-version) run left behind. Wipe every
+          # output directory this job's build and upload steps touch before
+          # building, so a stale signature or a stale older-version bundle
+          # can never ride along with a fresh, unsigned, or differently
+          # versioned build.
+          rm -rf \
+            target/release/bundle/rpm \
+            target/release/bundle/deb \
+            target/release/bundle/nsis \
+            target/release/msix \
+            target/universal-apple-darwin/release/bundle/dmg \
+            target/universal-apple-darwin/release/bundle/macos
+
       - name: Install UI dependencies
         run: pnpm --dir ui install --frozen-lockfile
 
@@ -144,12 +204,26 @@ jobs:
           rm -rf ../target/release/bundle
           cargo tauri build --bundles rpm
 
+      - name: Sign updater RPM
+        if: matrix.platform == 'fedora' && needs.signing.outputs.sign == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cargo tauri signer sign --app-version "${{ needs.version.outputs.version }}" target/release/bundle/rpm/*.rpm
+
       - name: Build Ubuntu DEB
         if: matrix.platform == 'ubuntu'
         working-directory: src-tauri
         run: |
           rm -rf ../target/release/bundle/deb
           cargo tauri build --bundles deb
+
+      - name: Sign updater DEB
+        if: matrix.platform == 'ubuntu' && needs.signing.outputs.sign == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cargo tauri signer sign --app-version "${{ needs.version.outputs.version }}" target/release/bundle/deb/*.deb
 
       - name: Build unsigned Windows NSIS installer
         if: matrix.platform == 'windows'
@@ -166,7 +240,7 @@ jobs:
           MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
         run: ./scripts/package-msix.ps1
 
-      - name: Build macOS universal DMG
+      - name: Build macOS universal DMG and app bundle
         if: matrix.platform == 'macos'
         shell: bash
         working-directory: src-tauri
@@ -188,7 +262,24 @@ jobs:
             unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY
             unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
           fi
-          cargo tauri build --bundles dmg --target universal-apple-darwin
+          cargo tauri build --bundles dmg,app --target universal-apple-darwin
+
+      - name: Package macOS updater archive
+        if: matrix.platform == 'macos'
+        working-directory: target/universal-apple-darwin/release/bundle/macos
+        run: |
+          set -euo pipefail
+          app="$(ls -d -- *.app)"
+          tar -czf "${app}.tar.gz" "$app"
+
+      - name: Sign updater macOS app archive
+        if: matrix.platform == 'macos' && needs.signing.outputs.sign == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: >-
+          cargo tauri signer sign --app-version "${{ needs.version.outputs.version }}"
+          target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
 
       - name: Verify Windows outputs exist
         if: matrix.platform == 'windows'
@@ -196,6 +287,14 @@ jobs:
         run: |
           if (-not (Get-ChildItem target/release/bundle/nsis/*.exe)) { throw 'NSIS installer missing' }
           if (-not (Get-ChildItem target/release/msix/*.msix)) { throw 'MSIX package missing' }
+
+      - name: Sign updater NSIS installer
+        if: matrix.platform == 'windows' && needs.signing.outputs.sign == 'true'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cargo tauri signer sign --app-version "${{ needs.version.outputs.version }}" target/release/bundle/nsis/*.exe
 
       - name: Upload installer artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
@@ -205,7 +304,7 @@ jobs:
           if-no-files-found: error
 
   assets:
-    needs: [version, build]
+    needs: [version, signing, build]
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -219,7 +318,9 @@ jobs:
           merge-multiple: true
 
       - name: Prepare release assets and SHA256SUMS
-        run: python3 scripts/prepare-release-artifacts.py dist release-assets
+        run: >-
+          python3 scripts/prepare-release-artifacts.py dist release-assets
+          ${{ needs.signing.outputs.sign != 'true' && '--unsigned' || '' }}
 
       - name: Verify checksums
         shell: bash
