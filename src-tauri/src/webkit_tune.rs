@@ -17,26 +17,50 @@
 //!   during `init()`, see <https://github.com/gtk-rs/gtk-rs-core/issues/186>,
 //!   interacting badly with Tauri's own later init on the same context) —
 //!   not worth it for a few MB on a process that's already small at idle.
-//! - `WEBKIT_DISABLE_COMPOSITING_MODE=1` (forcing WebKitGTK 2.54's Skia
-//!   backend onto its CPU rasterizer instead of its GPU-accelerated one)
-//!   and `WEBKIT_DISABLE_DMABUF_RENDERER=1` (disabling only its DMA-BUF
-//!   import path, with compositing itself left on) were both tried, as
-//!   a way to cut `WebKitWebProcess` memory. Both corrupt the link
-//!   picker on GNOME 50 Wayland with WebKitGTK 2.54.2, confirmed by two
-//!   separate owner tests against the owner's screen recording of
-//!   v0.3.1 on Fedora 44 (mutter 50.6): with
-//!   `WEBKIT_DISABLE_COMPOSITING_MODE=1` set, the transparent,
-//!   undecorated link picker window (`ui/src/prompt/PromptApp.tsx`)
-//!   broke up over several seconds while the user moved between rows —
-//!   header/footer vanishing, the row list splitting into separate
-//!   floating boxes with the desktop visible between them. Re-running
-//!   with `WEBKIT_DISABLE_COMPOSITING_MODE=0` (compositing back on) but
-//!   `WEBKIT_DISABLE_DMABUF_RENDERER=1` still showed the exact same
-//!   corruption, so the DMA-BUF var alone isn't safe either — only with
-//!   *both* vars forced to `0` (i.e. neither one set) did the picker
-//!   paint correctly every time. [`configure_before_tauri`] therefore
-//!   sets neither var any more, and the ~30-40MB tkhieu/linh#25 measured
-//!   from them is withdrawn entirely.
+//! - `WEBKIT_DISABLE_COMPOSITING_MODE=1` and `WEBKIT_DISABLE_DMABUF_RENDERER=1`
+//!   were tried together as a way to cut `WebKitWebProcess` memory by
+//!   forcing WebKitGTK 2.54's Skia backend onto its CPU rasterizer
+//!   instead of its GPU-accelerated one. On WebKitGTK 2.54.2 the two
+//!   vars aren't independent switches: `AcceleratedBackingStore::rendererBufferTransportMode()`
+//!   treats `WEBKIT_DISABLE_DMABUF_RENDERER=1` as "no renderer buffer
+//!   transport available at all" and returns an empty set without even
+//!   probing EGL
+//!   (<https://github.com/WebKit/WebKit/blob/webkitgtk-2.54.2/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.cpp#L86-L88>),
+//!   which makes `AcceleratedBackingStore::canUseHardwareAcceleration()`
+//!   report `false`
+//!   (<https://github.com/WebKit/WebKit/blob/webkitgtk-2.54.2/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.cpp#L139-L144>).
+//!   `HardwareAccelerationManager`'s constructor checks that first and,
+//!   if hardware acceleration can't be used at all, forces
+//!   `m_acceleratedCompositingModeEnabled = false` unconditionally —
+//!   `WEBKIT_DISABLE_COMPOSITING_MODE` is only even read in the `else`
+//!   branch, once hardware acceleration is already available
+//!   (<https://github.com/WebKit/WebKit/blob/webkitgtk-2.54.2/Source/WebKit/UIProcess/gtk/HardwareAccelerationManager.cpp#L42-L47>).
+//!   So on 2.54.2, *either* var disables accelerated compositing
+//!   outright; there's no combination that disables only DMA-BUF import
+//!   while leaving compositing itself on. Two separate owner tests
+//!   against the owner's screen recording of v0.3.1 on Fedora 44/GNOME
+//!   50 Wayland (mutter 50.6) confirmed the picker breaks without
+//!   accelerated compositing either way: with
+//!   `WEBKIT_DISABLE_COMPOSITING_MODE=1` set, and again with
+//!   `WEBKIT_DISABLE_COMPOSITING_MODE=0`/`WEBKIT_DISABLE_DMABUF_RENDERER=1`
+//!   — both left the transparent, undecorated link picker window
+//!   (`ui/src/prompt/PromptApp.tsx`) breaking up over several seconds
+//!   while the user moved between rows: header/footer vanishing, the
+//!   row list splitting into separate floating boxes with the desktop
+//!   visible between them. The passing test set both vars to `0`
+//!   explicitly; that's equivalent to leaving both unset, not a third
+//!   state — `rendererBufferTransportMode()`'s DMA-BUF check only skips
+//!   probing EGL when the var is present *and* not equal to `"0"`
+//!   (`disableDMABuf && g_strcmp0(disableDMABuf, "0")` at the line above),
+//!   so `"0"` and absent take the same path, and
+//!   `m_acceleratedCompositingModeEnabled`/`m_canUseHardwareAcceleration`
+//!   both default to `true` in
+//!   [`HardwareAccelerationManager.h`](https://github.com/WebKit/WebKit/blob/webkitgtk-2.54.2/Source/WebKit/UIProcess/gtk/HardwareAccelerationManager.h#L44-L45),
+//!   the same value an explicit `WEBKIT_DISABLE_COMPOSITING_MODE=0`
+//!   produces. [`configure_before_tauri`] therefore just leaves both
+//!   vars unset — Linh no longer manages them in either direction — and
+//!   the ~30-40MB tkhieu/linh#25 measured from forcing them is withdrawn
+//!   entirely.
 //!
 //! What's left, confirmed against `/usr/share/gir-1.0/WebKit2-4.1.gir`
 //! (the installed WebKitGTK 2.54.2's own API docs):

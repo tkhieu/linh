@@ -200,17 +200,27 @@ Two further candidates were tried and dropped:
   `WEBKIT_DISABLE_COMPOSITING_MODE` and `WEBKIT_DISABLE_DMABUF_RENDERER`,
   forced before Tauri launches its first `WebKitWebProcess` to save
   ~30-40MB by moving WebKitGTK 2.54's Skia backend onto its CPU
-  rasterizer. Two separate owner tests on Fedora 44/GNOME 50 Wayland
-  (mutter 50.6, WebKitGTK 2.54.2), against the owner's screen recording
-  of v0.3.1, showed corrupted repaints of the transparent, undecorated
-  link picker (header/footer vanishing, the row list splitting into
-  floating boxes with the desktop visible between them) while moving
-  between rows: first with `WEBKIT_DISABLE_COMPOSITING_MODE=1` set, then
-  again with only `WEBKIT_DISABLE_COMPOSITING_MODE=0` and
-  `WEBKIT_DISABLE_DMABUF_RENDERER=1`. Only with both vars forced to `0`
-  did the picker paint correctly every time, so neither is set any more
+  rasterizer. On the installed WebKitGTK 2.54.2 the two vars aren't
+  independent: setting `WEBKIT_DISABLE_DMABUF_RENDERER=1` alone makes
+  `AcceleratedBackingStore::canUseHardwareAcceleration()` report `false`
+  (its renderer-buffer-transport probe short-circuits to empty), which
+  makes `HardwareAccelerationManager` disable accelerated compositing
+  outright *without even reading* `WEBKIT_DISABLE_COMPOSITING_MODE` —
+  so either var alone turns compositing off on this version; see
+  `webkit_tune.rs`'s doc comment for the exact source lines. Two
+  separate owner tests on Fedora 44/GNOME 50 Wayland (mutter 50.6,
+  WebKitGTK 2.54.2), against the owner's screen recording of v0.3.1,
+  showed corrupted repaints of the transparent, undecorated link picker
+  (header/footer vanishing, the row list splitting into floating boxes
+  with the desktop visible between them) while moving between rows:
+  first with `WEBKIT_DISABLE_COMPOSITING_MODE=1` set, then again with
+  only `WEBKIT_DISABLE_COMPOSITING_MODE=0` and
+  `WEBKIT_DISABLE_DMABUF_RENDERER=1` — both ended up with accelerated
+  compositing off. The passing test set both vars to `0` explicitly,
+  which 2.54.2's own var parsing treats the same as leaving both unset
+  (confirmed against the source), so Linh now simply leaves both unset
   and this saving is withdrawn entirely. See `webkit_tune.rs`'s doc
-  comment for the full writeup.
+  comment for the full writeup and source citations.
 - Tuning the `WebKitNetworkProcess`'s own memory-pressure thresholds via
   `webkit_website_data_manager_set_memory_pressure_settings()`: it must
   run before Tauri builds its first `WebKitWebsiteDataManager`, which
