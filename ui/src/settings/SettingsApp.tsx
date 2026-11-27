@@ -6,6 +6,7 @@ import { deriveTargets, isAppTarget, targetKey, visibleTargets } from '../target
 import type { BrowserTarget } from '../targets'
 import { parseTraceUrl, resolveAppTarget, traceRoute } from '../routing'
 import type { AppAvailability, AppDecision, Trace } from '../routing'
+import { UpdatesTab } from './UpdatesTab'
 
 interface RuleDraft {
   index: number | null
@@ -107,7 +108,7 @@ export function SettingsApp() {
   const [busy, setBusy] = useState(false)
   const [rescanning, setRescanning] = useState(false)
   const [draft, setDraft] = useState<RuleDraft | null>(null)
-  const [section, setSection] = useState<'general' | 'browsers' | 'rules'>('general')
+  const [section, setSection] = useState<'general' | 'browsers' | 'rules' | 'updates'>('general')
   const [presets, setPresets] = useState<Preset[]>([])
   const [presetsStatus, setPresetsStatus] = useState<PresetsStatus>('loading')
   const [presetMenu, setPresetMenu] = useState(false)
@@ -314,7 +315,7 @@ export function SettingsApp() {
       <div className="settings-topbar">
         <div className="settings-logo"><strong>LINH</strong><span>/ link dispatch</span></div>
         <nav className="settings-tabs" aria-label="Settings sections">
-          {(['general', 'browsers', 'rules'] as const).map((item) =>
+          {(['general', 'browsers', 'rules', 'updates'] as const).map((item) =>
             <button key={item} type="button" aria-current={section === item ? 'page' : undefined} onClick={() => setSection(item)}>
               {section === item && <span className="nav-pip" aria-hidden="true" />}
               {item[0].toUpperCase() + item.slice(1)}
@@ -478,9 +479,14 @@ export function SettingsApp() {
               <div className="editor-actions"><button type="button" className="primary-action" onClick={commitRule}>Save rule</button><button type="button" className="secondary" onClick={() => setDraft(null)}>Cancel</button></div>
             </div>}
           </>}
+          {section === 'updates' && <UpdatesTab
+            checkAutomatically={config.check_for_updates}
+            onCheckAutomaticallyChange={(value) => updateConfig({ check_for_updates: value })}
+          />}
         </div>
-        <SidePanel section={section} config={config} caps={caps} targets={targets} primaryLabel={primaryLabel} visible={visible}
+        {section !== 'updates' && <SidePanel section={section} config={config} caps={caps} targets={targets} primaryLabel={primaryLabel} visible={visible}
           installedApps={installedApps} presetsStatus={presetsStatus} traceInput={traceInput} onTraceInputChange={setTraceInput} />
+        }
       </div>}
       <footer className="settings-footer"><button type="button" className="primary-action" disabled={busy} onClick={() => void save()}>Save settings</button>{saved && <span role="status">Settings saved.</span>}</footer>
     </main>
