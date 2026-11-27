@@ -8,7 +8,7 @@
 //! `check_now`, `install_update`) is the thin, untested part that calls
 //! the plugin and feeds its result through those functions.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
@@ -148,11 +148,23 @@ fn expected_exe_path(
         UpdateKind::Rpm | UpdateKind::Deb => Some(PathBuf::from("/usr/bin/linh")),
         // NSIS (Windows): tauri-bundler's NSIS template writes its
         // install directory to `InstallLocation` under the uninstall
-        // registry key it creates for the app (tauri-bundler 2.10.4
-        // `src/bundle/windows/nsis/installer.nsi:67,750`). See
-        // `nsis_install_location` for the hive/key-name details, which
-        // were not independently verified against a real install.
-        UpdateKind::Nsis => nsis_install_location().map(|dir| dir.join("linh.exe")),
+        // registry key it creates for the app, as the literal path
+        // wrapped in quote characters (tauri-bundler 2.10.4
+        // `src/bundle/windows/nsis/installer.nsi:67,750`; see
+        // `nsis_install_location`/`strip_surrounding_quotes`). The
+        // binary name matches `tauri.conf.json`'s bin target, `linh`.
+        //
+        // Joined with a literal `\` (not `PathBuf::join`, which would
+        // use `/` when this is compiled for a non-Windows test host)
+        // so the result is a genuine Windows path regardless of host:
+        // `paths_equal_windows_style` below is pure string logic and
+        // runs (and is tested) on every host, not only a real Windows
+        // build.
+        UpdateKind::Nsis => nsis_install_location().map(|dir| {
+            let dir = dir.to_string_lossy();
+            let dir = dir.trim_end_matches(['\\', '/']);
+            PathBuf::from(format!(r"{dir}\linh.exe"))
+        }),
         UpdateKind::Msix | UpdateKind::MacApp | UpdateKind::Dev => None,
     }
 }
@@ -171,7 +183,7 @@ fn expected_exe_path(
 fn nsis_install_location() -> Option<PathBuf> {
     use crate::platform::windows::registry;
     const UNINSTALL_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\linh";
-    registry::read_string(
+    let raw = registry::read_string(
         &registry::current_user(),
         UNINSTALL_SUBKEY,
         "InstallLocation",
@@ -182,8 +194,8 @@ fn nsis_install_location() -> Option<PathBuf> {
             UNINSTALL_SUBKEY,
             "InstallLocation",
         )
-    })
-    .map(PathBuf::from)
+    })?;
+    Some(PathBuf::from(strip_surrounding_quotes(&raw)))
 }
 
 /// Never actually called off Windows: [`UpdateKind::Nsis`] is never
@@ -192,6 +204,26 @@ fn nsis_install_location() -> Option<PathBuf> {
 #[cfg(not(target_os = "windows"))]
 fn nsis_install_location() -> Option<PathBuf> {
     None
+}
+
+/// Strips surrounding whitespace and, if present, one pair of
+/// surrounding double quotes. tauri-bundler 2.10.4's NSIS template
+/// writes `InstallLocation` as `WriteRegStr ... "InstallLocation"
+/// "$\"$INSTDIR$\""` (`installer.nsi:750`) — i.e. the stored value is
+/// the path *with literal quote characters around it*, not a plain
+/// path string.
+///
+/// Only ever called from [`nsis_install_location`]'s Windows build —
+/// `#[cfg(any(target_os = "windows", test))]` so it (and its own tests)
+/// still compile on every other host instead of tripping `dead_code`
+/// there.
+#[cfg(any(target_os = "windows", test))]
+fn strip_surrounding_quotes(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(trimmed)
 }
 
 /// Whether the running binary is at the path [`expected_exe_path`] says
@@ -233,7 +265,41 @@ fn exe_matches_expected_install_with(
     let Some(expected) = expected_exe_path(kind, nsis_install_location) else {
         return false;
     };
-    current_exe().map(|path| path == expected).unwrap_or(false)
+    let Ok(actual) = current_exe() else {
+        return false;
+    };
+    if kind == UpdateKind::Nsis {
+        paths_equal_windows_style(&actual, &expected)
+    } else {
+        actual == expected
+    }
+}
+
+/// Compares two paths the way Windows itself would treat them as "the
+/// same path", which a plain `PathBuf` equality does not:
+/// case-insensitively (NTFS and the shell are case-insensitive; a
+/// registry-recorded `InstallLocation` need not match `current_exe()`'s
+/// own casing), and after stripping either side's `\\?\` ("verbatim")
+/// prefix — which `Path::canonicalize()` adds on Windows but a plain
+/// `InstallLocation` registry value never has, so without stripping it
+/// a genuine install's own exe would never match itself.
+fn paths_equal_windows_style(a: &Path, b: &Path) -> bool {
+    strip_verbatim_prefix(a).to_string_lossy().to_lowercase()
+        == strip_verbatim_prefix(b).to_string_lossy().to_lowercase()
+}
+
+/// Strips a leading `\\?\` (or `\\?\UNC\`) verbatim-path prefix, if
+/// present; returns `path` unchanged otherwise. `\\?\UNC\server\share`
+/// becomes `\\server\share`; `\\?\C:\x` becomes `C:\x`.
+fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
 }
 
 /// The first background check happens shortly after startup rather than
@@ -769,9 +835,10 @@ pub fn open_release_page(state: &AppState) -> Result<(), String> {
 /// then takes a while (or fails) must not make the very next tick see
 /// `is_due` go true again, which is what actually keeps this from
 /// becoming a retry storm, not anything about the check's own outcome.
-/// `check_enabled` is still asked even when `schedule` says a check
-/// isn't due, so a disabled toggle never consumes a due check it didn't
-/// actually run — it's still due the moment the toggle comes back on.
+/// `check_enabled` is only consulted once a check is actually due — a
+/// disabled toggle is never asked about, and so never gets the chance to
+/// consume a due check it didn't actually run; it's still due the
+/// moment the toggle comes back on.
 ///
 /// Takes `schedule`/`now`/`check_enabled` as parameters (rather than
 /// reading `state.updates.schedule`/`Instant::now()`/`state.config`
@@ -1013,16 +1080,12 @@ mod tests {
         ));
     }
 
-    // Windows-only: `PathBuf`'s `\`-separator join/comparison semantics
-    // (which these two rely on to build "install dir + file name") only
-    // apply when actually compiled for a Windows target — on a Linux or
-    // macOS test host a backslash is just an ordinary path-component
-    // character, not a separator, so the join wouldn't produce the path
-    // either side actually means. The behavior this exercises is itself
-    // already `#[cfg(target_os = "windows")]`-only in production (see
-    // `nsis_install_location`).
+    // These all route through `paths_equal_windows_style`, which is pure
+    // string logic keyed on `kind == Nsis` rather than the *host's*
+    // target OS — so, unlike an actual registry read, they run (and are
+    // meaningful) on every test host, not only a real Windows build.
+
     #[test]
-    #[cfg(target_os = "windows")]
     fn nsis_exe_inside_the_registered_install_location_matches() {
         assert!(exe_matches_expected_install_with(
             UpdateKind::Nsis,
@@ -1032,7 +1095,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "windows")]
     fn nsis_exe_outside_the_registered_install_location_does_not_match() {
         assert!(!exe_matches_expected_install_with(
             UpdateKind::Nsis,
@@ -1050,6 +1112,78 @@ mod tests {
             || Ok(PathBuf::from(r"C:\Users\user\AppData\Local\linh\linh.exe")),
             || None
         ));
+    }
+
+    #[test]
+    fn nsis_install_location_with_the_literal_quotes_tauri_bundler_writes_still_matches() {
+        // `nsis_install_location` strips these before `expected_exe_path`
+        // ever sees the value (see `strip_surrounding_quotes`'s own
+        // tests); this exercises the *comparison* with a value as if
+        // that stripping had already produced a plain path, same as it
+        // would for a genuine install.
+        assert!(exe_matches_expected_install_with(
+            UpdateKind::Nsis,
+            || Ok(PathBuf::from(r"C:\Users\user\AppData\Local\linh\linh.exe")),
+            || Some(PathBuf::from(strip_surrounding_quotes(
+                r#""C:\Users\user\AppData\Local\linh""#
+            )))
+        ));
+    }
+
+    #[test]
+    fn nsis_matches_despite_a_verbatim_prefixed_current_exe() {
+        // `Path::canonicalize()` (what `exe_matches_expected_install`'s
+        // real `current_exe` closure uses) adds a `\\?\` prefix on
+        // Windows; a plain registry `InstallLocation` value never has
+        // one. Without stripping it, a genuine install's own exe would
+        // never match itself.
+        assert!(exe_matches_expected_install_with(
+            UpdateKind::Nsis,
+            || Ok(PathBuf::from(
+                r"\\?\C:\Users\user\AppData\Local\linh\linh.exe"
+            )),
+            || Some(PathBuf::from(r"C:\Users\user\AppData\Local\linh"))
+        ));
+    }
+
+    #[test]
+    fn nsis_matches_despite_differing_case() {
+        // NTFS and the shell are case-insensitive; a registry-recorded
+        // `InstallLocation` need not match `current_exe()`'s own casing.
+        assert!(exe_matches_expected_install_with(
+            UpdateKind::Nsis,
+            || Ok(PathBuf::from(r"C:\USERS\user\APPDATA\Local\LINH\Linh.EXE")),
+            || Some(PathBuf::from(r"C:\Users\user\AppData\Local\linh"))
+        ));
+    }
+
+    #[test]
+    fn nsis_rejects_a_genuinely_different_directory_even_with_a_verbatim_prefix_and_case_difference(
+    ) {
+        // The tolerance added for the verbatim prefix and case must not
+        // widen into tolerating an actually different install — this
+        // combines both quirks with a real mismatch to prove that.
+        assert!(!exe_matches_expected_install_with(
+            UpdateKind::Nsis,
+            || Ok(PathBuf::from(r"\\?\C:\Users\user\DOWNLOADS\linh.exe")),
+            || Some(PathBuf::from(r"C:\Users\user\AppData\Local\linh"))
+        ));
+    }
+
+    #[test]
+    fn strip_surrounding_quotes_removes_one_pair_and_trims_whitespace() {
+        assert_eq!(
+            strip_surrounding_quotes(r#"  "C:\Program Files\linh"  "#),
+            r"C:\Program Files\linh"
+        );
+    }
+
+    #[test]
+    fn strip_surrounding_quotes_leaves_an_unquoted_value_unchanged() {
+        assert_eq!(
+            strip_surrounding_quotes(r"C:\Program Files\linh"),
+            r"C:\Program Files\linh"
+        );
     }
 
     #[test]
