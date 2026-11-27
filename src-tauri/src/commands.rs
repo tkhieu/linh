@@ -159,11 +159,20 @@ pub async fn check_for_updates_now(
     updates::check_now(&app, &state).await
 }
 
-/// Installs the update found by the most recent check. Only valid when
+/// Installs the update, but only if it is still exactly `version` — the
+/// version the UI last showed the user via `get_update_status`/
+/// `check_for_updates_now`, not just whatever a fresh check happens to
+/// find when this runs. A mismatch is refused (an `Err`), so the UI can
+/// re-check and re-prompt instead of installing a release the user
+/// never actually approved. Only valid when
 /// `get_update_status().capability` is `"self_install"`.
 #[tauri::command]
-pub async fn install_update(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    updates::install_update(&app, &state).await
+pub async fn install_update(
+    version: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    updates::install_update(&app, &state, &version).await
 }
 
 /// Opens the release page in the primary browser, for installs whose

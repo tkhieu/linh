@@ -32,4 +32,9 @@ impl Dirs {
     pub fn log_path(&self) -> PathBuf {
         self.state_home.join("linh.log")
     }
+
+    /// The persisted update-notification state (see `crate::updates`).
+    pub fn updates_state_path(&self) -> PathBuf {
+        self.state_home.join("updates.json")
+    }
 }

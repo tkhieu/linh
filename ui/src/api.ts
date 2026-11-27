@@ -149,8 +149,9 @@ export function checkForUpdatesNow(): Promise<AvailableUpdate | null> {
   return invoke('check_for_updates_now')
 }
 
-export function installUpdate(): Promise<void> {
-  return invoke('install_update')
+/** `version` must be the version last shown by `getUpdateStatus`/`checkForUpdatesNow`; a mismatch (e.g. a newer release appeared) is refused so the caller can re-check and re-prompt instead. */
+export function installUpdate(version: string): Promise<void> {
+  return invoke('install_update', { version })
 }
 
 export function openReleasePage(): Promise<void> {

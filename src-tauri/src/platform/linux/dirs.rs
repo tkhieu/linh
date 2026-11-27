@@ -96,6 +96,12 @@ impl Dirs {
     pub fn log_path(&self) -> PathBuf {
         self.state_home.join("linh").join("linh.log")
     }
+
+    /// `~/.local/state/linh/updates.json` (XDG_STATE_HOME aware): the
+    /// persisted update-notification state (see `crate::updates`).
+    pub fn updates_state_path(&self) -> PathBuf {
+        self.state_home.join("linh").join("updates.json")
+    }
 }
 
 /// Returns `Some(path)` only when `val` is set, non-empty, and an
