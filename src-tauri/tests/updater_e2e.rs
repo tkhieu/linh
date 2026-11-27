@@ -7,6 +7,16 @@
 //! rest of the suite; run explicitly with
 //! `cargo test --test updater_e2e -- --ignored`. Phase 5 (CI) is where
 //! this runs on every build, per the plan.
+//!
+//! Windows-only: this test binary links `tauri`/`wry` (via
+//! `tauri::test::mock_app`) but, unlike `src/main.rs`, carries no
+//! application manifest requesting comctl32 v6 — so on Windows the
+//! executable itself fails to start (`STATUS_ENTRYPOINT_NOT_FOUND`,
+//! missing `TaskDialogIndirect`) before any test, `#[ignore]`d or not,
+//! ever runs. Compiled only on non-Windows until that's worth fixing
+//! (phase 5's CI matrix only needs Linux/macOS/Windows package installs,
+//! not this file).
+#![cfg(not(windows))]
 
 use base64::Engine;
 use tauri_plugin_updater::UpdaterExt;
