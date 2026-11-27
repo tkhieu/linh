@@ -9,6 +9,13 @@ on:
         description: Build and upload artifacts without creating a GitHub Release
         type: boolean
         default: true
+      skip_signing:
+        description: >-
+          Force an unsigned build to prove the no-secrets path, even though
+          signing secrets are configured. Only honored together with
+          dry_run=true; ignored otherwise.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -51,7 +58,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          if [[ -n "$TAURI_SIGNING_PRIVATE_KEY" && -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]]; then
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" == "true" && "${{ inputs.skip_signing }}" == "true" ]]; then
+            echo "::notice::skip_signing=true on a dry run; forcing an unsigned build to prove the no-secrets path."
+            echo "sign=false" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$TAURI_SIGNING_PRIVATE_KEY" && -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]]; then
             echo "sign=true" >> "$GITHUB_OUTPUT"
           elif [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" == "true" ]]; then
             echo "::warning::TAURI_SIGNING_PRIVATE_KEY/_PASSWORD are not set; this dry run will skip signing updater artifacts."
@@ -161,6 +171,25 @@ jobs:
             target
           key: release-cargo-${{ matrix.platform }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: release-cargo-${{ matrix.platform }}-
+
+      - name: Remove stale bundle outputs from a previous cached run
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The cache above restores the whole `target` tree, including any
+          # installer, `.sig`, or macOS `.app.tar.gz` a previous (possibly
+          # signed, possibly older-version) run left behind. Wipe every
+          # output directory this job's build and upload steps touch before
+          # building, so a stale signature or a stale older-version bundle
+          # can never ride along with a fresh, unsigned, or differently
+          # versioned build.
+          rm -rf \
+            target/release/bundle/rpm \
+            target/release/bundle/deb \
+            target/release/bundle/nsis \
+            target/release/msix \
+            target/universal-apple-darwin/release/bundle/dmg \
+            target/universal-apple-darwin/release/bundle/macos
 
       - name: Install UI dependencies
         run: pnpm --dir ui install --frozen-lockfile

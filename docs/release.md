@@ -17,6 +17,11 @@ artifact is for Partner Center submission, not direct installation.
    build jobs and the complete `linh-release-assets` artifact, including
    `SHA256SUMS`. Dry runs create no GitHub Release. The initial PR
    can use a temporary pull request trigger for verification before merge.
+   `workflow_dispatch` also takes `skip_signing` (default `false`), honored
+   only together with `dry_run=true`: it forces an unsigned build even
+   though the signing secrets are configured, so the no-secrets path (the
+   one a fork without the secrets actually takes) gets exercised on demand
+   without having to remove the repository's own secrets to test it.
 3. Merge the change, then push the `vMAJOR.MINOR.PATCH` tag. The tag build
    creates a **draft** GitHub Release with `.rpm`, `.deb`, unsigned NSIS `.exe`,
    Store `.msix`, universal macOS `.dmg`, the macOS updater archive
