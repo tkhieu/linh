@@ -15,5 +15,5 @@ export const work: Target = { browser: 'chrome', profile: 'Profile 1', private: 
 
 export const config: Config = {
   primary: { browser: 'firefox', private: false },
-  prompt_mode: 'never', shown_browsers: [], rules: [],
+  prompt_mode: 'never', shown_browsers: [], rules: [], check_for_updates: true,
 }

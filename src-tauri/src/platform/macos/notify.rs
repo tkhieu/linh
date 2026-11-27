@@ -30,6 +30,17 @@ const OSASCRIPT_TIMEOUT: Duration = Duration::from_secs(10);
 const OSASCRIPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub fn notify_error(dirs: &Dirs, summary: &str, body: &str) {
+    send(dirs, summary, body);
+}
+
+/// Shows a desktop notification for routine information the user should
+/// know about but that isn't an error, such as an available update. Same
+/// delivery and fallback as [`notify_error`].
+pub fn notify_info(dirs: &Dirs, summary: &str, body: &str) {
+    send(dirs, summary, body);
+}
+
+fn send(dirs: &Dirs, summary: &str, body: &str) {
     let sent = Command::new(OSASCRIPT)
         .arg("-e")
         .arg(DISPLAY_NOTIFICATION_SCRIPT)

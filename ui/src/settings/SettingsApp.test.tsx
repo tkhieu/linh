@@ -123,7 +123,7 @@ describe('SettingsApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete Other' }))
     fireEvent.click(screen.getByRole('button', { name: 'Save settings' }))
     await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith({
-      primary: work, prompt_mode: 'always', shown_browsers: [targetKey(work)],
+      primary: work, prompt_mode: 'always', shown_browsers: [targetKey(work)], check_for_updates: true,
       rules: [{ name: 'Meetings', match: ['meet.google.com', '*.company.com'], open_in: work }],
     }))
     await waitFor(() => expect(api.getConfig).toHaveBeenCalledTimes(2))

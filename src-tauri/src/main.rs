@@ -9,6 +9,7 @@ mod routing;
 mod settings_window;
 mod state;
 mod tray;
+mod updates;
 mod webkit_tune;
 
 use std::sync::Mutex;
@@ -154,6 +155,7 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             let state = AppState::init();
             app.manage(state);
@@ -231,6 +233,8 @@ fn main() {
 
             mem_profile::spawn_if_enabled(&app_handle, state_handle.dirs.clone());
 
+            tauri::async_runtime::spawn(updates::run_scheduler(app_handle.clone()));
+
             // First launch: an http(s) URL in argv is routed immediately
             // (no window shown, Linh stays resident in the tray);
             // otherwise the settings window is created (first time) or
@@ -265,6 +269,10 @@ fn main() {
             commands::prompt_cancel,
             commands::list_presets,
             commands::get_icon,
+            commands::get_update_status,
+            commands::check_for_updates_now,
+            commands::install_update,
+            commands::open_release_page,
         ])
         .run(tauri::generate_context!())
         .expect("error while running linh");

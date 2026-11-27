@@ -16,6 +16,8 @@ serde_json = "1"
 tauri = { version = "2.12", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2.5"
 tauri-plugin-deep-link = "2.6"
+tauri-plugin-updater = "2.14"
+tokio = { version = "1", default-features = false, features = ["time"] }
 url = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -34,3 +36,9 @@ plist = "1"
 [[bin]]
 name = "linh"
 path = "src/main.rs"
+
+[dev-dependencies]
+minisign = "0.10.0"
+tiny_http = "0.12.0"
+tauri = { version = "2.12", features = ["test"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
