@@ -138,8 +138,15 @@ ever keyed by the identifier in the first place:
   `RegisteredApplications` entry — all literal, not identifier-derived.
 - The MSIX identity (`MSIX_IDENTITY_NAME`/`MSIX_PUBLISHER`/
   `MSIX_PUBLISHER_DISPLAY_NAME`) — separate repository variables.
-- The NSIS uninstall registry key and install directory — keyed by
-  `productName` (`linh`), not the identifier.
+- The NSIS uninstall registry key — keyed by `productName` (`linh`), not
+  the identifier. The NSIS *custom install location* lookup
+  (`Software\<manufacturer>\<productName>`) would not have been: the
+  manufacturer defaults to the identifier's second label
+  (`tauri-bundler` 2.10.4's `nsis/mod.rs`), so it would have silently
+  moved from `tkhieu` to `hieutk` and stopped finding anyone who installed
+  to a non-default directory. `bundle.publisher` is now set explicitly to
+  `tkhieu` in `tauri.conf.json` so the manufacturer — and this key — stay
+  fixed across identifier changes; see below.
 
 What **is** affected, and what an existing user must do after upgrading:
 
@@ -152,13 +159,22 @@ What **is** affected, and what an existing user must do after upgrading:
   above), so the existing default-browser registration and config keep
   working with no action.
 - **Windows:** none. The ProgID/registry integration is unaffected (see
-  above). Programs & Features may show the installer's cosmetic
-  "Publisher" field change from `tkhieu` to `hieutk` (Tauri derives it
-  from the identifier when no explicit `bundle.publisher` is set); this is
-  display-only.
+  above). `bundle.publisher: "tkhieu"` keeps the installer's manufacturer
+  — and the Programs & Features "Publisher" field — pinned to `tkhieu`
+  instead of drifting to `hieutk`, and with it the custom-install-location
+  lookup above. A Start Menu or Desktop shortcut created by an older
+  install keeps working and points at the right exe either way; the NSIS
+  `NSIS_HOOK_POSTINSTALL` hook in `minimum-version.nsh` re-applies the
+  shortcut's AppUserModelID on every install/upgrade so existing shortcuts
+  pick up the new `dev.hieutk.linh` id too — otherwise toast notifications
+  for an upgraded install would not show or would be misattributed, since
+  the installer's own shortcut code only sets the AUMID when creating a
+  shortcut or migrating one from an old binary name.
 - **Everywhere:** Linh is a tray-resident background process, and
   `tauri-plugin-single-instance`'s D-Bus name (Linux) / named mutex
-  (Windows) is derived from the identifier at build time. An old-id
+  (Windows) / Unix domain socket under `/tmp` (macOS,
+  `platform_impl/macos.rs::socket_path`) is derived from the identifier at
+  build time. An old-id
   instance still running and a newly launched new-id instance will not
   recognize each other as "the same app" for the one upgrade that crosses
   this rename, so both could end up running at once if the old instance
