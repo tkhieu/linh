@@ -9,6 +9,6 @@ pub mod dirs;
 pub mod icons;
 pub mod notify;
 pub mod packaging;
-mod registry;
+pub(crate) mod registry;
 mod shell;
 pub use shell::open_uri;
