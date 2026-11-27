@@ -7,6 +7,7 @@ use tauri::Wry;
 
 use crate::platform::current::{app_config, browsers, default_browser, dirs::Dirs, notify};
 use crate::prompt_state::PromptState;
+use crate::updates;
 
 /// Shared, mutable application state, managed by Tauri and reachable from
 /// every command and from the tray menu's click handler.
@@ -27,6 +28,9 @@ pub struct AppState {
     /// up this session, keyed on the exact argument given (so an
     /// absolute path and a theme name never collide).
     pub icon_cache: Mutex<HashMap<String, Option<String>>>,
+    /// Background update checking and in-place install state (see
+    /// [`crate::updates`]).
+    pub updates: updates::Updates,
     /// Serializes every config save (whether a whole-config replacement
     /// from `save_config`, or an in-place `update_config` from the tray)
     /// so two concurrent callers can never leave the in-memory `config`
@@ -72,6 +76,7 @@ impl AppState {
             primary_targets: Mutex::new(Vec::new()),
             primary_items: Mutex::new(Vec::new()),
             icon_cache: Mutex::new(HashMap::new()),
+            updates: updates::Updates::init(),
             save_lock: Mutex::new(()),
         }
     }
@@ -125,6 +130,7 @@ impl AppState {
             primary_targets: Mutex::new(Vec::new()),
             primary_items: Mutex::new(Vec::new()),
             icon_cache: Mutex::new(HashMap::new()),
+            updates: updates::Updates::init(),
             save_lock: Mutex::new(()),
         }
     }

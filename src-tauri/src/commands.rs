@@ -20,6 +20,7 @@ use crate::platform::logging;
 use crate::routing;
 use crate::state::AppState;
 use crate::tray;
+use crate::updates;
 
 /// Lists the browsers detected on this system.
 #[tauri::command]
@@ -139,4 +140,44 @@ pub fn get_icon(icon: String, state: State<AppState>) -> Option<String> {
         .unwrap()
         .insert(icon, result.clone());
     result
+}
+
+/// Snapshot of this install's update state: its own kind/capability
+/// (fixed for the session), and the most recent check's result.
+#[tauri::command]
+pub fn get_update_status(state: State<AppState>) -> updates::UpdateStatus {
+    updates::status_snapshot(&state.updates)
+}
+
+/// Runs an update check now, outside the background schedule. Refused
+/// (an `Err`) while a check or install is already in progress.
+#[tauri::command]
+pub async fn check_for_updates_now(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<updates::AvailableUpdate>, String> {
+    updates::check_now(&app, &state).await
+}
+
+/// Installs the update, but only if it is still exactly `version` — the
+/// version the UI last showed the user via `get_update_status`/
+/// `check_for_updates_now`, not just whatever a fresh check happens to
+/// find when this runs. A mismatch is refused (an `Err`), so the UI can
+/// re-check and re-prompt instead of installing a release the user
+/// never actually approved. Only valid when
+/// `get_update_status().capability` is `"self_install"`.
+#[tauri::command]
+pub async fn install_update(
+    version: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    updates::install_update(&app, &state, &version).await
+}
+
+/// Opens the release page in the primary browser, for installs whose
+/// capability is `"download_only"`.
+#[tauri::command]
+pub fn open_release_page(state: State<AppState>) -> Result<(), String> {
+    updates::open_release_page(&state)
 }

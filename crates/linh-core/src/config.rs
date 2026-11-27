@@ -118,6 +118,15 @@ pub struct Config {
     pub shown_browsers: Vec<String>,
     #[serde(default)]
     pub rules: Vec<Rule>,
+    /// Whether Linh checks for new releases in the background. Defaults
+    /// to `true` so a config written before this field existed still
+    /// gets the checks it never opted out of.
+    #[serde(default = "default_check_for_updates")]
+    pub check_for_updates: bool,
+}
+
+fn default_check_for_updates() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -131,6 +140,7 @@ impl Default for Config {
             prompt_mode: PromptMode::Never,
             shown_browsers: Vec::new(),
             rules: Vec::new(),
+            check_for_updates: true,
         }
     }
 }
@@ -390,5 +400,32 @@ mod tests {
     fn load_missing_file_errors() {
         let path = PathBuf::from("/nonexistent/linh-core-test/linh.toml");
         assert!(load_config(&path).is_err());
+    }
+
+    #[test]
+    fn pre_existing_config_without_check_for_updates_defaults_to_true() {
+        // A config written before `check_for_updates` existed must still
+        // load, and must come back enabled rather than erroring or
+        // silently turning checks off.
+        let toml_str = r#"
+            [primary]
+            browser = "firefox"
+
+            prompt_mode = "never"
+            shown_browsers = ["firefox", "chrome"]
+        "#;
+        let config = parse_config(toml_str).expect("parse");
+        assert!(config.check_for_updates);
+    }
+
+    #[test]
+    fn check_for_updates_false_round_trips() {
+        let config = Config {
+            check_for_updates: false,
+            ..Config::default()
+        };
+        let toml_str = serialize_config(&config).expect("serialize");
+        let parsed = parse_config(&toml_str).expect("parse");
+        assert!(!parsed.check_for_updates);
     }
 }

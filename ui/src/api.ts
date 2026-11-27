@@ -59,11 +59,43 @@ export interface Config {
   prompt_mode: PromptMode
   shown_browsers: string[]
   rules: Rule[]
+  check_for_updates: boolean
 }
 
 export interface PlatformCaps {
   source_app_rules: boolean
 }
+
+export type UpdateKind = 'rpm' | 'deb' | 'nsis' | 'msix' | 'mac_app' | 'dev'
+
+export type UpdateCapability = 'self_install' | 'download_only' | 'none'
+
+export interface AvailableUpdate {
+  version: string
+  notes?: string | null
+  /** RFC 3339, when the endpoint provided one. */
+  date?: string | null
+}
+
+export interface UpdateStatus {
+  current_version: string
+  kind: UpdateKind
+  capability: UpdateCapability
+  /** Milliseconds since the Unix epoch, when a check has run. */
+  last_checked?: number | null
+  available?: AvailableUpdate | null
+  last_error?: string | null
+}
+
+/** Payload of the `updates://download-progress` event fired during `installUpdate`. */
+export interface UpdateDownloadProgress {
+  downloaded: number
+  total?: number | null
+}
+
+/** Event fired whenever `checkForUpdatesNow`/`installUpdate` finish; re-fetch `getUpdateStatus` on it rather than polling. */
+export const UPDATE_STATUS_CHANGED_EVENT = 'updates://status-changed'
+export const UPDATE_DOWNLOAD_PROGRESS_EVENT = 'updates://download-progress'
 
 export function listBrowsers(): Promise<Browser[]> {
   return invoke('list_browsers')
@@ -107,4 +139,21 @@ export function promptChoose(target: Target): Promise<void> {
 
 export function promptCancel(): Promise<void> {
   return invoke('prompt_cancel')
+}
+
+export function getUpdateStatus(): Promise<UpdateStatus> {
+  return invoke('get_update_status')
+}
+
+export function checkForUpdatesNow(): Promise<AvailableUpdate | null> {
+  return invoke('check_for_updates_now')
+}
+
+/** `version` must be the version last shown by `getUpdateStatus`/`checkForUpdatesNow`; a mismatch (e.g. a newer release appeared) is refused so the caller can re-check and re-prompt instead. */
+export function installUpdate(version: string): Promise<void> {
+  return invoke('install_update', { version })
+}
+
+export function openReleasePage(): Promise<void> {
+  return invoke('open_release_page')
 }

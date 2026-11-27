@@ -5,7 +5,10 @@ import { parseTraceUrl, patternMatches, resolveAppTarget, traceRoute, zoomAppUrl
 const caps = { source_app_rules: false }
 
 function baseConfig(): Config {
-  return { primary: { browser: 'firefox', private: false }, prompt_mode: 'never', shown_browsers: [], rules: [] }
+  return {
+    primary: { browser: 'firefox', private: false }, prompt_mode: 'never', shown_browsers: [], rules: [],
+    check_for_updates: true,
+  }
 }
 
 describe('patternMatches', () => {
@@ -96,7 +99,7 @@ describe('traceRoute', () => {
   it('routes the saved macOS Github rule with a scheme to Chrome', () => {
     const chrome = { browser: 'com.google.chrome', private: false }
     const config: Config = {
-      primary: chrome, prompt_mode: 'always', shown_browsers: [],
+      primary: chrome, prompt_mode: 'always', shown_browsers: [], check_for_updates: true,
       rules: [
         { name: 'Google Meet', match: ['meet.google.com'], open_in: chrome },
         { name: 'Microsoft Teams', match: [
