@@ -5,17 +5,62 @@
 //! `dbus-run-session`, median of 3 fresh-idle snapshots plus a
 //! picker-shown snapshot, release build) and kept only because it
 //! lowered tree PSS with no observed downside; see this branch's PR for
-//! the numbers. One candidate was tried and dropped:
-//! `webkit_website_data_manager_set_memory_pressure_settings()` (tunes
-//! the `WebKitNetworkProcess`) must run before the first
-//! `WebKitWebsiteDataManager` is created, which — since Tauri builds its
-//! `WebContext` before `Builder::setup` ever runs — forced calling it
-//! from the very top of `main`, before GTK is initialized. Working
-//! around that with an explicit early `gtk::init()` made startup
-//! regress to ~35s (apparently from GTK's main-context acquire-and-leak
-//! during `init()`, see <https://github.com/gtk-rs/gtk-rs-core/issues/186>,
-//! interacting badly with Tauri's own later init on the same context) —
-//! not worth it for a few MB on a process that's already small at idle.
+//! the numbers. Three candidates were tried and dropped:
+//!
+//! - `webkit_website_data_manager_set_memory_pressure_settings()` (tunes
+//!   the `WebKitNetworkProcess`) must run before the first
+//!   `WebKitWebsiteDataManager` is created, which — since Tauri builds its
+//!   `WebContext` before `Builder::setup` ever runs — forced calling it
+//!   from the very top of `main`, before GTK is initialized. Working
+//!   around that with an explicit early `gtk::init()` made startup
+//!   regress to ~35s (apparently from GTK's main-context acquire-and-leak
+//!   during `init()`, see <https://github.com/gtk-rs/gtk-rs-core/issues/186>,
+//!   interacting badly with Tauri's own later init on the same context) —
+//!   not worth it for a few MB on a process that's already small at idle.
+//! - `WEBKIT_DISABLE_COMPOSITING_MODE=1` and `WEBKIT_DISABLE_DMABUF_RENDERER=1`
+//!   were tried together as a way to cut `WebKitWebProcess` memory by
+//!   forcing WebKitGTK 2.54's Skia backend onto its CPU rasterizer
+//!   instead of its GPU-accelerated one. On WebKitGTK 2.54.2 the two
+//!   vars aren't independent switches: `AcceleratedBackingStore::rendererBufferTransportMode()`
+//!   treats `WEBKIT_DISABLE_DMABUF_RENDERER=1` as "no renderer buffer
+//!   transport available at all" and returns an empty set without even
+//!   probing EGL
+//!   (<https://github.com/WebKit/WebKit/blob/webkitgtk-2.54.2/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.cpp#L86-L88>),
+//!   which makes `AcceleratedBackingStore::canUseHardwareAcceleration()`
+//!   report `false`
+//!   (<https://github.com/WebKit/WebKit/blob/webkitgtk-2.54.2/Source/WebKit/UIProcess/gtk/AcceleratedBackingStore.cpp#L139-L144>).
+//!   `HardwareAccelerationManager`'s constructor checks that first and,
+//!   if hardware acceleration can't be used at all, forces
+//!   `m_acceleratedCompositingModeEnabled = false` unconditionally —
+//!   `WEBKIT_DISABLE_COMPOSITING_MODE` is only even read in the `else`
+//!   branch, once hardware acceleration is already available
+//!   (<https://github.com/WebKit/WebKit/blob/webkitgtk-2.54.2/Source/WebKit/UIProcess/gtk/HardwareAccelerationManager.cpp#L42-L47>).
+//!   So on 2.54.2, *either* var disables accelerated compositing
+//!   outright; there's no combination that disables only DMA-BUF import
+//!   while leaving compositing itself on. Two separate owner tests
+//!   against the owner's screen recording of v0.3.1 on Fedora 44/GNOME
+//!   50 Wayland (mutter 50.6) confirmed the picker breaks without
+//!   accelerated compositing either way: with
+//!   `WEBKIT_DISABLE_COMPOSITING_MODE=1` set, and again with
+//!   `WEBKIT_DISABLE_COMPOSITING_MODE=0`/`WEBKIT_DISABLE_DMABUF_RENDERER=1`
+//!   — both left the transparent, undecorated link picker window
+//!   (`ui/src/prompt/PromptApp.tsx`) breaking up over several seconds
+//!   while the user moved between rows: header/footer vanishing, the
+//!   row list splitting into separate floating boxes with the desktop
+//!   visible between them. The passing test set both vars to `0`
+//!   explicitly; that's equivalent to leaving both unset, not a third
+//!   state — `rendererBufferTransportMode()`'s DMA-BUF check only skips
+//!   probing EGL when the var is present *and* not equal to `"0"`
+//!   (`disableDMABuf && g_strcmp0(disableDMABuf, "0")` at the line above),
+//!   so `"0"` and absent take the same path, and
+//!   `m_acceleratedCompositingModeEnabled`/`m_canUseHardwareAcceleration`
+//!   both default to `true` in
+//!   [`HardwareAccelerationManager.h`](https://github.com/WebKit/WebKit/blob/webkitgtk-2.54.2/Source/WebKit/UIProcess/gtk/HardwareAccelerationManager.h#L44-L45),
+//!   the same value an explicit `WEBKIT_DISABLE_COMPOSITING_MODE=0`
+//!   produces. [`configure_before_tauri`] therefore just leaves both
+//!   vars unset — Linh no longer manages them in either direction — and
+//!   the ~30-40MB tkhieu/linh#25 measured from forcing them is withdrawn
+//!   entirely.
 //!
 //! What's left, confirmed against `/usr/share/gir-1.0/WebKit2-4.1.gir`
 //! (the installed WebKitGTK 2.54.2's own API docs):
@@ -27,102 +72,21 @@
 //!   application code can reach into WebKitGTK at all (Tauri builds the
 //!   `prompt` window, and with it its `WebContext`, before `setup` runs,
 //!   with no hook to intervene earlier).
-//! - `WEBKIT_DISABLE_COMPOSITING_MODE`/`WEBKIT_DISABLE_DMABUF_RENDERER`
-//!   are read once at `WebKitWebProcess` startup, so they must be set
-//!   before Tauri launches that process — i.e. from [`configure_before_tauri`].
 
 #[cfg(target_os = "linux")]
 use webkit2gtk::{CacheModel, SettingsExt, WebContextExt, WebViewExt};
 
-/// Must run before Tauri's `Builder::run` launches the first
-/// `WebKitWebProcess` — i.e. at the top of `main`, before
-/// `tauri::Builder::default()...run()`.
-///
-/// Disables WebKit's GPU-accelerated (DMA-BUF/EGL) compositing in favor
-/// of software rendering: measured to save ~30MB idle and ~40MB with the
-/// picker shown, by far the largest single saving tried here, avoiding
-/// the GL/EGL/Mesa driver stack entirely for an app that never needs
-/// GPU-accelerated video or 3D. Note this is *not* a switch to Cairo:
-/// WebKitGTK 2.54 removed the Cairo 2D backend entirely
-/// (<https://webkitgtk.org/2026/09/16/webkitgtk-2.54-highlights.html>),
-/// so disabling compositing instead forces 2.54's Skia backend to run
-/// its CPU rasterizer rather than its GPU-accelerated one.
-/// `WEBKIT_DISABLE_COMPOSITING_MODE` is the flag older WebKitGTK
-/// versions documented; `WEBKIT_DISABLE_DMABUF_RENDERER` is 2.54's
-/// actual renderer-selection switch, confirmed present in the installed
-/// `libwebkit2gtk-4.1.so` by `strings`. Both are set for
-/// forward/backward compatibility. Linh's own CSS
-/// (`ui/src/styles.css`) uses only borders and border-radius — no
-/// `transform`, `filter`, `backdrop-filter`, or `animation` — which the
-/// software path renders identically, and window transparency/rounding
-/// is a GTK/window-manager property independent of this flag, not
-/// WebKit's internal layer compositing. GPU compositing is also what
-/// makes scrolling smooth, so page-load timing and process lifecycle
-/// were confirmed unaffected (see the PR), but smooth-scrolling
-/// behavior on Wayland still needs a human look before relying on this
-/// further.
-///
-/// Only set when not already present in the environment Linh was
-/// started with — a var the user set themselves is left exactly as it
-/// was, never overwritten. [`vars_set_by_linh`] reports exactly the
-/// vars this actually set, so
-/// [`crate::platform::launcher::StripLinhWebkitEnv`] can strip them
-/// back out of processes Linh spawns (see its doc comment) without
-/// touching a value the user set themselves.
-#[cfg(target_os = "linux")]
-pub fn configure_before_tauri() {
-    let to_set = vars_to_set(|var| std::env::var_os(var).is_some());
-    // SAFETY: called at the very top of `main`, before any thread is
-    // spawned or GTK/WebKit touches the environment, so nothing else can
-    // race this write.
-    unsafe {
-        for var in &to_set {
-            std::env::set_var(var, "1");
-        }
-    }
-    let _ = SET_BY_LINH.set(to_set);
-}
-
-#[cfg(not(target_os = "linux"))]
+/// No longer sets anything. This used to force the WebKitGTK
+/// renderer-selection env vars `WEBKIT_DISABLE_COMPOSITING_MODE` and
+/// `WEBKIT_DISABLE_DMABUF_RENDERER` before Tauri could launch the first
+/// `WebKitWebProcess` (the only point in Linh's startup where either var
+/// could still take effect); both turned out to corrupt the link
+/// picker's repaints on GNOME 50 Wayland with WebKitGTK 2.54.2 — see
+/// this module's top-level doc comment for the two owner tests that
+/// showed it — so neither is set any more and this is kept only as the
+/// designated hook for that same timing requirement, should a future
+/// setting need it.
 pub fn configure_before_tauri() {}
-
-/// Pure logic behind [`configure_before_tauri`]: which of
-/// [`RENDERER_ENV_VARS`] it should actually set, given `already_present`
-/// (normally `|var| std::env::var_os(var).is_some()`). A var the user
-/// already has set is excluded — left untouched rather than overwritten
-/// — which is also exactly the list of vars Linh introduced itself, so
-/// the same `Vec` doubles as [`SET_BY_LINH`]'s value.
-#[cfg(target_os = "linux")]
-fn vars_to_set(already_present: impl Fn(&str) -> bool) -> Vec<&'static str> {
-    RENDERER_ENV_VARS
-        .into_iter()
-        .filter(|&var| !already_present(var))
-        .collect()
-}
-
-/// The WebKitGTK renderer-selection env vars [`configure_before_tauri`]
-/// sets process-wide (so they're visible to the `WebKitWebProcess` it
-/// launches before it starts) and that therefore also leak into every
-/// child process Linh spawns afterward (browsers, app targets) unless
-/// stripped back out.
-#[cfg(target_os = "linux")]
-pub const RENDERER_ENV_VARS: [&str; 2] = [
-    "WEBKIT_DISABLE_DMABUF_RENDERER",
-    "WEBKIT_DISABLE_COMPOSITING_MODE",
-];
-
-#[cfg(target_os = "linux")]
-static SET_BY_LINH: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
-
-/// Which of [`RENDERER_ENV_VARS`] Linh itself introduced — i.e. were
-/// *not* already present in the user's own environment before
-/// [`configure_before_tauri`] ran — and so should be removed from
-/// processes Linh spawns rather than left for them to inherit. Empty
-/// until `configure_before_tauri` has run.
-#[cfg(target_os = "linux")]
-pub fn vars_set_by_linh() -> &'static [&'static str] {
-    SET_BY_LINH.get().map(Vec::as_slice).unwrap_or(&[])
-}
 
 /// Tunes the WebKitGTK behavior that's only reachable once a webview
 /// exists. `settings` is shared by every `WebKitWebView` created with
@@ -160,34 +124,5 @@ pub fn tune_webview(webview: webkit2gtk::WebView) {
     }
     if let Some(settings) = webview.settings() {
         settings.set_enable_page_cache(false);
-    }
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sets_both_vars_when_neither_is_present() {
-        assert_eq!(
-            vars_to_set(|_| false),
-            vec![
-                "WEBKIT_DISABLE_DMABUF_RENDERER",
-                "WEBKIT_DISABLE_COMPOSITING_MODE"
-            ]
-        );
-    }
-
-    #[test]
-    fn leaves_out_a_var_the_user_already_set() {
-        assert_eq!(
-            vars_to_set(|var| var == "WEBKIT_DISABLE_COMPOSITING_MODE"),
-            vec!["WEBKIT_DISABLE_DMABUF_RENDERER"]
-        );
-    }
-
-    #[test]
-    fn sets_nothing_when_the_user_set_both() {
-        assert_eq!(vars_to_set(|_| true), Vec::<&str>::new());
     }
 }

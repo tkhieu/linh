@@ -193,35 +193,40 @@ single-purpose app that never browses between documents:
   `WebKitWebView`, this setting is re-applied right after the Settings
   window is built — otherwise opening Settings once would silently turn
   the page cache back on for both windows.
-- `WEBKIT_DISABLE_COMPOSITING_MODE`/`WEBKIT_DISABLE_DMABUF_RENDERER` set
-  before Tauri launches its first `WebKitWebProcess`, forcing WebKitGTK's
-  Skia backend to rasterize on the CPU instead of using GPU-accelerated
-  (DMA-BUF/EGL) compositing — WebKitGTK 2.54 removed the old Cairo 2D
-  backend entirely, so this is a GPU/CPU split within Skia, not a switch
-  to Cairo. Linh's UI uses only borders and `border-radius`, nothing
-  that path depends on. GPU compositing is also what makes scrolling
-  smooth, so that's the one thing the owner still needs to check
-  visually on Wayland. These two vars are process-wide, so every
-  `Command` Linh runs on Linux chains
-  `.strip_linh_webkit_env()` (the `StripLinhWebkitEnv` extension trait in
-  `src-tauri/src/platform/launcher.rs`) right after `Command::new`, which
-  removes only the vars `configure_before_tauri` itself introduced (a
-  value the user already had set in their own environment before Linh
-  started is left exactly as it was). This covers every child process
-  Linh spawns: `spawn_detached` (browsers and app targets),
-  `xdg-settings get`/`xdg-settings set`/`xdg-mime default` in
-  `platform/linux/default_browser.rs`, and `notify-send` in
-  `platform/linux/notify.rs` — so a launched WebKitGTK app (e.g. GNOME
-  Web) never inherits Linh's own rendering policy.
 
-A fourth candidate — tuning the `WebKitNetworkProcess`'s own memory-
-pressure thresholds via
-`webkit_website_data_manager_set_memory_pressure_settings()` — was tried
-and dropped: it must run before Tauri builds its first
-`WebKitWebsiteDataManager`, which forced an explicit `gtk::init()` call
-before GTK would otherwise be initialized, and that made startup regress
-to tens of seconds. Not worth it for a few MB on an already-small
-process.
+Two further candidates were tried and dropped:
+
+- The WebKitGTK renderer-selection env vars
+  `WEBKIT_DISABLE_COMPOSITING_MODE` and `WEBKIT_DISABLE_DMABUF_RENDERER`,
+  forced before Tauri launches its first `WebKitWebProcess` to save
+  ~30-40MB by moving WebKitGTK 2.54's Skia backend onto its CPU
+  rasterizer. On the installed WebKitGTK 2.54.2 the two vars aren't
+  independent: setting `WEBKIT_DISABLE_DMABUF_RENDERER=1` alone makes
+  `AcceleratedBackingStore::canUseHardwareAcceleration()` report `false`
+  (its renderer-buffer-transport probe short-circuits to empty), which
+  makes `HardwareAccelerationManager` disable accelerated compositing
+  outright *without even reading* `WEBKIT_DISABLE_COMPOSITING_MODE` —
+  so either var alone turns compositing off on this version; see
+  `webkit_tune.rs`'s doc comment for the exact source lines. Two
+  separate owner tests on Fedora 44/GNOME 50 Wayland (mutter 50.6,
+  WebKitGTK 2.54.2), against the owner's screen recording of v0.3.1,
+  showed corrupted repaints of the transparent, undecorated link picker
+  (header/footer vanishing, the row list splitting into floating boxes
+  with the desktop visible between them) while moving between rows:
+  first with `WEBKIT_DISABLE_COMPOSITING_MODE=1` set, then again with
+  only `WEBKIT_DISABLE_COMPOSITING_MODE=0` and
+  `WEBKIT_DISABLE_DMABUF_RENDERER=1` — both ended up with accelerated
+  compositing off. The passing test set both vars to `0` explicitly,
+  which 2.54.2's own var parsing treats the same as leaving both unset
+  (confirmed against the source), so Linh now simply leaves both unset
+  and this saving is withdrawn entirely. See `webkit_tune.rs`'s doc
+  comment for the full writeup and source citations.
+- Tuning the `WebKitNetworkProcess`'s own memory-pressure thresholds via
+  `webkit_website_data_manager_set_memory_pressure_settings()`: it must
+  run before Tauri builds its first `WebKitWebsiteDataManager`, which
+  forced an explicit `gtk::init()` call before GTK would otherwise be
+  initialized, and that made startup regress to tens of seconds. Not
+  worth it for a few MB on an already-small process.
 
 ## License
 
