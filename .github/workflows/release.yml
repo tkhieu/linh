@@ -48,24 +48,32 @@ jobs:
             os: ubuntu-latest
             container: fedora:44
             artifact: linh-fedora-rpm
-            files: target/release/bundle/rpm/*.rpm
+            files: |
+              target/release/bundle/rpm/*.rpm
+              target/release/bundle/rpm/*.rpm.sig
           - platform: ubuntu
             os: ubuntu-24.04
             container: ''
             artifact: linh-ubuntu-deb
-            files: target/release/bundle/deb/*.deb
+            files: |
+              target/release/bundle/deb/*.deb
+              target/release/bundle/deb/*.deb.sig
           - platform: windows
             os: windows-latest
             container: ''
             artifact: linh-windows
             files: |
               target/release/bundle/nsis/*.exe
+              target/release/bundle/nsis/*.exe.sig
               target/release/msix/*.msix
           - platform: macos
             os: macos-15
             container: ''
             artifact: linh-macos-universal-dmg
-            files: target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            files: |
+              target/universal-apple-darwin/release/bundle/dmg/*.dmg
+              target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+              target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
     steps:
@@ -137,6 +145,24 @@ jobs:
       - name: Install tauri-cli
         run: cargo install tauri-cli --version '^2' --locked
 
+      - name: Resolve updater signing policy
+        id: updater_signing
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$TAURI_SIGNING_PRIVATE_KEY" && -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]]; then
+            echo "sign=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" == "true" ]]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY/_PASSWORD are not set; this dry run will skip signing updater artifacts."
+            echo "sign=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD are required to sign updater artifacts for a release." >&2
+            exit 1
+          fi
+
       - name: Build Fedora RPM
         if: matrix.platform == 'fedora'
         working-directory: src-tauri
@@ -144,12 +170,26 @@ jobs:
           rm -rf ../target/release/bundle
           cargo tauri build --bundles rpm
 
+      - name: Sign updater RPM
+        if: matrix.platform == 'fedora' && steps.updater_signing.outputs.sign == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cargo tauri signer sign --app-version "${{ needs.version.outputs.version }}" target/release/bundle/rpm/*.rpm
+
       - name: Build Ubuntu DEB
         if: matrix.platform == 'ubuntu'
         working-directory: src-tauri
         run: |
           rm -rf ../target/release/bundle/deb
           cargo tauri build --bundles deb
+
+      - name: Sign updater DEB
+        if: matrix.platform == 'ubuntu' && steps.updater_signing.outputs.sign == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cargo tauri signer sign --app-version "${{ needs.version.outputs.version }}" target/release/bundle/deb/*.deb
 
       - name: Build unsigned Windows NSIS installer
         if: matrix.platform == 'windows'
@@ -166,7 +206,7 @@ jobs:
           MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
         run: ./scripts/package-msix.ps1
 
-      - name: Build macOS universal DMG
+      - name: Build macOS universal DMG and app bundle
         if: matrix.platform == 'macos'
         shell: bash
         working-directory: src-tauri
@@ -188,7 +228,24 @@ jobs:
             unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY
             unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
           fi
-          cargo tauri build --bundles dmg --target universal-apple-darwin
+          cargo tauri build --bundles dmg,app --target universal-apple-darwin
+
+      - name: Package macOS updater archive
+        if: matrix.platform == 'macos'
+        working-directory: target/universal-apple-darwin/release/bundle/macos
+        run: |
+          set -euo pipefail
+          app="$(ls -d -- *.app)"
+          tar -czf "${app}.tar.gz" "$app"
+
+      - name: Sign updater macOS app archive
+        if: matrix.platform == 'macos' && steps.updater_signing.outputs.sign == 'true'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: >-
+          cargo tauri signer sign --app-version "${{ needs.version.outputs.version }}"
+          target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
 
       - name: Verify Windows outputs exist
         if: matrix.platform == 'windows'
@@ -196,6 +253,14 @@ jobs:
         run: |
           if (-not (Get-ChildItem target/release/bundle/nsis/*.exe)) { throw 'NSIS installer missing' }
           if (-not (Get-ChildItem target/release/msix/*.msix)) { throw 'MSIX package missing' }
+
+      - name: Sign updater NSIS installer
+        if: matrix.platform == 'windows' && steps.updater_signing.outputs.sign == 'true'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: cargo tauri signer sign --app-version "${{ needs.version.outputs.version }}" target/release/bundle/nsis/*.exe
 
       - name: Upload installer artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4

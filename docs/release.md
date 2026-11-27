@@ -90,6 +90,49 @@ instead of comparing ProgID names. Verify HTTP and HTTPS selection,
 activation, update, and uninstall on an actual Store-installed package before
 submission.
 
+## Updater signing key
+
+Linh's self-updater (`tauri-plugin-updater`) trusts one minisign key pair.
+`src-tauri/tauri.conf.json`'s `plugins.updater.pubkey` carries the public
+half; every installed copy of Linh verifies update signatures against it.
+
+- **Where the key lives:** the owner generated it with `tauri signer generate`
+  on their own machine, under `~/.tauri/linh-updater/`: the private key, its
+  password, and the public key, each file mode `600`. The owner keeps an
+  offline backup of the private key and password outside that machine.
+- **The two secrets:** `TAURI_SIGNING_PRIVATE_KEY` (the private key contents)
+  and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` are repository secrets, never
+  repository variables. `release.yml` passes them to `cargo tauri signer
+  sign` as environment variables for the Fedora `.rpm`, Ubuntu `.deb`,
+  Windows NSIS `.exe`, and the macOS `linh.app.tar.gz` (built from the `.app`
+  bundle, packaged next to the `.dmg`). Each produces a `.sig` file uploaded
+  alongside its artifact. The MSIX is never signed for the updater: Store
+  installs update through the Store or an `.appinstaller` file, not this
+  plugin. A `workflow_dispatch` dry run signs too, so CI proves signing
+  works; it only skips, with a warning, when the two secrets are absent
+  (e.g. a fork running the workflow manually). On a tag push, or a manual
+  non-dry run, missing secrets fail the job.
+- **Losing the key:** without the private key and password, no future
+  release can produce a signature any existing install trusts, because each
+  install's compiled-in `pubkey` only accepts signatures from the matching
+  private key. Every installed copy would be permanently stuck on its
+  current version, with no way to push a fix. This is why the offline
+  backup exists.
+- **Rotation:** generate a new key pair, then ship one release that updates
+  `plugins.updater.pubkey` to the new public key while still signing with
+  the *old* private key, so every existing install can fetch and verify that
+  transitional release. Only once that release is out should CI's secrets
+  switch to the new private key; installs that picked up the transitional
+  release now trust the new pubkey and can verify the next one.
+- **Verifying a `.sig` locally:** `cargo tauri signer` has no `verify`
+  subcommand. Use the `minisign` CLI directly:
+  `minisign -V -p linh-updater.key.pub -m linh-0.3.2-1.x86_64.rpm`
+  (pass the artifact as `-m` and its downloaded `.sig` file is expected next
+  to it, or pass it explicitly with `-x`). At update time, the plugin does
+  the equivalent check itself: it downloads the artifact named in
+  `latest.json`, decodes the matching base64 `signature`, and verifies it
+  against `plugins.updater.pubkey` before installing anything.
+
 References: [Tauri macOS signing and notarization](https://v2.tauri.app/distribute/sign/macos/),
 [Tauri environment variables](https://v2.tauri.app/reference/environment-variables/),
 [Microsoft manual desktop packaging](https://learn.microsoft.com/en-us/windows/msix/desktop/desktop-to-uwp-manual-conversion),
