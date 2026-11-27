@@ -8,7 +8,7 @@
 //! `check_now`, `install_update`) is the thin, untested part that calls
 //! the plugin and feeds its result through those functions.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
@@ -115,7 +115,7 @@ pub fn detect_kind() -> UpdateKind {
 /// -i` the *real* system install (the bundle-type marker survives being
 /// copied) and then relaunch the unchanged copy, not the new install.
 /// Ignored for kinds this has nothing to check for (see
-/// [`expected_install_path`]).
+/// [`expected_exe_path`]).
 pub fn capability_for(kind: UpdateKind, exe_matches_install: bool) -> Capability {
     match kind {
         UpdateKind::Rpm | UpdateKind::Deb | UpdateKind::Nsis => {
@@ -130,9 +130,14 @@ pub fn capability_for(kind: UpdateKind, exe_matches_install: bool) -> Capability
     }
 }
 
-/// The path a package manager actually installed `kind` to, when Linh
-/// can check one. `None` for kinds this has no reliable check for yet.
-fn expected_install_path(kind: UpdateKind) -> Option<&'static str> {
+/// The exe path a package manager/installer actually put `kind` at, when
+/// Linh can determine one. `None` for a `kind` with nothing to check.
+/// `nsis_install_location` is injected (see
+/// [`exe_matches_expected_install_with`]) rather than read here directly.
+fn expected_exe_path(
+    kind: UpdateKind,
+    nsis_install_location: impl FnOnce() -> Option<PathBuf>,
+) -> Option<PathBuf> {
     match kind {
         // Confirmed directly from this repo's own rpm bundle:
         // `rpm -qlp target/release/bundle/rpm/linh-*.rpm` lists
@@ -140,47 +145,95 @@ fn expected_install_path(kind: UpdateKind) -> Option<&'static str> {
         // use the identical `/usr/bin/<binary-name>` convention (not
         // independently re-verified here, since building a `.deb`
         // requires `dpkg-deb`, unavailable on this machine).
-        UpdateKind::Rpm | UpdateKind::Deb => Some("/usr/bin/linh"),
-        // NSIS (Windows): tauri's NSIS installer records its own
-        // install directory in the uninstaller registry key it writes,
-        // but which hive/value that is for `installMode: "currentUser"`
-        // was not verified against a real install in this change. Left
-        // unchecked rather than shipping a guess that could wrongly
-        // downgrade every genuine NSIS install's capability — a
-        // non-blocking gap, not a decision that this can't ever matter.
-        UpdateKind::Nsis | UpdateKind::Msix | UpdateKind::MacApp | UpdateKind::Dev => None,
+        UpdateKind::Rpm | UpdateKind::Deb => Some(PathBuf::from("/usr/bin/linh")),
+        // NSIS (Windows): tauri-bundler's NSIS template writes its
+        // install directory to `InstallLocation` under the uninstall
+        // registry key it creates for the app (tauri-bundler 2.10.4
+        // `src/bundle/windows/nsis/installer.nsi:67,750`). See
+        // `nsis_install_location` for the hive/key-name details, which
+        // were not independently verified against a real install.
+        UpdateKind::Nsis => nsis_install_location().map(|dir| dir.join("linh.exe")),
+        UpdateKind::Msix | UpdateKind::MacApp | UpdateKind::Dev => None,
     }
 }
 
-/// Whether the running binary is at the path [`expected_install_path`]
-/// says `kind` should be, for a `kind` that has one to check; `true` for
-/// a `kind` with nothing to check. See [`capability_for`].
-pub fn exe_matches_expected_install(kind: UpdateKind) -> bool {
-    exe_matches_expected_install_with(kind, || {
-        std::env::current_exe().and_then(|path| path.canonicalize())
+/// Reads the install directory tauri-bundler's NSIS installer recorded
+/// for itself: the `InstallLocation` value under the uninstall key it
+/// writes at `Software\Microsoft\Windows\CurrentVersion\Uninstall\linh`
+/// (`linh` being `tauri.conf.json`'s `productName`, which is the key
+/// name tauri-bundler's NSIS template uses). Tried under
+/// `HKEY_CURRENT_USER` first — matching `installMode: "currentUser"` in
+/// `tauri.conf.json` — then `HKEY_LOCAL_MACHINE`, in case that ever
+/// changes to a per-machine install. `None` if neither hive has it,
+/// which [`exe_matches_expected_install_with`] then treats the same as
+/// "can't verify" (`DownloadOnly`), not "assume it's fine".
+#[cfg(target_os = "windows")]
+fn nsis_install_location() -> Option<PathBuf> {
+    use crate::platform::windows::registry;
+    const UNINSTALL_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\linh";
+    registry::read_string(
+        &registry::current_user(),
+        UNINSTALL_SUBKEY,
+        "InstallLocation",
+    )
+    .or_else(|| {
+        registry::read_string(
+            &registry::local_machine(),
+            UNINSTALL_SUBKEY,
+            "InstallLocation",
+        )
     })
+    .map(PathBuf::from)
+}
+
+/// Never actually called off Windows: [`UpdateKind::Nsis`] is never
+/// returned by [`detect_kind`] there, and [`expected_exe_path`] only
+/// invokes this closure for that one kind.
+#[cfg(not(target_os = "windows"))]
+fn nsis_install_location() -> Option<PathBuf> {
+    None
+}
+
+/// Whether the running binary is at the path [`expected_exe_path`] says
+/// `kind` should be, for a `kind` that has one to check; `true` for a
+/// `kind` with nothing to check. See [`capability_for`].
+pub fn exe_matches_expected_install(kind: UpdateKind) -> bool {
+    exe_matches_expected_install_with(
+        kind,
+        || std::env::current_exe().and_then(|path| path.canonicalize()),
+        nsis_install_location,
+    )
 }
 
 /// The pure decision behind [`exe_matches_expected_install`], taking the
-/// (already-canonicalized, in real use) current exe path as a parameter
-/// so it's unit-testable without touching the real filesystem — a
-/// literal path like `/usr/bin/linh` passed in a test does not need to
-/// actually exist for `canonicalize()` to succeed on it, unlike calling
-/// `canonicalize()` inside this function itself would require. Fails
-/// closed (`false`, i.e. `DownloadOnly`) if `current_exe` itself errors:
-/// the whole point of this check is catching the binary not being where
-/// it's supposed to be, so an inability to even determine that is not a
-/// reason to assume it's fine.
+/// (already-canonicalized, in real use) current exe path and the NSIS
+/// install-location lookup as parameters so it's unit-testable without
+/// touching the real filesystem or the real registry — a literal path
+/// like `/usr/bin/linh` passed in a test does not need to actually exist
+/// for `canonicalize()` to succeed on it, unlike calling `canonicalize()`
+/// inside this function itself would require. Fails closed (`false`,
+/// i.e. `DownloadOnly`) if `current_exe` errors, or if there's an
+/// `expected_exe_path` to check but it comes back `None` (the NSIS
+/// registry lookup failed): the whole point of this check is catching
+/// the binary not being where it's supposed to be, so being unable to
+/// even determine that is not a reason to assume it's fine.
 fn exe_matches_expected_install_with(
     kind: UpdateKind,
     current_exe: impl FnOnce() -> std::io::Result<PathBuf>,
+    nsis_install_location: impl FnOnce() -> Option<PathBuf>,
 ) -> bool {
-    let Some(expected) = expected_install_path(kind) else {
+    // `expected_exe_path` returning `None` means two different things
+    // depending on `kind`: "nothing to check" (Msix/MacApp/Dev — always
+    // fine), or "there was something to check but the lookup failed"
+    // (Nsis with no registry entry — fails closed). Distinguish them by
+    // asking again whether `kind` is one that has a check at all.
+    if !matches!(kind, UpdateKind::Rpm | UpdateKind::Deb | UpdateKind::Nsis) {
         return true;
+    }
+    let Some(expected) = expected_exe_path(kind, nsis_install_location) else {
+        return false;
     };
-    current_exe()
-        .map(|path| path == Path::new(expected))
-        .unwrap_or(false)
+    current_exe().map(|path| path == expected).unwrap_or(false)
 }
 
 /// The first background check happens shortly after startup rather than
@@ -326,9 +379,16 @@ fn save_notified_state(dirs: &Dirs, state: &NotifiedState) {
         return;
     };
     let tmp_path = parent.join(format!("updates.json.tmp-{}", std::process::id()));
-    let Ok(()) = std::fs::write(&tmp_path, data) else {
+    let Ok(mut file) = std::fs::File::create(&tmp_path) else {
         return;
     };
+    if std::io::Write::write_all(&mut file, data.as_bytes()).is_err() {
+        return;
+    }
+    if file.sync_all().is_err() {
+        return;
+    }
+    drop(file);
     let _ = std::fs::rename(&tmp_path, &path);
 }
 
@@ -516,8 +576,11 @@ struct DownloadProgress {
     total: Option<u64>,
 }
 
-/// Notifies once per newly-found version, via a real toast on Windows
-/// (see [`notify_via_toast`]) and the platform notifier everywhere else.
+/// Notifies once per newly-found version: always via the platform
+/// notifier (`notify::notify_info` — on Windows this logs the notice, see
+/// its own module), and *additionally* via a real toast attempt on
+/// Windows (see [`notify_via_toast`]) — not one or the other, since the
+/// toast's own success tells us nothing reliable (see its doc comment).
 /// Dedup state is loaded from and saved to disk (not kept only in
 /// memory) so a restart before the user updates doesn't re-notify.
 fn maybe_notify(app: &AppHandle, state: &AppState, available: &AvailableUpdate) {
@@ -536,50 +599,48 @@ fn maybe_notify(app: &AppHandle, state: &AppState, available: &AvailableUpdate) 
         "Linh {} is available — open Settings \u{2192} Updates.",
         available.version
     );
-    if !notify_via_toast(app, summary, &body) {
-        notify::notify_info(&state.dirs, summary, &body);
-    }
+    notify::notify_info(&state.dirs, summary, &body);
+    notify_via_toast(app, summary, &body);
 }
 
 /// On Windows, attempts a real toast via `tauri-plugin-notification`
 /// (backed by `tauri-winrt-notification`, using the app's own
-/// `identifier` from `tauri.conf.json` as its `AppUserModelID`) instead
-/// of `notify::notify_info`'s log-only fallback there — the owner wants
-/// a visible notice, not just a log line. Returns `true` if the toast
-/// was accepted by the OS, so the caller can fall back to
-/// `notify::notify_info` when it wasn't.
+/// `identifier` from `tauri.conf.json` as its `AppUserModelID`) — the
+/// owner wants a visible notice, not just a log line.
 ///
-/// This is *not* guaranteed to show anything even when it returns `true`:
-/// Windows toast notifications normally require the app's
-/// `AppUserModelID` to be registered (typically via a Start Menu
+/// `.show()` returning `Ok` only means the OS *accepted the request to
+/// schedule* the toast, not that it was actually displayed — so this is
+/// not treated as a reliable success/failure signal anywhere, and
+/// [`maybe_notify`] always logs the notice via `notify::notify_info`
+/// regardless of what this returns (or whether it's even called, on
+/// non-Windows). Windows toast notifications also normally require the
+/// app's `AppUserModelID` to be registered (typically via a Start Menu
 /// shortcut, which Tauri's NSIS installer creates with a matching one),
 /// and that registration was not independently verified against a real
-/// NSIS install in this change — `.show()` can succeed as an API call
-/// while Windows still silently drops an unregistered app's toast.
-/// `notify::notify_error`'s own behaviour is deliberately left
-/// unchanged: its callers include `AppState::init`, which runs before
-/// any `AppHandle` exists to call this with.
+/// NSIS install in this change. `notify::notify_error`'s own behaviour
+/// is deliberately left unchanged: its callers include `AppState::init`,
+/// which runs before any `AppHandle` exists to call this with.
 #[cfg(target_os = "windows")]
-fn notify_via_toast(app: &AppHandle, summary: &str, body: &str) -> bool {
+fn notify_via_toast(app: &AppHandle, summary: &str, body: &str) {
     use tauri_plugin_notification::NotificationExt;
-    app.notification()
+    let _ = app
+        .notification()
         .builder()
         .title(summary)
         .body(body)
-        .show()
-        .is_ok()
+        .show();
 }
 
 #[cfg(not(target_os = "windows"))]
-fn notify_via_toast(_app: &AppHandle, _summary: &str, _body: &str) -> bool {
-    false
-}
+fn notify_via_toast(_app: &AppHandle, _summary: &str, _body: &str) {}
 
-/// Installs the update found when this call re-checks, but only if it is
-/// still `expected_version` — the version the UI last showed the user,
-/// not whatever happens to be announced *now*. A mismatch (a newer
-/// release appeared, or the one the user saw was pulled) is refused
-/// rather than silently installed, so the UI can re-check and re-prompt
+/// Installs the update, but only if `expected_version` is both (a) the
+/// version [`UpdateState::available`] actually has stored — i.e. the one
+/// the UI was actually shown via `get_update_status`/
+/// `check_for_updates_now`, not merely whatever string a caller passes —
+/// and (b) still what a fresh re-check announces right before
+/// installing. Either mismatch is refused rather than silently
+/// installing something else, so the UI can re-check and re-prompt
 /// instead of the user ending up on a release they never actually
 /// approved. Only valid when `capability` is [`Capability::SelfInstall`];
 /// the UI is expected not to offer this otherwise, but this still guards
@@ -592,6 +653,10 @@ pub async fn install_update(
 ) -> Result<(), String> {
     if state.updates.capability != Capability::SelfInstall {
         return Err("this install cannot update itself".to_string());
+    }
+    {
+        let guard = state.updates.state.lock().unwrap();
+        confirm_expected_matches_stored(&guard.available, expected_version)?;
     }
     if !try_begin_in_flight(&state.updates.in_flight) {
         return Err("an update check or install is already in progress".to_string());
@@ -610,10 +675,33 @@ pub async fn install_update(
     result
 }
 
+/// The pure decision behind [`install_update`] refusing to install
+/// anything the UI wasn't actually shown: `Ok(())` only when `stored`
+/// holds an update and its version equals `expected_version`; `Err`
+/// (with a message fit to show the user) when nothing is stored, or when
+/// it doesn't match.
+fn confirm_expected_matches_stored(
+    stored: &Option<AvailableUpdate>,
+    expected_version: &str,
+) -> Result<(), String> {
+    match stored {
+        None => Err("no update is available to install".to_string()),
+        Some(available) if available.version != expected_version => Err(format!(
+            "the update shown ({}) is not the one requested ({expected_version}); re-check before installing",
+            available.version
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
 /// The pure decision behind `install_inner` refusing to install a
 /// version other than the one the UI showed the user: `None` when
-/// `found_version` (what a fresh check just announced) matches
-/// `expected_version`, `Some(message)` otherwise.
+/// `found_version` (what a fresh re-check, right before installing,
+/// just announced) matches `expected_version`, `Some(message)`
+/// otherwise. This re-check happens *after*
+/// [`confirm_expected_matches_stored`] already approved
+/// `expected_version` against the last stored check — it exists for the
+/// gap between that approval and this moment, not to replace it.
 fn version_mismatch_error(found_version: &str, expected_version: &str) -> Option<String> {
     if found_version == expected_version {
         None
@@ -673,26 +761,58 @@ pub fn open_release_page(state: &AppState) -> Result<(), String> {
     crate::routing::open_target(state, &primary, RELEASE_PAGE_URL)
 }
 
+/// The pure decision behind one `run_scheduler` tick: whether `schedule`
+/// says a check is due at `now` *and* `check_enabled()` (reading
+/// `config.check_for_updates` for real) says checks aren't turned off.
+/// When both are true, this records the check as attempted at `now`
+/// *before* returning — same as the single-flight guard: a check that
+/// then takes a while (or fails) must not make the very next tick see
+/// `is_due` go true again, which is what actually keeps this from
+/// becoming a retry storm, not anything about the check's own outcome.
+/// `check_enabled` is still asked even when `schedule` says a check
+/// isn't due, so a disabled toggle never consumes a due check it didn't
+/// actually run — it's still due the moment the toggle comes back on.
+///
+/// Takes `schedule`/`now`/`check_enabled` as parameters (rather than
+/// reading `state.updates.schedule`/`Instant::now()`/`state.config`
+/// directly) so this is the one piece of `run_scheduler` that's
+/// unit-tested by driving it with simulated time across days, instead
+/// of a real `tokio::time::sleep` loop and a real clock.
+fn scheduler_tick(
+    schedule: &mut Schedule,
+    now: Instant,
+    check_enabled: impl FnOnce() -> bool,
+) -> bool {
+    if !schedule.is_due(now) {
+        return false;
+    }
+    if !check_enabled() {
+        return false;
+    }
+    schedule.record_checked(now);
+    true
+}
+
 /// Runs the background scheduler for the lifetime of the app: waits
 /// until a check is due (honouring `config.check_for_updates`, re-read
 /// on every tick so toggling it in Settings takes effect without a
-/// restart), then runs one single-flighted [`check_now`].
+/// restart), then runs one single-flighted [`check_now`]. The decision
+/// itself is [`scheduler_tick`]; this is just the real clock/config/
+/// network it's driven with.
 pub async fn run_scheduler(app: AppHandle) {
     let state = app.state::<AppState>();
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
         let now = Instant::now();
-        if !state.updates.schedule.lock().unwrap().is_due(now) {
-            continue;
+        let should_check = {
+            let mut schedule = state.updates.schedule.lock().unwrap();
+            scheduler_tick(&mut schedule, now, || {
+                state.config.lock().unwrap().check_for_updates
+            })
+        };
+        if should_check {
+            let _ = check_now(&app, &state).await;
         }
-        if !state.config.lock().unwrap().check_for_updates {
-            continue;
-        }
-        // Recorded *before* the check runs (not after), same as the
-        // single-flight guard: a check that takes a while must not make
-        // the next tick see `is_due` go true again in the meantime.
-        state.updates.schedule.lock().unwrap().record_checked(now);
-        let _ = check_now(&app, &state).await;
     }
 }
 
@@ -836,42 +956,100 @@ mod tests {
         assert_eq!(capability_for(UpdateKind::Dev, false), Capability::None);
     }
 
+    /// No test below for Rpm/Deb/MacApp/Dev actually needs a real NSIS
+    /// install-location lookup, so they all pass this: it panics if
+    /// called, proving `expected_exe_path` never invokes it for those
+    /// kinds.
+    fn never_called_nsis_lookup() -> Option<PathBuf> {
+        panic!("nsis_install_location must not be called for a non-NSIS kind")
+    }
+
     #[test]
     fn exe_at_the_expected_path_matches() {
-        assert!(exe_matches_expected_install_with(UpdateKind::Rpm, || Ok(
-            PathBuf::from("/usr/bin/linh")
-        )));
+        assert!(exe_matches_expected_install_with(
+            UpdateKind::Rpm,
+            || Ok(PathBuf::from("/usr/bin/linh")),
+            never_called_nsis_lookup
+        ));
     }
 
     #[test]
     fn a_copy_run_from_elsewhere_does_not_match() {
-        assert!(!exe_matches_expected_install_with(UpdateKind::Rpm, || Ok(
-            PathBuf::from("/home/user/Downloads/linh")
-        )));
-        assert!(!exe_matches_expected_install_with(UpdateKind::Deb, || Ok(
-            PathBuf::from("/tmp/linh")
-        )));
+        assert!(!exe_matches_expected_install_with(
+            UpdateKind::Rpm,
+            || Ok(PathBuf::from("/home/user/Downloads/linh")),
+            never_called_nsis_lookup
+        ));
+        assert!(!exe_matches_expected_install_with(
+            UpdateKind::Deb,
+            || Ok(PathBuf::from("/tmp/linh")),
+            never_called_nsis_lookup
+        ));
     }
 
     #[test]
     fn a_current_exe_lookup_failure_fails_closed_to_download_only() {
-        assert!(!exe_matches_expected_install_with(UpdateKind::Rpm, || {
-            Err(std::io::Error::other("no such process"))
-        }));
+        assert!(!exe_matches_expected_install_with(
+            UpdateKind::Rpm,
+            || Err(std::io::Error::other("no such process")),
+            never_called_nsis_lookup
+        ));
     }
 
     #[test]
     fn kinds_with_no_expected_path_are_not_checked_at_all() {
-        assert!(exe_matches_expected_install_with(UpdateKind::Nsis, || Err(
-            std::io::Error::other("never called")
-        )));
+        let never_called_exe = || -> std::io::Result<PathBuf> {
+            panic!("current_exe must not be called for a kind with nothing to check")
+        };
         assert!(exe_matches_expected_install_with(
             UpdateKind::MacApp,
-            || Err(std::io::Error::other("never called"))
+            never_called_exe,
+            never_called_nsis_lookup
         ));
-        assert!(exe_matches_expected_install_with(UpdateKind::Dev, || Err(
-            std::io::Error::other("never called")
-        )));
+        assert!(exe_matches_expected_install_with(
+            UpdateKind::Dev,
+            never_called_exe,
+            never_called_nsis_lookup
+        ));
+    }
+
+    // Windows-only: `PathBuf`'s `\`-separator join/comparison semantics
+    // (which these two rely on to build "install dir + file name") only
+    // apply when actually compiled for a Windows target — on a Linux or
+    // macOS test host a backslash is just an ordinary path-component
+    // character, not a separator, so the join wouldn't produce the path
+    // either side actually means. The behavior this exercises is itself
+    // already `#[cfg(target_os = "windows")]`-only in production (see
+    // `nsis_install_location`).
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn nsis_exe_inside_the_registered_install_location_matches() {
+        assert!(exe_matches_expected_install_with(
+            UpdateKind::Nsis,
+            || Ok(PathBuf::from(r"C:\Users\user\AppData\Local\linh\linh.exe")),
+            || Some(PathBuf::from(r"C:\Users\user\AppData\Local\linh"))
+        ));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn nsis_exe_outside_the_registered_install_location_does_not_match() {
+        assert!(!exe_matches_expected_install_with(
+            UpdateKind::Nsis,
+            || Ok(PathBuf::from(r"C:\Users\user\Downloads\linh.exe")),
+            || Some(PathBuf::from(r"C:\Users\user\AppData\Local\linh"))
+        ));
+    }
+
+    #[test]
+    fn nsis_fails_closed_to_download_only_when_the_registry_lookup_comes_up_empty() {
+        // "can't verify" must behave the same as "doesn't match" — never
+        // "assume it's fine and grant self-install anyway".
+        assert!(!exe_matches_expected_install_with(
+            UpdateKind::Nsis,
+            || Ok(PathBuf::from(r"C:\Users\user\AppData\Local\linh\linh.exe")),
+            || None
+        ));
     }
 
     #[test]
@@ -994,6 +1172,95 @@ mod tests {
         );
     }
 
+    /// Drives `run_scheduler`'s actual loop-body decision —
+    /// `scheduler_tick`, not just the `Schedule`/`check_due` it's built
+    /// on — across several simulated days, with checks always enabled.
+    /// Same 1-hour-step shape as `schedule_keeps_firing_about_once_a_day…`
+    /// above, now through the function `run_scheduler` itself calls.
+    #[test]
+    fn scheduler_tick_fires_after_the_startup_delay_then_about_once_a_day() {
+        let t0 = Instant::now();
+        let mut schedule = Schedule::new(t0);
+        let mut fired_at = Vec::new();
+        let mut now = t0;
+        let end = t0 + CHECK_INTERVAL * 3 + Duration::from_secs(3600);
+
+        while now <= end {
+            if scheduler_tick(&mut schedule, now, || true) {
+                fired_at.push(now.saturating_duration_since(t0));
+            }
+            now += Duration::from_secs(3600);
+        }
+
+        assert_eq!(
+            fired_at.len(),
+            4,
+            "the startup check plus 3 more, one per day, across just over 3 days: {fired_at:?}"
+        );
+        assert!(
+            fired_at[0] >= FIRST_CHECK_DELAY && fired_at[0] <= Duration::from_secs(3600),
+            "the first check must fire on the first 1h-stepped tick at or after the 60s \
+             startup delay: {:?}",
+            fired_at[0]
+        );
+        for i in 1..fired_at.len() {
+            let gap = fired_at[i] - fired_at[i - 1];
+            assert!(
+                gap >= CHECK_INTERVAL,
+                "gap {gap:?} between check {} and {} must be at least a day",
+                i - 1,
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn scheduler_tick_never_fires_while_the_config_toggle_is_off_but_still_fires_once_re_enabled() {
+        let t0 = Instant::now();
+        let mut schedule = Schedule::new(t0);
+        let due_at = t0 + FIRST_CHECK_DELAY;
+
+        // A due check is asked about on every tick regardless, so this
+        // also proves the toggle is re-read every time, not cached from
+        // `Schedule::new` or the first call.
+        for _ in 0..5 {
+            assert!(!scheduler_tick(&mut schedule, due_at, || false));
+        }
+        assert!(
+            scheduler_tick(&mut schedule, due_at, || true),
+            "a due check that was only ever refused by the toggle must still be due once \
+             it's back on, at the very same instant"
+        );
+    }
+
+    #[test]
+    fn scheduler_tick_recording_the_attempt_up_front_prevents_a_retry_storm() {
+        // `scheduler_tick` has no idea whether the `check_now` its caller
+        // runs afterward succeeds or fails — by the time that's known,
+        // `record_checked` has already run. This is what actually
+        // guarantees "a network error does not cause a retry storm": the
+        // next tick is refused by `is_due` the same way regardless of
+        // what the un-simulated network call would have done.
+        let t0 = Instant::now();
+        let mut schedule = Schedule::new(t0);
+        let first_fire_at = t0 + FIRST_CHECK_DELAY;
+        assert!(scheduler_tick(&mut schedule, first_fire_at, || true));
+
+        for seconds in 1..CHECK_INTERVAL.as_secs() {
+            let now = first_fire_at + Duration::from_secs(seconds);
+            assert!(
+                !scheduler_tick(&mut schedule, now, || true),
+                "must not fire again anywhere in the day after the first fire, \
+                 whether or not the resulting check would have failed"
+            );
+        }
+        assert!(scheduler_tick(
+            &mut schedule,
+            first_fire_at + CHECK_INTERVAL,
+            || true
+        ));
+    }
+
     #[test]
     fn version_mismatch_refuses_install_of_a_different_version() {
         let err = version_mismatch_error("1.3.0", "1.2.0").expect("must refuse");
@@ -1003,6 +1270,32 @@ mod tests {
     #[test]
     fn version_mismatch_allows_install_of_the_expected_version() {
         assert_eq!(version_mismatch_error("1.2.0", "1.2.0"), None);
+    }
+
+    fn available(version: &str) -> AvailableUpdate {
+        AvailableUpdate {
+            version: version.to_string(),
+            notes: None,
+            date: None,
+        }
+    }
+
+    #[test]
+    fn confirm_expected_refuses_when_nothing_is_stored() {
+        assert!(confirm_expected_matches_stored(&None, "1.2.0").is_err());
+    }
+
+    #[test]
+    fn confirm_expected_refuses_a_version_different_from_the_stored_one() {
+        let err = confirm_expected_matches_stored(&Some(available("1.3.0")), "1.2.0")
+            .expect_err("must refuse");
+        assert!(err.contains("1.3.0"));
+        assert!(err.contains("1.2.0"));
+    }
+
+    #[test]
+    fn confirm_expected_accepts_only_the_stored_version() {
+        assert!(confirm_expected_matches_stored(&Some(available("1.2.0")), "1.2.0").is_ok());
     }
 
     #[test]
