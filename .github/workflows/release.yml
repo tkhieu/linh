@@ -38,8 +38,31 @@ jobs:
           version="$(python3 scripts/check-release-version.py | sed -n 's/^VERSION=//p')"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+  signing:
+    runs-on: ubuntu-24.04
+    outputs:
+      sign: ${{ steps.policy.outputs.sign }}
+    steps:
+      - name: Resolve updater signing policy
+        id: policy
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$TAURI_SIGNING_PRIVATE_KEY" && -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]]; then
+            echo "sign=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" == "true" ]]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY/_PASSWORD are not set; this dry run will skip signing updater artifacts."
+            echo "sign=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD are required to sign updater artifacts for a release." >&2
+            exit 1
+          fi
+
   build:
-    needs: version
+    needs: [version, signing]
     strategy:
       fail-fast: false
       matrix:
@@ -145,24 +168,6 @@ jobs:
       - name: Install tauri-cli
         run: cargo install tauri-cli --version '^2' --locked
 
-      - name: Resolve updater signing policy
-        id: updater_signing
-        shell: bash
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          if [[ -n "$TAURI_SIGNING_PRIVATE_KEY" && -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]]; then
-            echo "sign=true" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" == "true" ]]; then
-            echo "::warning::TAURI_SIGNING_PRIVATE_KEY/_PASSWORD are not set; this dry run will skip signing updater artifacts."
-            echo "sign=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error::TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD are required to sign updater artifacts for a release." >&2
-            exit 1
-          fi
-
       - name: Build Fedora RPM
         if: matrix.platform == 'fedora'
         working-directory: src-tauri
@@ -171,7 +176,7 @@ jobs:
           cargo tauri build --bundles rpm
 
       - name: Sign updater RPM
-        if: matrix.platform == 'fedora' && steps.updater_signing.outputs.sign == 'true'
+        if: matrix.platform == 'fedora' && needs.signing.outputs.sign == 'true'
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -185,7 +190,7 @@ jobs:
           cargo tauri build --bundles deb
 
       - name: Sign updater DEB
-        if: matrix.platform == 'ubuntu' && steps.updater_signing.outputs.sign == 'true'
+        if: matrix.platform == 'ubuntu' && needs.signing.outputs.sign == 'true'
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -239,7 +244,7 @@ jobs:
           tar -czf "${app}.tar.gz" "$app"
 
       - name: Sign updater macOS app archive
-        if: matrix.platform == 'macos' && steps.updater_signing.outputs.sign == 'true'
+        if: matrix.platform == 'macos' && needs.signing.outputs.sign == 'true'
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -255,7 +260,7 @@ jobs:
           if (-not (Get-ChildItem target/release/msix/*.msix)) { throw 'MSIX package missing' }
 
       - name: Sign updater NSIS installer
-        if: matrix.platform == 'windows' && steps.updater_signing.outputs.sign == 'true'
+        if: matrix.platform == 'windows' && needs.signing.outputs.sign == 'true'
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -270,7 +275,7 @@ jobs:
           if-no-files-found: error
 
   assets:
-    needs: [version, build]
+    needs: [version, signing, build]
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -284,7 +289,9 @@ jobs:
           merge-multiple: true
 
       - name: Prepare release assets and SHA256SUMS
-        run: python3 scripts/prepare-release-artifacts.py dist release-assets
+        run: >-
+          python3 scripts/prepare-release-artifacts.py dist release-assets
+          ${{ needs.signing.outputs.sign != 'true' && '--unsigned' || '' }}
 
       - name: Verify checksums
         shell: bash
