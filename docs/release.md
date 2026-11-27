@@ -28,10 +28,29 @@ artifact is for Partner Center submission, not direct installation.
    (`linh.app.tar.gz`), a `.sig` for each of the rpm, deb, NSIS exe, and
    `.app.tar.gz` (four in total; the msix and dmg are never signed),
    `SHA256SUMS`, and GitHub-generated notes from changes since the previous
-   tag. Check the files and notes, then publish the draft manually.
+   tag. Check the files and notes, then publish the draft with an owner
+   personal access token using `gh release edit vMAJOR.MINOR.PATCH --draft=false`.
+   Publishing with `GITHUB_TOKEN` does not trigger the Update manifest workflow.
 4. Submit the `.msix` separately in Partner Center and manually test Windows
    default-browser selection and URL forwarding on the Store-installed app.
    Also test the macOS DMG on a Mac before publishing the GitHub draft.
+
+## Update manifest
+
+Publishing a stable draft release with the owner's personal token triggers
+**Update manifest**. It downloads that release's signed RPM, DEB, NSIS setup
+EXE, and universal macOS app archive, then uploads `latest.json` to the same
+release. It refuses drafts, prereleases, missing or empty artifacts and
+signatures, and version mismatches. v0.3.2 and earlier have no published `.sig`
+assets, so the workflow cannot build a manifest for those releases.
+
+To backfill or repair a published, signed release, run **Update manifest** with
+`workflow_dispatch` and `tag=vX.Y.Z`. The workflow replaces that release's
+`latest.json`. For the current latest release, check that
+`https://github.com/tkhieu/linh/releases/latest/download/latest.json` returns
+JSON with the expected version and platform entries. The workflow checks this
+URL after upload; when backfilling an older release it warns that the target
+is not latest and skips the URL check.
 
 ## GitHub settings
 
@@ -126,10 +145,12 @@ half; every installed copy of Linh verifies update signatures against it.
   current version, with no way to push a fix. This is why the offline
   backup exists.
 - **Rotation is not instant — read this before touching the key.**
-  `tauri-plugin-updater` (checked against 2.14.1's source:
-  `src/config.rs:116` declares `pub pubkey: String`, a single field, and
-  `src/updater.rs:905` passes only `&self.context.config.pubkey` to the
-  verifier) trusts exactly **one** public key, and it is the one **compiled
+  `tauri-plugin-updater` (checked against 2.14.1's
+  [configuration struct](https://github.com/tauri-apps/plugins-workspace/blob/updater-v2.14.1/plugins/updater/src/config.rs#L107),
+  [download path](https://github.com/tauri-apps/plugins-workspace/blob/updater-v2.14.1/plugins/updater/src/updater.rs#L841-L848),
+  and [signature verifier](https://github.com/tauri-apps/plugins-workspace/blob/updater-v2.14.1/plugins/updater/src/updater.rs#L901-L908):
+  `config.rs:116` declares one `pubkey: String`, and `updater.rs:905` passes
+  that key to the verifier) trusts exactly **one** public key, and it is the one **compiled
   into the already-installed binary**, not whatever `tauri.conf.json` says
   today. An install that never downloads a build containing the new pubkey
   has no way to verify anything signed only with the new private key — it

@@ -1,0 +1,74 @@
+name: Update manifest
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag to backfill or repair (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-manifest-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event_name == 'workflow_dispatch' || (!github.event.release.draft && !github.event.release.prerelease)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Download published release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > release.json
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir release-assets
+
+      - name: Build and upload latest.json
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 scripts/build-update-manifest.py \
+            --tag "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --assets-dir release-assets --release-json release.json \
+            --output latest.json
+          gh release upload "$RELEASE_TAG" latest.json \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Verify latest release endpoint
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          latest_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          if [[ "$latest_tag" != "$RELEASE_TAG" ]]; then
+            echo "::warning::${RELEASE_TAG} is not the latest release; skipping latest endpoint check."
+            exit 0
+          fi
+          for attempt in 1 2 3 4 5; do
+            echo "Checking latest manifest (attempt $attempt/5)"
+            if curl -fLsS "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json" -o latest-remote.json && \
+              python3 -c 'import json,sys; m=json.load(open("latest-remote.json")); assert m["version"] == sys.argv[1] and m["platforms"]' "${RELEASE_TAG#v}"; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo '::error::latest.json endpoint did not resolve to a valid manifest.' >&2
+          exit 1
