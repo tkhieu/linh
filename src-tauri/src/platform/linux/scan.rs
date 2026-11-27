@@ -154,8 +154,15 @@ fn classify_family(id: &str, exec: &str) -> BrowserFamily {
     }
 }
 
+/// True for the native desktop id (`linh`) or either of Linh's Flatpak
+/// app ids: the current `dev.hieutk.linh` and the pre-rename
+/// `dev.tkhieu.linh` (Flathub requires the app id to match a domain the
+/// owner controls, hence the rename), so a Flatpak install under either
+/// id is never listed as a separate, installable browser.
 fn is_self(id: &str) -> bool {
-    id.eq_ignore_ascii_case(LINH_DESKTOP_ID) || id.eq_ignore_ascii_case("dev.tkhieu.linh")
+    id.eq_ignore_ascii_case(LINH_DESKTOP_ID)
+        || id.eq_ignore_ascii_case("dev.hieutk.linh")
+        || id.eq_ignore_ascii_case("dev.tkhieu.linh")
 }
 
 #[cfg(test)]
@@ -231,6 +238,15 @@ mod tests {
         let browsers = scan_browsers(&test_dirs(&root, &[apps]));
         assert!(browsers.is_empty());
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn is_self_matches_native_id_and_both_flatpak_app_ids() {
+        assert!(is_self(LINH_DESKTOP_ID));
+        assert!(is_self("dev.hieutk.linh"));
+        assert!(is_self("dev.tkhieu.linh"));
+        assert!(is_self("DEV.HIEUTK.LINH"));
+        assert!(!is_self("org.mozilla.firefox"));
     }
 
     #[test]

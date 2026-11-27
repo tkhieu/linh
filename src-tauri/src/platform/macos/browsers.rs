@@ -9,7 +9,16 @@ use linh_core::{Browser, BrowserFamily, InstallKind};
 use super::chromium;
 use super::dirs::Dirs;
 use super::launch_services;
-use super::LINH_BUNDLE_ID;
+use super::{LINH_BUNDLE_ID, LINH_BUNDLE_ID_LEGACY};
+
+/// True for either of Linh's own bundle ids (current or pre-rename
+/// legacy), so a stale LaunchServices registration left over from before
+/// the `dev.tkhieu.linh` -> `dev.hieutk.linh` rename is never listed as a
+/// separate, installable browser.
+fn is_self(bundle_id: &str) -> bool {
+    bundle_id.eq_ignore_ascii_case(LINH_BUNDLE_ID)
+        || bundle_id.eq_ignore_ascii_case(LINH_BUNDLE_ID_LEGACY)
+}
 
 /// Classifies a (lowercased) bundle id into its engine family and
 /// whether it has a private/incognito launch flag. Safari has neither a
@@ -51,7 +60,7 @@ pub fn detect_browsers(_dirs: &Dirs) -> Vec<Browser> {
 
     for bundle_id in launch_services::handlers_for_scheme("https") {
         let bundle_id = bundle_id.to_ascii_lowercase();
-        if bundle_id.eq_ignore_ascii_case(LINH_BUNDLE_ID) || results.contains_key(&bundle_id) {
+        if is_self(&bundle_id) || results.contains_key(&bundle_id) {
             continue;
         }
         let Some(bundle_path) = launch_services::app_urls_for_bundle_id(&bundle_id)
@@ -93,6 +102,14 @@ pub fn detect_browsers(_dirs: &Dirs) -> Vec<Browser> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_self_matches_current_and_legacy_bundle_id() {
+        assert!(is_self(LINH_BUNDLE_ID));
+        assert!(is_self(LINH_BUNDLE_ID_LEGACY));
+        assert!(is_self("DEV.HIEUTK.LINH"));
+        assert!(!is_self("com.google.chrome"));
+    }
 
     #[test]
     fn known_browser_families() {

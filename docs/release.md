@@ -116,6 +116,71 @@ instead of comparing ProgID names. Verify HTTP and HTTPS selection,
 activation, update, and uninstall on an actual Store-installed package before
 submission.
 
+## Identifier change
+
+Linh's app identifier changed from `dev.tkhieu.linh` to `dev.hieutk.linh` so
+it matches a domain the owner controls, as Flathub requires. This only
+renames the bundle identity; the GitHub repo (`tkhieu/linh`), the updater
+endpoint, and the updater's signing pubkey are unaffected.
+
+What is **not** affected, and needed no migration, because none of it was
+ever keyed by the identifier in the first place:
+
+- Linh's own config/state (`~/.config/linh`, `~/.local/state/linh`, and
+  their macOS/Windows equivalents under `Linh`) — these are fixed, literal
+  paths in each platform's `dirs.rs`, never Tauri's identifier-derived
+  `app_config_dir`/`app_data_dir`.
+- The Linux `.desktop` file name (`linh.desktop`) — fixed by
+  `LINH_DESKTOP_ID`/`productName`, not the identifier, so an existing
+  `xdg-settings default-web-browser linh.desktop` registration survives
+  untouched.
+- The Windows `LinhURL` ProgID, `Software\Linh\Capabilities` key, and
+  `RegisteredApplications` entry — all literal, not identifier-derived.
+- The MSIX identity (`MSIX_IDENTITY_NAME`/`MSIX_PUBLISHER`/
+  `MSIX_PUBLISHER_DISPLAY_NAME`) — separate repository variables.
+- The NSIS uninstall registry key and install directory — keyed by
+  `productName` (`linh`), not the identifier.
+
+What **is** affected, and what an existing user must do after upgrading:
+
+- **macOS:** LaunchServices keys the default `http`/`https` handler by
+  bundle id, so an install that was default under the old id reports as
+  *not* default after upgrading. Open Settings and choose **Make Linh
+  your default browser** again; this is the same banner a fresh install
+  shows, not a new code path.
+- **Linux:** none. The desktop id and config paths are unaffected (see
+  above), so the existing default-browser registration and config keep
+  working with no action.
+- **Windows:** none. The ProgID/registry integration is unaffected (see
+  above). Programs & Features may show the installer's cosmetic
+  "Publisher" field change from `tkhieu` to `hieutk` (Tauri derives it
+  from the identifier when no explicit `bundle.publisher` is set); this is
+  display-only.
+- **Everywhere:** Linh is a tray-resident background process, and
+  `tauri-plugin-single-instance`'s D-Bus name (Linux) / named mutex
+  (Windows) is derived from the identifier at build time. An old-id
+  instance still running and a newly launched new-id instance will not
+  recognize each other as "the same app" for the one upgrade that crosses
+  this rename, so both could end up running at once if the old instance
+  is never quit. Fully quit Linh (tray icon → **Quit**) once after
+  updating to this release, then relaunch, to avoid that. This is a
+  one-time condition for this release only; every later upgrade is
+  unaffected since both the running and the newly installed copy share
+  the same (new) identifier.
+- Linh never reads or writes the identifier-keyed WebKit/WebView local
+  storage and cache directory itself (no `localStorage`, `indexedDB`, or
+  similar in `ui/src`), so the old one is simply orphaned — a few MB, not
+  cleaned up automatically, same as any Tauri app identifier change. No
+  action needed.
+
+Self-recognition (desktop/Flatpak self-exclusion from Linh's own browser
+list, so Linh is never offered as a target to launch itself) checks both
+the current and legacy ids: `platform::linux::scan::is_self`,
+`platform::macos::browsers::is_self`. The macOS default-browser check
+(`platform::macos::default_browser::is_default_browser`) deliberately does
+**not** do this — it must treat the legacy id as "needs re-selection", not
+as "still Linh".
+
 ## Updater signing key
 
 Linh's self-updater (`tauri-plugin-updater`) trusts one minisign key pair.
