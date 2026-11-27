@@ -1954,7 +1954,7 @@ dependencies = [
 
 [[package]]
 name = "linh"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "base64 0.22.1",
  "core-foundation",
@@ -1976,7 +1976,7 @@ dependencies = [
 
 [[package]]
 name = "linh-core"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
