@@ -388,7 +388,7 @@ jobs:
           ditto "$app" "$proof"
           codesign --force --deep --sign - --entitlements src-tauri/macos/Linh.mas.entitlements "$proof"
           codesign -d --entitlements :- "$proof"
-          codesign -d --entitlements :- "$proof" 2>/dev/null | plutil -extract com.apple.security.app-sandbox raw -o - - | grep -qx 'true'
+          codesign -d --entitlements :- "$proof" 2>&1 | grep -F '<key>com.apple.security.app-sandbox</key><true/>'
           echo 'MAS sandbox entitlement applied to ad-hoc-signed copy'
 
       - name: Archive unsigned MAS app
