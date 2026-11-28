@@ -336,8 +336,148 @@ jobs:
           path: ${{ matrix.files }}
           if-no-files-found: error
 
+  mas:
+    needs: [version]
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca  # stable
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa  # v4
+        with:
+          version: 12.11.2
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version '=2.12.4' --locked
+
+      - name: Build unsigned Mac App Store app
+        working-directory: src-tauri
+        env:
+          LINH_DIST: mas
+        run: cargo tauri build --bundles app --config tauri.mas.conf.json -- --no-default-features --target-dir ../target/mas
+
+      - name: Verify MAS binary, metadata and entitlements
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="target/mas/release/bundle/macos/linh.app"
+          test -d "$app"
+          binary="$app/Contents/MacOS/linh"
+          test -f "$binary"
+          if LC_ALL=C grep -aFq 'Updater does not have any endpoints set.' "$binary"; then
+            echo '::error::MAS binary contains the self-updater marker.'
+            exit 1
+          fi
+          echo 'MAS self-updater marker absent'
+          /usr/libexec/PlistBuddy -c 'Print :ITSAppUsesNonExemptEncryption' "$app/Contents/Info.plist" | grep -qx 'false'
+          /usr/libexec/PlistBuddy -c 'Print :LSApplicationCategoryType' "$app/Contents/Info.plist" | grep -qx 'public.app-category.utilities'
+          /usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist" | grep -qx '13.0'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" = 'dev.hieutk.linh'
+          proof="$RUNNER_TEMP/linh-mas-entitlements-proof.app"
+          ditto "$app" "$proof"
+          codesign --force --deep --sign - --entitlements src-tauri/macos/Linh.mas.entitlements "$proof"
+          codesign -d --entitlements :- "$proof"
+          codesign -d --entitlements :- "$proof" 2>&1 | grep -F '<key>com.apple.security.app-sandbox</key><true/>'
+          echo 'MAS sandbox entitlement applied to ad-hoc-signed copy'
+
+      - name: Archive unsigned MAS app
+        shell: bash
+        run: |
+          set -euo pipefail
+          ditto -c -k --sequesterRsrc --keepParent target/mas/release/bundle/macos/linh.app Linh-mas-unsigned.app.zip
+          echo 'Unsigned MAS .app built and archived'
+
+      - name: Upload unsigned MAS app workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: mas-app-unsigned
+          path: Linh-mas-unsigned.app.zip
+          if-no-files-found: error
+
+      - name: Check MAS signing secrets
+        id: mas_signing
+        shell: bash
+        env:
+          MAS_APP_CERT: ${{ secrets.APPLE_MAS_CERTIFICATE }}
+          MAS_APP_PASSWORD: ${{ secrets.APPLE_MAS_CERTIFICATE_PASSWORD }}
+          MAS_INSTALLER_CERT: ${{ secrets.APPLE_MAS_INSTALLER_CERTIFICATE }}
+          MAS_PROFILE: ${{ secrets.APPLE_MAS_PROVISIONING_PROFILE }}
+        run: |
+          if [[ -n "$MAS_APP_CERT" && -n "$MAS_APP_PASSWORD" && -n "$MAS_INSTALLER_CERT" && -n "$MAS_PROFILE" ]]; then
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+            echo 'MAS signing secrets present'
+          else
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            echo 'MAS signing skipped: one or more MAS secrets are absent'
+          fi
+
+      - name: Sign MAS app and installer
+        if: steps.mas_signing.outputs.enabled == 'true'
+        shell: bash
+        env:
+          MAS_APP_CERT: ${{ secrets.APPLE_MAS_CERTIFICATE }}
+          MAS_APP_PASSWORD: ${{ secrets.APPLE_MAS_CERTIFICATE_PASSWORD }}
+          MAS_INSTALLER_CERT: ${{ secrets.APPLE_MAS_INSTALLER_CERTIFICATE }}
+          MAS_PROFILE: ${{ secrets.APPLE_MAS_PROVISIONING_PROFILE }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/linh-mas.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          trap 'security delete-keychain "$keychain" 2>/dev/null || true' EXIT
+          security create-keychain -p "$keychain_password" "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          printf '%s' "$MAS_APP_CERT" | base64 -D > "$RUNNER_TEMP/mas-app.p12"
+          printf '%s' "$MAS_INSTALLER_CERT" | base64 -D > "$RUNNER_TEMP/mas-installer.p12"
+          printf '%s' "$MAS_PROFILE" | base64 -D > "$RUNNER_TEMP/mas.provisionprofile"
+          security import "$RUNNER_TEMP/mas-app.p12" -k "$keychain" -P "$MAS_APP_PASSWORD" -T /usr/bin/codesign
+          security import "$RUNNER_TEMP/mas-installer.p12" -k "$keychain" -P "$MAS_APP_PASSWORD" -T /usr/bin/productbuild
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          security cms -D -i "$RUNNER_TEMP/mas.provisionprofile" > "$RUNNER_TEMP/mas-profile.plist"
+          python3 - <<'PYCODE'
+          import plistlib
+          from pathlib import Path
+          profile = plistlib.loads(Path(__import__('os').environ['RUNNER_TEMP'], 'mas-profile.plist').read_bytes())
+          team = profile['TeamIdentifier'][0]
+          entitlement_path = Path(__import__('os').environ['RUNNER_TEMP'], 'mas-signing.entitlements')
+          entitlements = plistlib.loads(Path('src-tauri/macos/Linh.mas.entitlements').read_bytes())
+          entitlements['com.apple.application-identifier'] = f'{team}.dev.hieutk.linh'
+          entitlements['com.apple.developer.team-identifier'] = team
+          entitlement_path.write_bytes(plistlib.dumps(entitlements))
+          PYCODE
+          app='target/mas/release/bundle/macos/linh.app'
+          cp "$RUNNER_TEMP/mas.provisionprofile" "$app/Contents/embedded.provisionprofile"
+          app_identity="$(security find-identity -v -p codesigning "$keychain" | sed -nE 's/.*"((3rd Party Mac Developer Application|Apple Distribution):[^"]+)".*/\1/p' | head -1)"
+          test -n "$app_identity"
+          codesign --force --deep --sign "$app_identity" --keychain "$keychain" --entitlements "$RUNNER_TEMP/mas-signing.entitlements" "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          installer_identity="$(security find-identity -v "$keychain" | sed -nE 's/.*"((3rd Party Mac Developer Installer|Mac Installer Distribution):[^"]+)".*/\1/p' | head -1)"
+          test -n "$installer_identity"
+          productbuild --component "$app" /Applications --sign "$installer_identity" --keychain "$keychain" Linh-mas.pkg
+          echo 'Signed MAS .pkg built for manual Transporter upload'
+
+      - name: Upload signed MAS pkg workflow artifact
+        if: steps.mas_signing.outputs.enabled == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: mas-pkg-signed
+          path: Linh-mas.pkg
+          if-no-files-found: error
+
   assets:
-    needs: [version, signing, build]
+    needs: [version, signing, build, mas]
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout

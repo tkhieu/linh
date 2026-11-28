@@ -1,0 +1,11 @@
+{
+  "bundle": {
+    "category": "Utility",
+    "createUpdaterArtifacts": false,
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "entitlements": "macos/Linh.mas.entitlements",
+      "infoPlist": "macos/Info.mas.plist"
+    }
+  }
+}

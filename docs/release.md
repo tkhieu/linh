@@ -488,3 +488,92 @@ References: [Tauri macOS signing and notarization](https://v2.tauri.app/distribu
 [Store signing](https://learn.microsoft.com/en-us/windows/msix/package/sign-msix-package-guide),
 [package identity detection](https://learn.microsoft.com/en-us/windows/msix/detect-package-identity),
 [Application User Model IDs](https://learn.microsoft.com/en-us/windows/win32/shell/appids).
+
+## Mac App Store
+
+The Mac App Store build is a reduced, sandboxed version of Linh. The direct
+GitHub DMG remains the full macOS build. Before submission, enroll in the
+[Apple Developer Program](https://developer.apple.com/programs/enroll/)
+($99/year), register `dev.hieutk.linh` as an App ID and create the matching
+App Store Connect app record. Obtain an Apple Distribution (formerly
+“3rd Party Mac Developer Application”) certificate, a Mac Installer
+Distribution (formerly “3rd Party Mac Developer Installer”) certificate, and
+a “Mac App Store Connect” provisioning profile for this App ID. Export both
+certificates as base64-encoded `.p12` files, using the same export password.
+Set these four GitHub Actions secrets (never commit their values):
+
+| Secret | Value |
+| --- | --- |
+| `APPLE_MAS_CERTIFICATE` | Base64 application-signing `.p12` |
+| `APPLE_MAS_CERTIFICATE_PASSWORD` | Export password for both `.p12` files |
+| `APPLE_MAS_INSTALLER_CERTIFICATE` | Base64 installer-signing `.p12` |
+| `APPLE_MAS_PROVISIONING_PROFILE` | Base64 Mac App Store Connect `.provisionprofile` |
+
+On `macos-15`, the Release workflow builds the unsigned app with the exact
+command below. [Tauri `--config`](https://v2.tauri.app/develop/configuration-files/#extending-the-configuration) merges JSON with the regular Tauri config;
+`--no-default-features` and `--target-dir` pass through to Cargo after `--`.
+The bundle ID stays `dev.hieutk.linh`, the category maps to
+`public.app-category.utilities`, and the deployment target stays macOS 13.0.
+
+```sh
+cd src-tauri
+LINH_DIST=mas cargo tauri build --bundles app --config tauri.mas.conf.json -- --no-default-features --target-dir ../target/mas
+cd ..
+```
+
+`bundle.macOS.infoPlist` points to `src-tauri/macos/Info.mas.plist`, which
+Tauri merges into the generated bundle `Info.plist`. Tauri also automatically
+merges a root `src-tauri/Info.plist`, but using that name would affect the
+GitHub build too. The MAS file sets `ITSAppUsesNonExemptEncryption=false`:
+Linh uses the system's ordinary HTTPS facilities and contains no custom
+nonexempt encryption. Confirm the answer against the final app before
+submission.
+
+### Entitlements
+
+- `com.apple.security.app-sandbox=true` is required for Mac App Store apps.
+  The overlay points Tauri to `macos/Linh.mas.entitlements`; entitlements
+  become effective when code signing applies them. The workflow ad hoc signs
+  a disposable copy and prints `codesign -d --entitlements :-` as proof.
+- `com.apple.application-identifier` and
+  `com.apple.developer.team-identifier` are added only for Store signing,
+  using the Team ID from the provisioning profile. They are required to
+  match Apple's App ID and cannot be filled before the owner has a profile.
+- `com.apple.security.network.client` is omitted. Linh routes an incoming
+  URL by asking macOS to open it in an installed browser; that browser makes
+  the network request. The production WKWebView loads Tauri's bundled UI
+  through a [local custom protocol](https://github.com/tauri-apps/tauri/blob/tauri-v2.12.5/crates/tauri/src/webview/mod.rs), and the MAS updater is compiled out.
+  Neither action opens an outgoing connection from Linh. No temporary
+  exception entitlements are requested.
+
+The Release workflow checks the built binary for absence of
+`Updater does not have any endpoints set.`, verifies Info.plist values,
+archives the untouched unsigned `.app` as the `mas-app-unsigned` **workflow
+artifact**, and never includes it in GitHub Release assets. When all four
+MAS secrets exist, it imports both certificates into a temporary keychain,
+embeds the profile at `Contents/embedded.provisionprofile`, signs the app
+with its Apple Distribution identity and generated entitlements, and runs:
+
+```sh
+productbuild --component target/mas/release/bundle/macos/linh.app /Applications --sign "$installer_identity" --keychain "$keychain" Linh-mas.pkg
+```
+
+The signed `mas-pkg-signed` workflow artifact is for **manual** upload with
+Apple Transporter; no workflow submits it to App Store Connect. Without the
+four secrets, the signing step is skipped and the unsigned artifact still
+builds. Test the signed package on a Mac before submission.
+
+App Review notes: “Linh is a link router. Set it as the default browser,
+then open an HTTP or HTTPS link. Linh selects an installed browser according
+to the user's rules, or prompts the user, and asks macOS to open the link in
+that browser. The Mac App Store build is sandboxed: browser profiles and
+private-window launch options are unavailable, icon extraction via `sips`
+is disabled, and it has no self-updater. Default-browser selection uses the
+macOS consent prompt.”
+
+For App Privacy, answer **Data Not Collected**: routing settings remain on
+the device and Linh does not send link contents to a service. App Store
+Connect also requires a privacy-policy URL; publish that page before
+submission. Apple documents that
+[`OpenConfiguration.arguments` is ignored for sandboxed apps](https://developer.apple.com/documentation/appkit/nsworkspace/openconfiguration/arguments),
+which is why MAS cannot offer profile and private-window launch arguments.
