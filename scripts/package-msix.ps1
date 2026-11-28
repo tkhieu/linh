@@ -45,6 +45,20 @@ if ($stampContents -ne $expectedMarker) {
     throw "Build stamp at $stampPath says '$stampContents', expected '$expectedMarker' - refusing to package a binary that isn't a confirmed msstore/self-update-off build"
 }
 
+# A matching stamp alone doesn't prove it describes *this* exe: build.rs
+# writes the stamp before the final exe is linked, so a stale stamp left
+# over next to a later-replaced exe (e.g. a different build copied over
+# the same path without going through cargo/build.rs again) would still
+# read correctly. Require the exe to be at least as new as its stamp -
+# release.yml also deletes target/msstore before every Store build so
+# the two are only ever written together in the first place; this is the
+# second, independent check against the same risk.
+$exeWriteTime = (Get-Item $sourceExe).LastWriteTimeUtc
+$stampWriteTime = (Get-Item $stampPath).LastWriteTimeUtc
+if ($exeWriteTime -lt $stampWriteTime) {
+    throw "LINH_STORE_EXE_PATH ($sourceExe, last written $exeWriteTime UTC) is older than its build stamp ($stampPath, last written $stampWriteTime UTC) - it may have been replaced without a matching rebuild; refusing to package it"
+}
+
 $stage = Join-Path $root 'target/release/msix-stage'
 $output = Join-Path $root "target/release/msix/Linh_$($version)_x64.msix"
 $assets = Join-Path $stage 'Assets'

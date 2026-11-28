@@ -99,15 +99,10 @@ fn write_dist_stamp(dist: &str, self_update_enabled: bool) {
     };
     let stamp_path = profile_dir.join("linh.dist-marker.txt");
     let contents = format!("LINH_BUILD_MARKER:dist={dist};self_update={self_update_enabled}\n");
-    match std::fs::write(&stamp_path, &contents) {
-        Ok(()) => println!(
-            "cargo:warning=write_dist_stamp: wrote {} to {}",
-            contents.trim(),
-            stamp_path.display()
-        ),
-        Err(err) => println!(
+    if let Err(err) = std::fs::write(&stamp_path, &contents) {
+        println!(
             "cargo:warning=write_dist_stamp: failed to write {}: {err}",
             stamp_path.display()
-        ),
+        );
     }
 }

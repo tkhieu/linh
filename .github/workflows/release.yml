@@ -183,11 +183,19 @@ jobs:
           # building, so a stale signature or a stale older-version bundle
           # can never ride along with a fresh, unsigned, or differently
           # versioned build.
+          # target/msstore is wiped too: its binary and the build stamp
+          # next to it (see build.rs's write_dist_stamp) must always come
+          # from the SAME build. A stale cached exe sitting next to a
+          # stale cached stamp from an earlier run would otherwise still
+          # read as "a confirmed msstore build" to package-msix.ps1's
+          # content check, even though neither was produced by the build
+          # this job is about to run.
           rm -rf \
             target/release/bundle/rpm \
             target/release/bundle/deb \
             target/release/bundle/nsis \
             target/release/msix \
+            target/msstore \
             target/universal-apple-darwin/release/bundle/dmg \
             target/universal-apple-darwin/release/bundle/macos
 
