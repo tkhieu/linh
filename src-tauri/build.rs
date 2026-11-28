@@ -69,21 +69,31 @@ fn main() {
 /// passing.
 ///
 /// Derives the binary's directory from `OUT_DIR`
-/// (`<target-dir>/<profile>/build/<pkg>-<hash>/out`) by walking up three
-/// levels to `<target-dir>/<profile>`, which is where Cargo places the
-/// final binary for an ordinary, non-cross-compiled build — every build
-/// in this repo's CI. Best-effort: a failure here (an unexpected
-/// `OUT_DIR` shape, a write error) must never fail the actual build,
-/// since this stamp only serves `package-msix.ps1`, nothing the compiled
-/// binary itself depends on.
+/// (`<target-dir>/<profile>/build/<pkg>-<hash>/out`, Cargo's own
+/// documented convention) by finding the ancestor directory literally
+/// named `build` and taking *its* parent — rather than walking up a
+/// fixed number of levels, which turned out not to be robust: in real
+/// CI, `OUT_DIR`'s actual depth below `build/` didn't match this
+/// crate's local structure (observed landing one level too deep, inside
+/// `build/` itself, across every platform), for a reason not fully
+/// root-caused. Searching for the `build` component by name instead of
+/// counting levels is self-correcting regardless of that extra nesting.
+/// Best-effort throughout: a failure here (an unexpected `OUT_DIR`
+/// shape with no `build` ancestor, a write error) must never fail the
+/// actual build, since this stamp only serves `package-msix.ps1`,
+/// nothing the compiled binary itself depends on.
 fn write_dist_stamp(dist: &str, self_update_enabled: bool) {
     let Ok(out_dir) = std::env::var("OUT_DIR") else {
         println!("cargo:warning=write_dist_stamp: OUT_DIR is not set, skipping stamp file");
         return;
     };
-    let Some(profile_dir) = std::path::Path::new(&out_dir).ancestors().nth(3) else {
+    let out_path = std::path::Path::new(&out_dir);
+    let build_dir = out_path
+        .ancestors()
+        .find(|a| a.file_name() == Some(std::ffi::OsStr::new("build")));
+    let Some(profile_dir) = build_dir.and_then(std::path::Path::parent) else {
         println!(
-            "cargo:warning=write_dist_stamp: OUT_DIR ({out_dir}) has fewer than 3 ancestors, skipping stamp file"
+            "cargo:warning=write_dist_stamp: could not find a 'build' ancestor (or its parent) in OUT_DIR ({out_dir}), skipping stamp file"
         );
         return;
     };
