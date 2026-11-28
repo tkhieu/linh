@@ -15,7 +15,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   api.listBrowsers.mockResolvedValue([chrome, firefox])
   api.getConfig.mockResolvedValue(structuredClone(config))
-  api.getPlatformCaps.mockResolvedValue({ source_app_rules: false })
+  api.getPlatformCaps.mockResolvedValue({ source_app_rules: false, restrict_profile_private: false })
   api.isDefaultBrowser.mockResolvedValue(true)
   api.saveConfig.mockResolvedValue(undefined)
   api.getIcon.mockResolvedValue(null)
@@ -82,6 +82,20 @@ describe('SettingsApp', () => {
     } finally {
       userAgent.mockRestore()
     }
+  })
+
+  it('hides profile and private options and explains why on a Mac App Store build', async () => {
+    api.getPlatformCaps.mockResolvedValue({ source_app_rules: false, restrict_profile_private: true })
+    render(<SettingsApp />)
+    await screen.findByLabelText('Primary browser')
+    openSection('Browsers')
+    expect(await screen.findByText(/aren't available in the Mac App Store version/)).toBeInTheDocument()
+    expect(screen.getAllByText('—', { selector: '.col-private' }).length).toBeGreaterThan(0)
+    openSection('Rules')
+    fireEvent.click(screen.getByRole('button', { name: '+ New route' }))
+    const options = within(screen.getByLabelText('Open in')).getAllByRole('option').map((option) => option.textContent)
+    expect(options.some((label) => label?.includes('Private'))).toBe(false)
+    expect(options.some((label) => label?.includes('—'))).toBe(false)
   })
 
   it('names Windows, not Linux, in the source-app-rules hint on Windows', async () => {

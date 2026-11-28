@@ -1,6 +1,8 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
-use linh_core::{AppTarget, Browser, Decision, LaunchCommand, Target};
+use linh_core::{AppTarget, Browser, Decision, LaunchCommand, PlatformCaps, Target};
 use tauri::{AppHandle, Manager};
 use url::Url;
 
@@ -223,16 +225,105 @@ fn open_target_with(
     spawn: impl Fn(&LaunchCommand, AsyncOutcomeHandler) -> Result<(), String>,
 ) -> Result<(), String> {
     let browsers = state.browsers.lock().unwrap();
+    let (target, cmd) = build_degraded_launch_command(
+        state.caps,
+        &state.dirs,
+        &state.profile_private_notice_shown,
+        &browsers,
+        target,
+        url,
+    )?;
+    drop(browsers);
+    spawn(
+        &cmd,
+        direct_open_outcome_handler(state, target, url.to_string()),
+    )
+}
+
+/// The single chokepoint every launch passes through before a
+/// `LaunchCommand` is ever built: `route_url`'s `Decision::Open` and a
+/// rule's `Target` fallback (via [`open_target_with`]), an `AppTarget`'s
+/// *synchronous* browser fallback (also via [`open_target_with`], called
+/// from [`open_app_target_with`]), and — just as importantly — the
+/// *asynchronous* fallback [`run_watched_fallback`] runs from a worker
+/// thread after a confirmed app-launch failure (Teams/Zoom), which used
+/// to build and spawn its own `LaunchCommand` directly, bypassing this
+/// entirely. Routing every one of those through this one function (never
+/// re-implementing "look up the browser, degrade, build the command" at
+/// a second call site) is what makes `caps.restrict_profile_private`
+/// actually hold everywhere, not just on the paths someone remembered to
+/// wire it into.
+///
+/// Degrades `target` first (via [`degrade_target`], showing the one-time
+/// notice if it changed anything), *then* looks up the browser and
+/// builds the command — so the returned `Target` (used by the caller's
+/// own outcome-handling/logging) always matches what was actually
+/// launched, never the pre-degradation original.
+fn build_degraded_launch_command(
+    caps: PlatformCaps,
+    dirs: &Dirs,
+    notice_shown: &AtomicBool,
+    browsers: &[Browser],
+    target: &Target,
+    url: &str,
+) -> Result<(Target, LaunchCommand), String> {
+    let target = match degrade_target(caps, target) {
+        Some(degraded) => {
+            notify_profile_private_unsupported_once(dirs, notice_shown);
+            degraded
+        }
+        None => target.clone(),
+    };
     let browser = browsers
         .iter()
         .find(|b| b.id == target.browser)
         .ok_or_else(|| format!("browser '{}' is not installed", target.browser))?;
-    let cmd = launcher::build_launch_command(browser, target, url)?;
-    drop(browsers);
-    spawn(
-        &cmd,
-        direct_open_outcome_handler(state, target.clone(), url.to_string()),
-    )
+    let cmd = launcher::build_launch_command(browser, &target, url)?;
+    Ok((target, cmd))
+}
+
+/// Strips `profile`/`private` from `target` when `caps.restrict_profile_private`
+/// is set (Mac App Store build: the sandbox gives no way to carry either
+/// to a launch — see `platform::macos::workspace`'s doc comment).
+///
+/// Returns `None` when `target` needed no change — including when
+/// `caps.restrict_profile_private` is `false` — so [`build_degraded_launch_command`]
+/// (the only caller) can tell a degradation actually happened, and only
+/// show the user a notice then, without re-deriving that itself.
+pub(crate) fn degrade_target(caps: PlatformCaps, target: &Target) -> Option<Target> {
+    if !caps.restrict_profile_private {
+        return None;
+    }
+    if target.profile.is_none() && !target.private {
+        return None;
+    }
+    Some(Target {
+        browser: target.browser.clone(),
+        profile: None,
+        private: false,
+    })
+}
+
+/// Tells the user, once per run, that a profile or private-window target
+/// degraded to the plain browser window because this build can't carry
+/// either to a launch (see [`degrade_target`]) — a config full of rules
+/// that each name one must not notify once per routed link. Takes
+/// `dirs`/`notice_shown` rather than `&AppState` so
+/// [`run_watched_fallback`]'s worker-thread closure (which only ever
+/// snapshots plain, `'static` data — see its own doc comment) can call
+/// this too, not just [`build_degraded_launch_command`]'s synchronous
+/// caller.
+fn notify_profile_private_unsupported_once(dirs: &Dirs, notice_shown: &AtomicBool) {
+    if notice_shown.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    notify::notify_info(
+        dirs,
+        "Linh: profile and private windows unavailable",
+        "This Mac App Store build can't open a specific browser profile or \
+         a private/incognito window in another app — opening it normally \
+         instead.",
+    );
 }
 
 /// Outcome handler for a direct (non-app) target open: there's no
@@ -271,9 +362,9 @@ fn direct_open_outcome_handler(
 /// succeed on its own, and falling back too risks the link opening
 /// twice. Nothing extra on success.
 ///
-/// Snapshots `state.dirs`/`state.browsers` now rather than reading the
-/// live `AppState` when this eventually runs (possibly seconds later,
-/// from a worker thread): `AppState::browsers` is a plain
+/// Snapshots `state.dirs`/`state.browsers`/`state.caps` now rather than
+/// reading the live `AppState` when this eventually runs (possibly
+/// seconds later, from a worker thread): `AppState::browsers` is a plain
 /// `Mutex<Vec<Browser>>`, not behind an `Arc` this closure could hold
 /// its own clone of and a `tauri::AppHandle` isn't available this deep
 /// into `routing` without threading one through every caller (`route_url`
@@ -281,7 +372,10 @@ fn direct_open_outcome_handler(
 /// directly by `commands::prompt_choose` and tests do not) — making the
 /// live state reachable would need that restructuring. A browser list
 /// changing in the few seconds before a possible confirmed failure is
-/// rare enough to accept against that cost.
+/// rare enough to accept against that cost. `caps` is `Copy` and
+/// `profile_private_notice_shown` is itself `Arc`-wrapped specifically so
+/// both can be snapshotted the same way, rather than needing a live
+/// `&AppState`.
 fn app_launch_outcome_handler(
     state: &AppState,
     fallback: Target,
@@ -290,10 +384,14 @@ fn app_launch_outcome_handler(
 ) -> AsyncOutcomeHandler {
     let dirs = state.dirs.clone();
     let browsers = state.browsers.lock().unwrap().clone();
+    let caps = state.caps;
+    let notice_shown = Arc::clone(&state.profile_private_notice_shown);
     Box::new(move |outcome| match outcome {
         LaunchOutcome::Succeeded => {}
         LaunchOutcome::Unconfirmed => notify_could_not_confirm(&dirs, &url, &app_display_name),
-        LaunchOutcome::DefiniteFailure => run_watched_fallback(dirs, browsers, fallback, url),
+        LaunchOutcome::DefiniteFailure => {
+            run_watched_fallback(dirs, browsers, caps, notice_shown, fallback, url)
+        }
     })
 }
 
@@ -301,8 +399,34 @@ fn app_launch_outcome_handler(
 /// (rather than assuming success as soon as it's spawned) — but never
 /// chains a further fallback if it fails or can't be confirmed either:
 /// that's reported with the same [`notify_could_not_confirm`] path and
-/// logged, not retried, to keep this bounded to a single hop.
-fn run_watched_fallback(dirs: Dirs, browsers: Vec<Browser>, fallback: Target, url: String) {
+/// logged, not retried, to keep this bounded to a single hop. Goes
+/// through [`build_degraded_launch_command`] like every other launch
+/// (rather than building its own `LaunchCommand` directly, as it used
+/// to), so a Teams/Zoom app-target rule whose fallback names a profile
+/// or private-window browser degrades and notifies here too, not only on
+/// the synchronous paths through [`open_target_with`].
+fn run_watched_fallback(
+    dirs: Dirs,
+    browsers: Vec<Browser>,
+    caps: PlatformCaps,
+    notice_shown: Arc<AtomicBool>,
+    fallback: Target,
+    url: String,
+) {
+    let (fallback, cmd) =
+        match build_degraded_launch_command(caps, &dirs, &notice_shown, &browsers, &fallback, &url)
+        {
+            Ok(built) => built,
+            Err(err) => {
+                logging::log_line(
+                    &dirs,
+                    &format!("{url}: fallback {fallback:?} could not even start: {err}"),
+                );
+                notify_could_not_confirm(&dirs, &url, &fallback.browser);
+                return;
+            }
+        };
+
     let dirs_for_outcome = dirs.clone();
     let fallback_for_outcome = fallback.clone();
     let url_for_outcome = url.clone();
@@ -327,13 +451,7 @@ fn run_watched_fallback(dirs: Dirs, browsers: Vec<Browser>, fallback: Target, ur
         }
     });
 
-    let result = browsers
-        .iter()
-        .find(|b| b.id == fallback.browser)
-        .ok_or_else(|| format!("browser '{}' is not installed", fallback.browser))
-        .and_then(|browser| launcher::build_launch_command(browser, &fallback, &url))
-        .and_then(|cmd| real_spawn(&dirs, &cmd, on_fallback_outcome));
-    if let Err(err) = result {
+    if let Err(err) = real_spawn(&dirs, &cmd, on_fallback_outcome) {
         logging::log_line(
             &dirs,
             &format!("{url}: fallback {fallback:?} could not even start: {err}"),
@@ -377,6 +495,77 @@ pub fn show_and_focus(app: &AppHandle, label: &str) {
     if let Some(window) = app.get_webview_window(label) {
         let _ = window.show();
         let _ = window.set_focus();
+    }
+}
+
+// `degrade_target` is pure platform-capability logic with no OS-specific
+// I/O, so (unlike the fixtures below) these run on every host, including
+// this repo's Linux CI — the only place `Dist::Mas`'s actual launch path
+// ever gets a unit test at all, since the macOS-only code that builds
+// its `caps.restrict_profile_private = true` is itself untestable off a
+// real Mac (see `platform::macos::command`/`workspace`'s own doc
+// comments).
+#[cfg(test)]
+mod degrade_target_tests {
+    use super::*;
+
+    fn target(browser: &str, profile: Option<&str>, private: bool) -> Target {
+        Target {
+            browser: browser.to_string(),
+            profile: profile.map(str::to_string),
+            private,
+        }
+    }
+
+    fn caps(restrict_profile_private: bool) -> PlatformCaps {
+        PlatformCaps {
+            source_app_rules: false,
+            restrict_profile_private,
+        }
+    }
+
+    #[test]
+    fn unrestricted_platform_never_degrades_anything() {
+        assert_eq!(
+            degrade_target(caps(false), &target("chrome", Some("Work"), true)),
+            None
+        );
+        assert_eq!(
+            degrade_target(caps(false), &target("chrome", None, false)),
+            None
+        );
+    }
+
+    #[test]
+    fn restricted_platform_leaves_a_plain_target_alone() {
+        assert_eq!(
+            degrade_target(caps(true), &target("chrome", None, false)),
+            None
+        );
+    }
+
+    #[test]
+    fn restricted_platform_strips_profile() {
+        assert_eq!(
+            degrade_target(caps(true), &target("chrome", Some("Work"), false)),
+            Some(target("chrome", None, false))
+        );
+    }
+
+    #[test]
+    fn restricted_platform_strips_private() {
+        assert_eq!(
+            degrade_target(caps(true), &target("chrome", None, true)),
+            Some(target("chrome", None, false))
+        );
+    }
+
+    #[test]
+    fn restricted_platform_strips_both_at_once_and_keeps_the_browser_id() {
+        assert_eq!(
+            degrade_target(caps(true), &target("com.google.chrome", Some("Work"), true)),
+            Some(target("com.google.chrome", None, false))
+        );
     }
 }
 
@@ -680,6 +869,82 @@ mod tests {
         assert!(
             !log.contains("could not confirm opening in google-chrome"),
             "must never name the fallback for the original launch's own outcome; log: {log}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The gap a prior review caught: `run_watched_fallback` (the async
+    /// `DefiniteFailure` path for an app-target's *fallback* — Teams/Zoom
+    /// failing to launch) used to build and spawn its own `LaunchCommand`
+    /// directly, bypassing `degrade_target`/the one-time notice entirely.
+    /// It now goes through the same [`build_degraded_launch_command`]
+    /// chokepoint as every other launch, so a fallback naming a
+    /// profile/private target degrades here too.
+    #[test]
+    fn definite_app_launch_failure_degrades_a_profile_private_fallback_under_mas_caps() {
+        let root = temp_root("mas-fallback-degrade");
+        let caps = PlatformCaps {
+            source_app_rules: false,
+            restrict_profile_private: true,
+        };
+        let state = AppState::for_test_with_caps(
+            test_dirs(&root),
+            Config::default(),
+            vec![native_browser("google-chrome", "/usr/bin/x %u")],
+            caps,
+        );
+        let app_target = app_target(
+            "teams",
+            Some(Target {
+                browser: "google-chrome".to_string(),
+                profile: Some("Work".to_string()),
+                private: true,
+            }),
+        );
+        let app = native_browser("teams", "/usr/bin/teams-for-linux %u");
+        let original_url = "https://teams.microsoft.com/l/meetup-join/abc";
+        let captured: RefCell<Option<AsyncOutcomeHandler>> = RefCell::new(None);
+
+        let result = open_app_target_with(
+            &state,
+            &app_target,
+            original_url,
+            |_| Some(app.clone()),
+            |cmd, on_outcome| {
+                assert_eq!(cmd.program, "/usr/bin/teams-for-linux");
+                *captured.borrow_mut() = Some(on_outcome);
+                Ok(())
+            },
+        );
+        assert!(result.is_ok());
+
+        let on_outcome = captured
+            .into_inner()
+            .expect("the app spawn must hand the outcome handler to the caller");
+        // Runs `run_watched_fallback` synchronously, right here (no real
+        // worker thread in this test) — it attempts a real spawn of
+        // "/usr/bin/x", which isn't a real binary, so it fails and logs;
+        // what matters is that the attempt (and the log line about it)
+        // used the DEGRADED fallback target, not the original.
+        on_outcome(LaunchOutcome::DefiniteFailure);
+
+        let log = std::fs::read_to_string(test_dirs(&root).log_path()).unwrap_or_default();
+        assert!(
+            !log.contains("Work") && !log.contains("private: true"),
+            "the fallback must degrade to the plain browser before any spawn attempt; log: {log}"
+        );
+        // Checked on the flag itself, not by scraping the log for the
+        // notice's own text: `notify::notify_info` only logs on
+        // *failure* to show a real desktop notification (see
+        // `platform::linux::notify::send`), so whether this assertion
+        // would also pass by scanning the log depends on whether a
+        // `notify-send` happens to be reachable in whatever environment
+        // the test runs in — the flag is what the production code
+        // itself treats as "the notice fired", so that's what this
+        // checks too.
+        assert!(
+            state.profile_private_notice_shown.load(Ordering::SeqCst),
+            "the one-time notice must fire for a fallback degradation too; log: {log}"
         );
         std::fs::remove_dir_all(&root).ok();
     }

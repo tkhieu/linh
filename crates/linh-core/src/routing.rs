@@ -9,6 +9,20 @@ use crate::matching::pattern_matches;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PlatformCaps {
     pub source_app_rules: bool,
+    /// True only for the Mac App Store build (`LINH_DIST=mas`): the App
+    /// Sandbox gives no way to carry a profile or private/incognito flag
+    /// to another app — `NSWorkspace`'s sandboxed-safe open APIs ignore
+    /// launch arguments entirely, whether or not the target app is
+    /// already running (see `platform::macos::workspace`'s doc comment
+    /// on the host project). This field only *describes* the
+    /// capability; `decide` itself stays platform-agnostic and keeps
+    /// returning whatever `Target` a rule names — the caller (the
+    /// `open_target`/`open_app_target` chokepoint in `src-tauri`'s own
+    /// `routing` module) is the one that strips `profile`/`private` from
+    /// it before actually launching anything, and shows a one-time
+    /// notice when it does, so that side effect lives next to the other
+    /// launch side effects instead of inside this pure function.
+    pub restrict_profile_private: bool,
 }
 
 /// The outcome of a routing decision for a given URL.
@@ -253,6 +267,7 @@ private = false
             &url("https://example.com"),
             PlatformCaps {
                 source_app_rules: false,
+                restrict_profile_private: false,
             },
         );
         assert_eq!(decision, Decision::Open(config.primary));
@@ -274,6 +289,7 @@ private = false
             &url("https://example.com"),
             PlatformCaps {
                 source_app_rules: true,
+                restrict_profile_private: false,
             },
         );
         assert_eq!(decision, Decision::Open(target("chrome")));

@@ -113,7 +113,7 @@ export function SettingsApp() {
   const [presetsStatus, setPresetsStatus] = useState<PresetsStatus>('loading')
   const [presetMenu, setPresetMenu] = useState(false)
   const [traceInput, setTraceInput] = useState('')
-  const targets = useMemo(() => deriveTargets(browsers), [browsers])
+  const targets = useMemo(() => deriveTargets(browsers, caps?.restrict_profile_private), [browsers, caps])
 
   async function reload() {
     const [nextConfig, nextBrowsers, nextCaps, isDefault] = await Promise.all([
@@ -368,13 +368,14 @@ export function SettingsApp() {
               <div><h2>Targets</h2><p>Choose which browsers appear in the picker. None selected shows all.</p></div>
               <div className="rule-actions"><button type="button" className="secondary" disabled={rescanning} onClick={() => void rescan()}>Rescan</button></div>
             </div>
+            {caps.restrict_profile_private && <p className="hint">Profiles and private windows aren't available in the Mac App Store version.</p>}
             <div>
               <div className="settings-table-head">
                 <span className="col-no">No</span><span style={{ flex: '1 1 0' }}>Target</span><span className="col-private">Private</span><span className="col-pick">In picker</span>
               </div>
               <ul className="checklist settings-rows" aria-label="Shown browsers">
                 {targets.map(({ key, label, icon, target }, index) => {
-                  const supportsPrivate = browsers.find((browser) => browser.id === target.browser)?.supports_private
+                  const supportsPrivate = !caps.restrict_profile_private && browsers.find((browser) => browser.id === target.browser)?.supports_private
                   const checked = config.shown_browsers.includes(key)
                   return (
                     <li key={key}>
@@ -454,6 +455,7 @@ export function SettingsApp() {
               <label htmlFor="rule-patterns">URL patterns</label>
               <textarea id="rule-patterns" rows={4} placeholder={'meet.google.com\n*.company.com'} value={draft.patterns} onChange={(event) => setDraft({ ...draft, patterns: event.target.value })} />
               {caps.source_app_rules && <><label htmlFor="source-apps">Source apps</label><textarea id="source-apps" rows={2} value={draft.sourceApps} onChange={(event) => setDraft({ ...draft, sourceApps: event.target.value })} /></>}
+              {caps.restrict_profile_private && <p className="hint">Browser profiles and private windows aren't available in the Mac App Store version — existing profile/private rule targets still open, just as the plain browser window, with a one-time notice.</p>}
               <label htmlFor="rule-open-in">Open in</label>
               <div className="target-select"><BrowserIcon icon={targets.find(({ key }) => key === draft.openIn)?.icon} />
               <select id="rule-open-in" value={draft.openIn} onChange={(event) => setDraft({ ...draft, openIn: event.target.value })}>

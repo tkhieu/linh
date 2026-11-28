@@ -34,10 +34,23 @@
 
 use linh_core::{Browser, BrowserFamily, InstallKind, LaunchCommand, Target};
 
+use crate::updates::{current_dist, Dist};
+
 /// Also referenced by `platform::launcher::spawn_detached`, to apply its
 /// bounded-wait handling only to an `open`-wrapped `LaunchCommand` (every
-/// one this module builds is).
+/// non-MAS one this module builds is).
 pub(crate) const OPEN: &str = "/usr/bin/open";
+
+/// Sentinel `LaunchCommand::program` values this module hands back
+/// instead of `OPEN` when `current_dist()` is [`Dist::Mas`] — never
+/// actually `exec`'d (the App Sandbox gives this build no exec rights
+/// over `/usr/bin/open` at all), only matched on by
+/// `platform::launcher::spawn_detached`, which routes them to
+/// `super::workspace` instead of `std::process::Command`. `args` holds
+/// `[bundle_path, url]` for [`MAS_OPEN_WITH_APP`], `[url]` alone for
+/// [`MAS_OPEN_URL`].
+pub(crate) const MAS_OPEN_WITH_APP: &str = "linh-mas:open-with-app";
+pub(crate) const MAS_OPEN_URL: &str = "linh-mas:open-url";
 
 fn private_flag(browser: &Browser) -> Option<&'static str> {
     if !browser.supports_private {
@@ -62,9 +75,28 @@ pub fn build_launch_command(
         return Err("macOS does not support Flatpak launches".into());
     };
     if matches!(bundle_path.as_str(), "msteams:" | "zoommtg:") {
+        let program = if current_dist() == Dist::Mas {
+            MAS_OPEN_URL
+        } else {
+            OPEN
+        };
         return Ok(LaunchCommand {
-            program: OPEN.to_string(),
+            program: program.to_string(),
             args: vec![url.to_string()],
+        });
+    }
+
+    if current_dist() == Dist::Mas {
+        // Sandbox: no exec rights for `/usr/bin/open`, and
+        // `NSWorkspace.open(urls:withApplicationAt:configuration:)`
+        // never forwards launch arguments to the opened app regardless
+        // (see `workspace.rs`'s doc comment) — `target.profile`/
+        // `target.private` are ignored here rather than consulted at
+        // all, as defense in depth: `routing::degrade_target` has
+        // already cleared both before this is ever called.
+        return Ok(LaunchCommand {
+            program: MAS_OPEN_WITH_APP.to_string(),
+            args: vec![bundle_path.clone(), url.to_string()],
         });
     }
 

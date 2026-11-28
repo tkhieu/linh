@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use linh_core::{Browser, Config, PlatformCaps, Target};
 use tauri::menu::CheckMenuItem;
@@ -8,6 +9,19 @@ use tauri::Wry;
 use crate::platform::current::{app_config, browsers, default_browser, dirs::Dirs, notify};
 use crate::prompt_state::PromptState;
 use crate::updates;
+use crate::updates::Dist;
+
+/// Maps this build's `LINH_DIST` to the `PlatformCaps` it implies.
+/// Deliberately pure and parameterized by `dist` rather than reading
+/// `updates::current_dist()` itself, so it's unit-tested directly on
+/// every CI runner — not just the one real macOS/`LINH_DIST=mas` build
+/// that ever reaches `Dist::Mas` at runtime.
+pub(crate) fn platform_caps_for_dist(dist: Dist) -> PlatformCaps {
+    PlatformCaps {
+        source_app_rules: false,
+        restrict_profile_private: dist == Dist::Mas,
+    }
+}
 
 /// Shared, mutable application state, managed by Tauri and reachable from
 /// every command and from the tray menu's click handler.
@@ -31,6 +45,18 @@ pub struct AppState {
     /// Background update checking and in-place install state (see
     /// [`crate::updates`]).
     pub updates: updates::Updates,
+    /// Set the first time this run shows the "profiles and private
+    /// windows aren't available" notice (only ever true when
+    /// `caps.restrict_profile_private` is), so a config full of rules
+    /// that each name a profile/private target notifies once per run
+    /// instead of once per routed link. See
+    /// `routing::degrade_target`/`routing::notify_profile_private_unsupported_once`.
+    /// `Arc`-wrapped (unlike the other `Mutex`-guarded fields above) so
+    /// `routing::run_watched_fallback`'s worker-thread closure can hold
+    /// its own clone the same way it already snapshots `dirs`/`browsers`,
+    /// rather than needing a live `&AppState` or `AppHandle` it doesn't
+    /// otherwise have this deep into an async outcome handler.
+    pub profile_private_notice_shown: Arc<AtomicBool>,
     /// Serializes every config save (whether a whole-config replacement
     /// from `save_config`, or an in-place `update_config` from the tray)
     /// so two concurrent callers can never leave the in-memory `config`
@@ -67,9 +93,7 @@ impl AppState {
 
         AppState {
             dirs,
-            caps: PlatformCaps {
-                source_app_rules: false,
-            },
+            caps: platform_caps_for_dist(updates::current_dist()),
             config: Mutex::new(config),
             browsers: Mutex::new(detected),
             prompt: PromptState::new(),
@@ -77,6 +101,7 @@ impl AppState {
             primary_items: Mutex::new(Vec::new()),
             icon_cache: Mutex::new(HashMap::new()),
             updates: updates::Updates::init(),
+            profile_private_notice_shown: Arc::new(AtomicBool::new(false)),
             save_lock: Mutex::new(()),
         }
     }
@@ -94,11 +119,26 @@ impl AppState {
     /// copy — reading, mutating, saving, and updating memory all under
     /// `save_lock`, so no other save can read a stale config out from
     /// under `mutate`, and no field `mutate` doesn't touch is ever lost.
-    /// Used by the tray, which only ever changes `primary`.
+    /// Used by the tray, which only ever changes `primary`, and by
+    /// [`AppState::persist_config`] for a whole-config replacement from
+    /// the UI.
+    ///
+    /// Degrades `config.primary` (via `routing::degrade_target`) right
+    /// after `mutate` runs, before saving: `tray::primary_entries` never
+    /// *offers* a profile/private entry under `caps.restrict_profile_private`,
+    /// but `mutate` can still be the Settings UI's `save_config` command
+    /// handing over a whole `Config` it built from a stale target, or one
+    /// from a channel this build wasn't on when it was first saved — in
+    /// either case, persisting an "impossible" primary that can never
+    /// actually launch as written would be a silent lie the config file
+    /// and the Settings UI both keep telling until someone notices.
     pub fn update_config(&self, mutate: impl FnOnce(&mut Config)) -> Result<(), String> {
         let _guard = self.save_lock.lock().unwrap();
         let mut config = self.config.lock().unwrap().clone();
         mutate(&mut config);
+        if let Some(degraded) = crate::routing::degrade_target(self.caps, &config.primary) {
+            config.primary = degraded;
+        }
         app_config::save(&self.dirs.config_path(), &config)?;
         *self.config.lock().unwrap() = config;
         Ok(())
@@ -119,11 +159,31 @@ impl AppState {
     /// logic directly.
     #[cfg(test)]
     pub(crate) fn for_test(dirs: Dirs, config: Config, browsers: Vec<Browser>) -> Self {
+        Self::for_test_with_caps(
+            dirs,
+            config,
+            browsers,
+            PlatformCaps {
+                source_app_rules: false,
+                restrict_profile_private: false,
+            },
+        )
+    }
+
+    /// Like [`AppState::for_test`], but with an explicit `caps` — used by
+    /// tests that need `restrict_profile_private: true` without a real
+    /// `LINH_DIST=mas` build (not possible on this Linux CI host at all,
+    /// since that's baked in at compile time).
+    #[cfg(test)]
+    pub(crate) fn for_test_with_caps(
+        dirs: Dirs,
+        config: Config,
+        browsers: Vec<Browser>,
+        caps: PlatformCaps,
+    ) -> Self {
         AppState {
             dirs,
-            caps: PlatformCaps {
-                source_app_rules: false,
-            },
+            caps,
             config: Mutex::new(config),
             browsers: Mutex::new(browsers),
             prompt: PromptState::new(),
@@ -131,6 +191,7 @@ impl AppState {
             primary_items: Mutex::new(Vec::new()),
             icon_cache: Mutex::new(HashMap::new()),
             updates: updates::Updates::init(),
+            profile_private_notice_shown: Arc::new(AtomicBool::new(false)),
             save_lock: Mutex::new(()),
         }
     }
@@ -255,5 +316,89 @@ mod tests {
 
     fn fs_cleanup(root: &std::path::Path) {
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn only_mas_restricts_profile_and_private() {
+        for dist in [
+            Dist::Github,
+            Dist::Msstore,
+            Dist::Flathub,
+            Dist::Copr,
+            Dist::Ppa,
+        ] {
+            assert!(
+                !platform_caps_for_dist(dist).restrict_profile_private,
+                "{dist:?} must not restrict profile/private targets"
+            );
+        }
+        assert!(platform_caps_for_dist(Dist::Mas).restrict_profile_private);
+    }
+
+    #[test]
+    fn mas_capability_mapping_leaves_source_app_rules_untouched() {
+        assert!(!platform_caps_for_dist(Dist::Mas).source_app_rules);
+    }
+
+    #[test]
+    fn update_config_degrades_a_profile_or_private_primary_under_mas_caps() {
+        let root = temp_root("degrade-primary");
+        let caps = platform_caps_for_dist(Dist::Mas);
+        let state =
+            AppState::for_test_with_caps(test_dirs(&root), Config::default(), Vec::new(), caps);
+
+        state
+            .update_config(|cfg| {
+                cfg.primary = Target {
+                    browser: "chrome".to_string(),
+                    profile: Some("Work".to_string()),
+                    private: true,
+                }
+            })
+            .expect("update_config");
+
+        let cfg = state.config.lock().unwrap();
+        assert_eq!(
+            cfg.primary,
+            Target {
+                browser: "chrome".to_string(),
+                profile: None,
+                private: false,
+            },
+            "a profile/private primary must be degraded before it's ever persisted under MAS caps"
+        );
+
+        let on_disk = app_config::load_or_init(&state.dirs.config_path(), None, &[]).0;
+        assert_eq!(
+            on_disk.primary, cfg.primary,
+            "the degraded primary must be what actually hit disk, not just the in-memory copy"
+        );
+        fs_cleanup(&root);
+    }
+
+    #[test]
+    fn update_config_leaves_a_profile_or_private_primary_alone_without_mas_caps() {
+        let root = temp_root("no-degrade-primary");
+        let state = test_state(&root);
+
+        state
+            .update_config(|cfg| {
+                cfg.primary = Target {
+                    browser: "chrome".to_string(),
+                    profile: Some("Work".to_string()),
+                    private: false,
+                }
+            })
+            .expect("update_config");
+
+        assert_eq!(
+            state.config.lock().unwrap().primary,
+            Target {
+                browser: "chrome".to_string(),
+                profile: Some("Work".to_string()),
+                private: false,
+            }
+        );
+        fs_cleanup(&root);
     }
 }
