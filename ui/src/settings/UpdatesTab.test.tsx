@@ -26,7 +26,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 }))
 
 const base: UpdateStatus = {
-  current_version: '0.3.2', kind: 'rpm', capability: 'self_install', last_checked: null,
+  current_version: '0.3.2', kind: 'rpm', capability: 'self_install', managed_by: null, last_checked: null,
   available: { version: '0.4.0', date: '2026-11-27T10:00:00Z', notes: '<script>alert(1)</script>\nFixed links' },
   last_error: null,
 }

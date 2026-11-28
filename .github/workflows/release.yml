@@ -230,11 +230,26 @@ jobs:
         working-directory: src-tauri
         run: cargo tauri build --bundles nsis
 
+      - name: Build Windows Store binary (LINH_DIST=msstore)
+        if: matrix.platform == 'windows'
+        working-directory: src-tauri
+        # A separate binary, into its own `--target-dir`, so it never
+        # clobbers the NSIS installer's own `target/release/linh.exe`
+        # above (which is deliberately the default `github` flavour,
+        # self-updater included). `--no-default-features` turns off the
+        # `self-update` feature here; the leading `--` is required by
+        # `cargo tauri build` to pass cargo-level flags through to the
+        # underlying `cargo` invocation (`cargo tauri build --help`).
+        env:
+          LINH_DIST: msstore
+        run: cargo tauri build --no-bundle -- --no-default-features --target-dir ../target/msstore
+
       - name: Package unsigned Windows Store MSIX
         if: matrix.platform == 'windows'
         shell: pwsh
         env:
           LINH_VERSION: ${{ needs.version.outputs.version }}
+          LINH_STORE_EXE_PATH: target/msstore/release/linh.exe
           MSIX_IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME }}
           MSIX_PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
           MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}

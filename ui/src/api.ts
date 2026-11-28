@@ -84,7 +84,7 @@ export interface UpdateStatus {
   current_version: string
   kind: UpdateKind
   capability: UpdateCapability
-  managed_by?: ManagedBy | null
+  managed_by: ManagedBy | null
   /** Milliseconds since the Unix epoch, when a check has run. */
   last_checked?: number | null
   available?: AvailableUpdate | null

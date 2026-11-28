@@ -119,6 +119,22 @@ pub fn current_dist() -> Dist {
     parse_dist(env!("LINH_DIST")).expect("build.rs validates LINH_DIST before compilation")
 }
 
+/// The exact line `main.rs`'s `--print-dist` flag prints: the compiled-in
+/// `LINH_DIST` value and whether the `self-update` feature is compiled
+/// into this binary. Packaging a build into a store artifact (see
+/// `scripts/package-msix.ps1`) runs the actual binary with `--print-dist`
+/// and asserts on this line, rather than trusting a file path or a build
+/// step's own bookkeeping to have picked the right one — so packaging the
+/// wrong binary fails loudly instead of silently shipping a self-updater
+/// store policy forbids.
+pub fn print_dist_line() -> String {
+    format!(
+        "dist={} self_update={}",
+        env!("LINH_DIST"),
+        cfg!(feature = "self-update")
+    )
+}
+
 /// Where the "Updates" UI says updates come from, for a channel whose
 /// [`Dist::managed_by`] is not `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1763,6 +1779,16 @@ mod tests {
         assert_eq!(
             message,
             tauri_plugin_updater::Error::ReleaseNotFound.to_string()
+        );
+    }
+
+    #[test]
+    fn print_dist_line_names_the_compiled_in_dist_and_self_update_state() {
+        let line = print_dist_line();
+        assert!(line.starts_with("dist=github "), "{line}");
+        assert_eq!(
+            line,
+            format!("dist=github self_update={}", cfg!(feature = "self-update"))
         );
     }
 

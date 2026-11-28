@@ -98,15 +98,49 @@ enforces the combination: it fails the build if `LINH_DIST` is `msstore` or
 `mas` while `self-update` is still enabled, so this can't be gotten wrong
 silently.
 
-The exact build commands:
+`cargo tauri build` only forwards flags it recognizes itself (`--bundles`,
+`--features`, `--target`, …); anything meant for the underlying `cargo`
+invocation — `--no-default-features`, `--target-dir` — must come after a
+literal `--`, or it's rejected outright:
+
+```
+$ cargo tauri build --no-default-features
+error: unexpected argument '--no-default-features' found
+  tip: to pass '--no-default-features' as a value, use '-- --no-default-features'
+```
+
+(`cargo tauri build --help`, tauri-cli 2.12.4: *"\[ARGS\]... Command line
+arguments passed to the runner. Use `--` to explicitly mark the start of
+the arguments"*.) Every `cargo`/`cargo tauri` command below was actually
+run against this repo (on Linux) to confirm it parses and builds — the
+`msstore`/`mas` `--bundles`/packaging steps are Windows/macOS-only (Linux's
+`tauri-cli` only recognizes `deb`/`rpm`/`appimage` for `--bundles`, and
+`package-msix.ps1` needs the Windows SDK), so those two are shown in the
+shell syntax `release.yml` actually uses them in (bash on Linux runners,
+PowerShell on the Windows runner — see its "Build Windows Store binary"
+and "Package unsigned Windows Store MSIX" steps) rather than re-verified
+from this checkout; the `--` requirement itself is a `cargo tauri`
+behavior common to every platform, and that part was verified here.
 
 ```sh
 # GitHub (default): the in-app updater is this install's update path.
 cargo tauri build --bundles rpm   # or deb/nsis/dmg, per platform
 
-# Microsoft Store / Mac App Store: the self-updater is compiled out.
-LINH_DIST=msstore cargo tauri build --no-default-features
-LINH_DIST=mas cargo tauri build --no-default-features
+# Microsoft Store (Windows, PowerShell): `self-update` must be off, and
+# the exe that ends up in the MSIX must not be the same one the NSIS
+# installer just built. Build it into its own --target-dir, then package
+# it — package-msix.ps1 itself verifies the exe with --print-dist before
+# packaging it (see below), so this doesn't have to be done by hand.
+$env:LINH_DIST = 'msstore'
+cargo tauri build --no-bundle -- --no-default-features --target-dir ../target/msstore
+$env:LINH_STORE_EXE_PATH = 'target/msstore/release/linh.exe'
+$env:LINH_VERSION = '0.4.1'
+./scripts/package-msix.ps1
+
+# Mac App Store: same self-update-off requirement, run on macOS. The
+# `app` bundle target (the unsigned .app the sandboxing/signing work in a
+# later phase builds on) only exists in macOS's own tauri-cli.
+LINH_DIST=mas cargo tauri build --bundles app -- --no-default-features
 
 # Flathub / Copr / PPA: `self-update` stays on (no store policy forbids
 # it here), but it never runs — the distro/Flathub updates these installs,
@@ -118,6 +152,16 @@ LINH_DIST=copr cargo tauri build --bundles rpm
 LINH_DIST=ppa cargo tauri build --bundles deb
 LINH_DIST=flathub cargo tauri build --bundles rpm
 ```
+
+Every built binary prints its own compiled-in channel on demand:
+`linh --print-dist` → `dist=<LINH_DIST> self_update=<true|false>`
+(`updates::print_dist_line`). `scripts/package-msix.ps1` requires
+`LINH_STORE_EXE_PATH` (no default/guessed path), runs that exe with
+`--print-dist`, and refuses to package anything that doesn't print
+exactly `dist=msstore self_update=false` — so pointing it at the wrong
+exe (e.g. the NSIS build's own `target/release/linh.exe`) fails the
+packaging step instead of silently shipping the self-updater in a Store
+submission.
 
 CI's `build` job runs `cargo check` and `cargo clippy` a second time with
 `LINH_DIST=msstore` and `--no-default-features` on every push, so the store

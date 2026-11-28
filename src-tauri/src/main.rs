@@ -115,6 +115,18 @@ fn dispatch_launch(app: &AppHandle, state: &AppState, args: &[String], received_
 }
 
 fn main() {
+    // Prints which `LINH_DIST`/`self-update` combination this exact binary
+    // was compiled with, then exits immediately — before anything else
+    // runs (no webview, no single-instance registration, no `AppState`).
+    // Packaging scripts (`scripts/package-msix.ps1`) run the binary with
+    // this flag and assert on its output before packaging it, so a build
+    // step accidentally pointing at the wrong binary is caught instead of
+    // silently shipping the self-updater into a store build.
+    if std::env::args().any(|arg| arg == "--print-dist") {
+        println!("{}", updates::print_dist_line());
+        return;
+    }
+
     allocator::cap_arenas();
     // Must run before the builder below builds its first window (and so
     // its first `WebContext`/`WebsiteDataManager`) — see webkit_tune's

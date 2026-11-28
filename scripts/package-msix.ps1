@@ -6,6 +6,30 @@ $version = $env:LINH_VERSION
 if (-not $version -or $version -notmatch '^\d+\.\d+\.\d+$') {
     throw 'LINH_VERSION must be a three-part numeric version'
 }
+# No default/guessed path: the caller (release.yml) must point this at the
+# binary it built specifically for the Store, with LINH_DIST=msstore and
+# the self-update feature off — never the default github-flavour exe that
+# also ships the NSIS installer, which still has the self-updater.
+$sourceExe = $env:LINH_STORE_EXE_PATH
+if (-not $sourceExe) {
+    throw 'LINH_STORE_EXE_PATH must point at the msstore-flavour linh.exe (built with LINH_DIST=msstore and --no-default-features)'
+}
+$sourceExe = (Resolve-Path $sourceExe).Path
+if (-not (Test-Path $sourceExe)) { throw "LINH_STORE_EXE_PATH does not exist: $sourceExe" }
+
+# Assert the binary is actually what it claims to be before packaging it —
+# run it and read back its own compiled-in `LINH_DIST`/`self-update`
+# state (see `main.rs`'s `--print-dist` and `updates::print_dist_line`)
+# rather than trusting that whatever built $sourceExe got the build
+# command right. Store policy (Microsoft Store, Apple App Store guideline
+# 2.5.2) forbids shipping the self-updater at all, so this fails the
+# packaging step loudly instead of silently shipping it.
+$distInfo = (& $sourceExe --print-dist) -join "`n"
+if ($LASTEXITCODE -ne 0) { throw "running '$sourceExe --print-dist' failed (exit $LASTEXITCODE): $distInfo" }
+if ($distInfo -notmatch '^dist=msstore self_update=false$') {
+    throw "LINH_STORE_EXE_PATH ($sourceExe) is not an msstore/self-update-off build: '$distInfo'"
+}
+
 $stage = Join-Path $root 'target/release/msix-stage'
 $output = Join-Path $root "target/release/msix/Linh_$($version)_x64.msix"
 $assets = Join-Path $stage 'Assets'
@@ -22,7 +46,7 @@ if (-not (Test-Path $makePri)) { throw 'Windows SDK MakePri.exe was not found' }
 Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
 New-Item $assets -ItemType Directory -Force | Out-Null
 New-Item (Split-Path $output) -ItemType Directory -Force | Out-Null
-Copy-Item (Join-Path $root 'target/release/linh.exe') $stage
+Copy-Item $sourceExe (Join-Path $stage 'linh.exe')
 Copy-Item (Join-Path $root 'LICENSE') $stage
 Copy-Item (Join-Path $root 'packaging/windows/assets/*.png') $assets
 
