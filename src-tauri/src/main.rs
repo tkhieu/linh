@@ -125,7 +125,8 @@ fn main() {
     // final routing decision.
     let process_start = Instant::now();
 
-    tauri::Builder::default()
+    #[allow(unused_mut)] // only mutated under `#[cfg(feature = "self-update")]` below
+    let mut builder = tauri::Builder::default()
         .on_page_load(move |webview, payload| {
             if let Some(state) = webview.try_state::<AppState>() {
                 mem_profile::log_window_ready_if_relevant(
@@ -155,8 +156,15 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_notification::init());
+    // Store policy forbids a self-updating code path at all (see the
+    // `self-update` feature's doc comment in Cargo.toml), so this flavour
+    // of Linh never even registers the plugin, let alone calls it.
+    #[cfg(feature = "self-update")]
+    {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+    builder
         .setup(move |app| {
             let state = AppState::init();
             app.manage(state);

@@ -153,4 +153,25 @@ describe('Updates tab', () => {
     view.unmount()
     expect(events.unlisten).toHaveBeenCalledTimes(2)
   })
+
+  it.each([
+    ['microsoft_store', 'the Microsoft Store'],
+    ['mac_app_store', 'the Mac App Store'],
+    ['flathub', 'Flathub'],
+    ['copr', 'your package manager (Copr)'],
+    ['ppa', 'your package manager (PPA)'],
+  ] as const)('shows the managed-by message and hides checking controls for %s', async (managedBy, label) => {
+    api.getUpdateStatus.mockResolvedValue({
+      ...base, capability: 'none', managed_by: managedBy, available: null, last_error: null,
+    })
+    await openUpdates()
+    expect(screen.getByText('0.3.2')).toBeInTheDocument()
+    expect(screen.getByText(`Updates for this version come from ${label}.`)).toBeInTheDocument()
+    expect(screen.getByText('Update method').closest('div')).toHaveTextContent(label)
+    expect(screen.queryByRole('button', { name: 'Check now' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('checkbox', { name: 'Check for updates automatically' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Update now' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Download' })).not.toBeInTheDocument()
+    expect(api.checkForUpdatesNow).not.toHaveBeenCalled()
+  })
 })

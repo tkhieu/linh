@@ -74,6 +74,56 @@ secrets in repository variables or in the manifest. The MSIX variables default
 to conspicuous `Placeholder` values for CI verification; replace **all three**
 with the exact Partner Center values before submitting a Store package.
 
+## Store build flavour (`LINH_DIST`)
+
+Every build has one distribution channel, `LINH_DIST`, baked in at compile
+time by `src-tauri/build.rs` (default `github` when the variable is unset).
+It is read once, by `build.rs`, not at runtime: `cargo:rustc-env` embeds the
+validated value into the binary, and an unrecognized value fails the build
+immediately with the list of accepted ones. The six values are `github`,
+`msstore`, `mas`, `flathub`, `copr`, `ppa`.
+
+For every value except `github`, Settings → Updates shows "Updates for this
+version come from …" instead of any checking/installing UI, and the
+background scheduler never starts (`updates::scheduler_enabled`) — so a
+store or distro build never contacts the update endpoint at all.
+
+Microsoft Store policy and Apple's App Store guideline 2.5.2 additionally
+forbid shipping a self-updating code path at all, not just disabling it at
+runtime. `tauri-plugin-updater` is gated behind the `self-update` Cargo
+feature (default **on**), so `msstore`/`mas` builds must turn it off
+entirely — the dependency, the plugin registration in `main.rs`, and every
+function in `updates.rs` that calls it are all compiled out. `build.rs`
+enforces the combination: it fails the build if `LINH_DIST` is `msstore` or
+`mas` while `self-update` is still enabled, so this can't be gotten wrong
+silently.
+
+The exact build commands:
+
+```sh
+# GitHub (default): the in-app updater is this install's update path.
+cargo tauri build --bundles rpm   # or deb/nsis/dmg, per platform
+
+# Microsoft Store / Mac App Store: the self-updater is compiled out.
+LINH_DIST=msstore cargo tauri build --no-default-features
+LINH_DIST=mas cargo tauri build --no-default-features
+
+# Flathub / Copr / PPA: `self-update` stays on (no store policy forbids
+# it here), but it never runs — the distro/Flathub updates these installs,
+# not Linh. Each reuses the existing rpm/deb bundle; the packaging work
+# specific to each channel (the Copr spec, the PPA source package, the
+# Flathub manifest) is tracked separately in the store-submissions plan
+# (phases 4, 5, 7) and isn't built by this command on its own yet.
+LINH_DIST=copr cargo tauri build --bundles rpm
+LINH_DIST=ppa cargo tauri build --bundles deb
+LINH_DIST=flathub cargo tauri build --bundles rpm
+```
+
+CI's `build` job runs `cargo check` and `cargo clippy` a second time with
+`LINH_DIST=msstore` and `--no-default-features` on every push, so the store
+configuration can't silently rot even though no workflow builds and submits
+the actual Store packages yet.
+
 ## Store MSIX
 
 Tauri builds the unsigned NSIS installer using its existing Windows build
