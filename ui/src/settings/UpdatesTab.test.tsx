@@ -36,7 +36,7 @@ beforeEach(() => {
   events.handlers.clear()
   api.getConfig.mockResolvedValue(structuredClone(config))
   api.listBrowsers.mockResolvedValue([])
-  api.getPlatformCaps.mockResolvedValue({ source_app_rules: false })
+  api.getPlatformCaps.mockResolvedValue({ source_app_rules: false, restrict_profile_private: false })
   api.isDefaultBrowser.mockResolvedValue(true)
   api.saveConfig.mockResolvedValue(undefined)
   api.getUpdateStatus.mockResolvedValue(base)

@@ -29,7 +29,14 @@ export function parseTargetKey(key: string): Target | null {
     : { browser: base.slice(0, profileAt), profile: base.slice(profileAt + 1), private: isPrivate }
 }
 
-export function deriveTargets(browsers: Browser[]): BrowserTarget[] {
+/** `restrictProfilePrivate` is `caps.restrict_profile_private` (the Mac
+ * App Store build): only the plain, no-profile, non-private variant of
+ * each browser is offered when it's `true`, since the backend would
+ * strip profile/private off anything else before launching anyway (see
+ * `src-tauri/src/routing.rs::degrade_target`) — offering them here would
+ * just be a picker option that silently does something other than what
+ * it says. */
+export function deriveTargets(browsers: Browser[], restrictProfilePrivate = false): BrowserTarget[] {
   const results: BrowserTarget[] = []
   const seen = new Set<string>()
   const add = (target: Target, label: string, icon?: string) => {
@@ -42,7 +49,7 @@ export function deriveTargets(browsers: Browser[]): BrowserTarget[] {
 
   for (const browser of browsers) {
     const variants: { target: Target; label: string }[] = [{ target: { browser: browser.id, private: false }, label: browser.display_name }]
-    if (browser.family === 'chromium') {
+    if (!restrictProfilePrivate && browser.family === 'chromium') {
       for (const profile of browser.profiles) {
         variants.push({
           target: { browser: browser.id, profile: profile.dir, private: false },
@@ -52,7 +59,7 @@ export function deriveTargets(browsers: Browser[]): BrowserTarget[] {
     }
     for (const variant of variants) {
       add(variant.target, variant.label, browser.icon)
-      if (browser.supports_private) {
+      if (!restrictProfilePrivate && browser.supports_private) {
         add({ ...variant.target, private: true }, `${variant.label} (Private)`, browser.icon)
       }
     }

@@ -178,6 +178,14 @@ fn main() {
     }
     builder
         .setup(move |app| {
+            // Must run before `AppState::init()` (next line): on the Mac
+            // App Store build, that call's own `notify::notify_error`
+            // (config-broken path) is the earliest notification in the
+            // process, and needs this handle already stashed to reach a
+            // real toast instead of only logging — see
+            // `platform::macos::notify`'s doc comment.
+            #[cfg(target_os = "macos")]
+            crate::platform::macos::notify::set_app_handle(app.handle().clone());
             let state = AppState::init();
             app.manage(state);
             let app_handle = app.handle().clone();

@@ -42,6 +42,19 @@ png = "0.18"
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
 plist = "1"
+# Only used by `platform::macos::workspace` (the `LINH_DIST=mas` launch
+# path): `NSWorkspace`'s sandboxed-safe open/default-handler APIs, which
+# a Mac App Store build must use instead of exec'ing `/usr/bin/open` or
+# calling the (sandbox-hostile) `LaunchServices` C functions that write
+# state (`LSSetDefaultHandlerForURLScheme`) — see that module's doc
+# comment. `objc2`/`objc2-app-kit`/`block2` are already in this
+# workspace's `Cargo.lock`, pulled in transitively by `tauri` itself on
+# macOS, so this adds no new crate to the dependency tree, only a direct
+# edge to versions already resolved.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray", "NSError"] }
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication", "block2"] }
+block2 = "0.6"
 
 [[bin]]
 name = "linh"

@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 
+use crate::updates::{current_dist, Dist};
+
 use super::bundle;
 use super::dirs::Dirs;
 
@@ -29,6 +31,19 @@ fn is_app_bundle_path(path: &Path) -> bool {
 }
 
 pub fn resolve_icon(_dirs: &Dirs, icon: &str) -> Option<String> {
+    if current_dist() == Dist::Mas {
+        // `sips`(1) can't be exec'd from the sandbox (no exec rights
+        // over arbitrary system binaries). The sandbox-safe alternative,
+        // `NSWorkspace.icon(forFile:)`, only hands back an in-memory
+        // `NSImage` — turning that into the PNG data URL this command's
+        // contract promises would need an `NSBitmapImageRep` re-encode
+        // this project has no other reason to carry, for a feature
+        // (browser icons in pickers) the UI already degrades
+        // gracefully without: `BrowserIcon` falls back to a generic
+        // glyph whenever this returns `None`, same as any browser whose
+        // icon file is missing on disk today.
+        return None;
+    }
     let bundle_path = Path::new(icon);
     if !is_app_bundle_path(bundle_path) || !bundle_path.is_dir() {
         return None;

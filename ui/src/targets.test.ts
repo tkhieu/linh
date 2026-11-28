@@ -50,4 +50,13 @@ describe('browser targets', () => {
     const targets = deriveTargets([chrome, firefox])
     expect(visibleTargets(targets, ['retired-browser/Profile 9'])).toEqual(targets)
   })
+
+  it('restrictProfilePrivate keeps only the plain variant of each browser', () => {
+    const targets = deriveTargets([chrome, firefox], true)
+    expect(targets.map(({ label }) => label)).toEqual(['Google Chrome', 'Firefox'])
+    expect(targets.map(({ target }) => target)).toEqual([
+      { browser: 'chrome', private: false },
+      { browser: 'firefox', private: false },
+    ])
+  })
 })
