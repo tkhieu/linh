@@ -11,6 +11,7 @@ pub struct DesktopEntry {
     pub icon: Option<String>,
     pub mime_types: Vec<String>,
     pub hidden: bool,
+    pub no_display: bool,
     pub flatpak_app_id: Option<String>,
     pub path: PathBuf,
 }
@@ -34,6 +35,7 @@ pub fn parse_desktop_file(path: &Path, id: &str) -> Option<DesktopEntry> {
     let mut icon: Option<String> = None;
     let mut mime_types: Vec<String> = Vec::new();
     let mut hidden = false;
+    let mut no_display = false;
     let mut flatpak_app_id: Option<String> = None;
 
     for raw_line in content.lines() {
@@ -71,6 +73,7 @@ pub fn parse_desktop_file(path: &Path, id: &str) -> Option<DesktopEntry> {
                     .collect();
             }
             "Hidden" => hidden = value.eq_ignore_ascii_case("true"),
+            "NoDisplay" => no_display = value.eq_ignore_ascii_case("true"),
             "X-Flatpak" => flatpak_app_id = Some(value.to_string()),
             _ => {}
         }
@@ -83,6 +86,7 @@ pub fn parse_desktop_file(path: &Path, id: &str) -> Option<DesktopEntry> {
         icon,
         mime_types,
         hidden,
+        no_display,
         flatpak_app_id,
         path: path.to_path_buf(),
     })
@@ -153,6 +157,24 @@ mod tests {
         );
         let entry = parse_desktop_file(&path, "foo").expect("parse");
         assert!(entry.hidden);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn no_display_is_flagged_without_hiding_entry() {
+        let dir = std::env::temp_dir().join(format!(
+            "linh-desktop-test-nodisplay-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = write_file(
+            &dir,
+            "foo.desktop",
+            "[Desktop Entry]\nExec=/usr/bin/foo %u\nNoDisplay=true\n",
+        );
+        let entry = parse_desktop_file(&path, "foo").unwrap();
+        assert!(entry.no_display);
+        assert!(!entry.hidden);
         fs::remove_dir_all(&dir).ok();
     }
 

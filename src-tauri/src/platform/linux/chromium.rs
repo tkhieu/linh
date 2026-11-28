@@ -15,7 +15,7 @@ pub fn profiles_for(browser: &Browser, dirs: &Dirs) -> Vec<BrowserProfile> {
     read_profiles(&path)
 }
 
-fn local_state_path(browser: &Browser, dirs: &Dirs) -> Option<PathBuf> {
+pub(super) fn local_state_path(browser: &Browser, dirs: &Dirs) -> Option<PathBuf> {
     match &browser.install {
         InstallKind::Native { exec } => {
             let subdir = native_config_subdir(&browser.id, exec)?;

@@ -73,11 +73,21 @@ impl AppState {
         let dirs = Dirs::from_env();
         #[cfg(target_os = "windows")]
         default_browser::refresh_registration_if_stale(&dirs);
+        #[cfg(target_os = "linux")]
+        let discovery = browsers::detect_browsers_and_aliases(&dirs);
+        #[cfg(target_os = "linux")]
+        let detected = discovery.browsers;
+        #[cfg(not(target_os = "linux"))]
         let detected = browsers::detect_browsers(&dirs);
         let previous_default = default_browser::current_default_browser_id();
         let config_path = dirs.config_path();
-        let (config, status) =
+        #[allow(unused_mut)] // Linux applies desktop-id aliases after loading.
+        let (mut config, status) =
             app_config::load_or_init(&config_path, previous_default.as_deref(), &detected);
+        #[cfg(target_os = "linux")]
+        if status == app_config::ConfigStatus::Loaded {
+            app_config::migrate_browser_aliases(&mut config, &discovery.aliases, &dirs);
+        }
 
         if status == app_config::ConfigStatus::Broken {
             notify::notify_error(
