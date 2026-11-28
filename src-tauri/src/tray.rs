@@ -1,4 +1,4 @@
-use linh_core::Target;
+use linh_core::{Browser, PlatformCaps, Target};
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, Submenu};
 use tauri::{AppHandle, Wry};
 
@@ -6,6 +6,7 @@ use crate::state::AppState;
 
 pub const TRAY_ID: &str = "main";
 
+#[derive(Debug, PartialEq)]
 struct Entry {
     label: String,
     target: Target,
@@ -13,6 +14,17 @@ struct Entry {
 
 fn primary_entries(state: &AppState) -> Vec<Entry> {
     let browsers = state.browsers.lock().unwrap();
+    primary_entries_for(&browsers, state.caps)
+}
+
+/// Pure so it's unit-tested directly: `restrict_profile_private` (Mac
+/// App Store build) must never offer a profile or private-window menu
+/// entry here, the same way `ui/src/targets.ts::deriveTargets` hides
+/// them from the Settings picker — a tray entry is itself a way to set
+/// `Config::primary`, so an entry this platform can't actually launch
+/// would otherwise let the tray persist one anyway (`handle_primary_pick`
+/// in `main.rs`).
+fn primary_entries_for(browsers: &[Browser], caps: PlatformCaps) -> Vec<Entry> {
     let mut entries = Vec::new();
     for browser in browsers.iter() {
         entries.push(Entry {
@@ -23,6 +35,9 @@ fn primary_entries(state: &AppState) -> Vec<Entry> {
                 private: false,
             },
         });
+        if caps.restrict_profile_private {
+            continue;
+        }
         for profile in &browser.profiles {
             entries.push(Entry {
                 label: format!("{} — {}", browser.display_name, profile.display_name),
@@ -97,5 +112,71 @@ pub fn sync_checked_state(state: &AppState) {
     let items = state.primary_items.lock().unwrap();
     for (target, item) in targets.iter().zip(items.iter()) {
         let _ = item.set_checked(*target == current_primary);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use linh_core::{BrowserFamily, BrowserProfile, InstallKind};
+
+    fn unrestricted() -> PlatformCaps {
+        PlatformCaps {
+            source_app_rules: false,
+            restrict_profile_private: false,
+        }
+    }
+
+    fn restricted() -> PlatformCaps {
+        PlatformCaps {
+            source_app_rules: false,
+            restrict_profile_private: true,
+        }
+    }
+
+    fn chrome() -> Browser {
+        Browser {
+            id: "chrome".to_string(),
+            display_name: "Google Chrome".to_string(),
+            family: BrowserFamily::Chromium,
+            install: InstallKind::Native {
+                exec: "/Applications/Google Chrome.app".to_string(),
+            },
+            profiles: vec![BrowserProfile {
+                dir: "Profile 1".to_string(),
+                display_name: "Work".to_string(),
+            }],
+            supports_private: true,
+            icon: None,
+            desktop_file: None,
+        }
+    }
+
+    #[test]
+    fn unrestricted_lists_the_plain_profile_and_private_entries() {
+        let entries = primary_entries_for(&[chrome()], unrestricted());
+        assert_eq!(
+            entries.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(),
+            vec![
+                "Google Chrome",
+                "Google Chrome — Work",
+                "Google Chrome (Private)"
+            ]
+        );
+    }
+
+    #[test]
+    fn restricted_platform_only_lists_the_plain_entry() {
+        let entries = primary_entries_for(&[chrome()], restricted());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].label, "Google Chrome");
+        assert_eq!(
+            entries[0].target,
+            Target {
+                browser: "chrome".to_string(),
+                profile: None,
+                private: false,
+            }
+        );
     }
 }

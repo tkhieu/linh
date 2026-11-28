@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { currentMonitor, getCurrentWindow, LogicalSize } from '@tauri-apps/api/window'
-import { getConfig, getPromptUrl, listBrowsers, promptCancel, promptChoose } from '../api'
+import { getConfig, getPlatformCaps, getPromptUrl, listBrowsers, promptCancel, promptChoose } from '../api'
 import type { BrowserTarget } from '../targets'
 import { deriveTargets, visibleTargets } from '../targets'
 import { BrowserIcon } from '../BrowserIcon'
@@ -78,9 +78,9 @@ export function PromptApp() {
     async function refreshTargets() {
       const requestId = ++latestTargetsRequest
       try {
-        const [config, browsers] = await Promise.all([getConfig(), listBrowsers()])
+        const [config, browsers, caps] = await Promise.all([getConfig(), listBrowsers(), getPlatformCaps()])
         if (!mounted || requestId !== latestTargetsRequest) return
-        setTargets(visibleTargets(deriveTargets(browsers), config.shown_browsers))
+        setTargets(visibleTargets(deriveTargets(browsers, caps.restrict_profile_private), config.shown_browsers))
         setTargetsLoaded(true)
       } catch (reason) {
         if (mounted && requestId === latestTargetsRequest) {

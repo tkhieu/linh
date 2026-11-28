@@ -47,13 +47,23 @@ plist = "1"
 # a Mac App Store build must use instead of exec'ing `/usr/bin/open` or
 # calling the (sandbox-hostile) `LaunchServices` C functions that write
 # state (`LSSetDefaultHandlerForURLScheme`) — see that module's doc
-# comment. `objc2`/`objc2-app-kit`/`block2` are already in this
-# workspace's `Cargo.lock`, pulled in transitively by `tauri` itself on
-# macOS, so this adds no new crate to the dependency tree, only a direct
-# edge to versions already resolved.
+# comment. `objc2`/`objc2-app-kit`/`block2` were already in this
+# workspace's `Cargo.lock` before this change, pulled in transitively by
+# `tauri` itself on macOS (at smaller feature sets than this enables),
+# so this adds direct edges to an existing dependency, not a brand new
+# one to the tree. Both generated crates default to building every
+# AppKit/Foundation class they know of; `default-features = false` plus
+# an explicit list keeps this to just `NSWorkspace` (which itself also
+# defines `NSWorkspaceOpenConfiguration`, used for the argument-less
+# open) and the completion-handler plumbing (`NSRunningApplication`,
+# `block2`) `workspace.rs` actually calls.
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray", "NSError"] }
-objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication", "block2"] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std", "NSString", "NSURL", "NSArray", "NSError",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std", "NSWorkspace", "NSRunningApplication", "block2",
+] }
 block2 = "0.6"
 
 [[bin]]

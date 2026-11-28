@@ -5,7 +5,7 @@ import { targetKey } from '../targets'
 import { PromptApp } from './PromptApp'
 
 const api = vi.hoisted(() => ({
-  listBrowsers: vi.fn(), getConfig: vi.fn(), getPromptUrl: vi.fn(),
+  listBrowsers: vi.fn(), getConfig: vi.fn(), getPromptUrl: vi.fn(), getPlatformCaps: vi.fn(),
   promptChoose: vi.fn(), promptCancel: vi.fn(),
   getIcon: vi.fn(),
 }))
@@ -42,6 +42,7 @@ beforeEach(() => {
   api.listBrowsers.mockResolvedValue([chrome, firefox])
   api.getConfig.mockResolvedValue({ ...config, shown_browsers: [targetKey(work)] })
   api.getPromptUrl.mockResolvedValue('https://meet.google.com/abc')
+  api.getPlatformCaps.mockResolvedValue({ source_app_rules: false, restrict_profile_private: false })
   api.promptChoose.mockResolvedValue(undefined)
   api.promptCancel.mockResolvedValue(undefined)
   api.getIcon.mockResolvedValue(null)
@@ -224,5 +225,15 @@ describe('PromptApp', () => {
     // corners/outline, it would also show as a visible gap past the card.
     expect(container.children).toHaveLength(1)
     expect(container.firstElementChild).toHaveClass('prompt')
+  })
+
+  it('omits profile and private choices on a Mac App Store build', async () => {
+    api.getPlatformCaps.mockResolvedValue({ source_app_rules: false, restrict_profile_private: true })
+    api.getConfig.mockResolvedValue({ ...config, shown_browsers: [] })
+    render(<PromptApp />)
+    await screen.findByRole('button', { name: /Google Chrome/ })
+    expect(screen.queryByRole('button', { name: /Work/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Private/ })).not.toBeInTheDocument()
+    expect(screen.getAllByRole('button')).toHaveLength(2)
   })
 })
