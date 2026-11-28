@@ -34,6 +34,42 @@ function openSection(name: 'Browsers' | 'Rules') {
 }
 
 describe('SettingsApp', () => {
+  it('keeps the document clipped and the tab content scrollable on every Settings tab', async () => {
+    expect(readFileSync('settings.html', 'utf8')).toContain('<html lang="en" class="settings-page">')
+    const sheet = document.createElement('style')
+    sheet.textContent = readFileSync('src/styles.css', 'utf8')
+    document.head.append(sheet)
+    document.documentElement.classList.add('settings-page')
+    const root = document.createElement('div')
+    root.id = 'root'
+    document.body.append(root)
+    const view = render(<SettingsApp />, { container: root })
+    try {
+      await screen.findByLabelText('Primary browser')
+      for (const element of [document.documentElement, document.body, root]) {
+        expect(getComputedStyle(element).height).toBe('100%')
+        expect(getComputedStyle(element).overflow).toBe('hidden')
+      }
+      const settings = root.querySelector('.settings')!
+      expect(getComputedStyle(settings).height).toBe('100%')
+      expect(getComputedStyle(settings).overflow).toBe('hidden')
+
+      for (const section of ['General', 'Browsers', 'Rules', 'Updates']) {
+        fireEvent.click(screen.getByRole('button', { name: section }))
+        expect(getComputedStyle(root.querySelector('.settings-body')!).overflow).toBe('hidden')
+        expect(getComputedStyle(root.querySelector('.settings-board')!).overflowY).toBe('auto')
+        expect(root.querySelector('.settings-footer')).toBeInTheDocument()
+        const side = root.querySelector('.settings-side')
+        if (side) expect(getComputedStyle(side).overflowY).toBe('auto')
+      }
+    } finally {
+      view.unmount()
+      root.remove()
+      sheet.remove()
+      document.documentElement.classList.remove('settings-page')
+    }
+  })
+
   it('keeps browser checkbox focus inside the scrollable list', async () => {
     const sheet = document.createElement('style')
     sheet.textContent = readFileSync('src/styles.css', 'utf8')
