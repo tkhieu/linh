@@ -30,7 +30,7 @@ artifact is for Partner Center submission, not direct installation.
    creates a **draft** GitHub Release with `.rpm`, `.deb`, unsigned NSIS `.exe`,
    Store `.msix`, universal macOS `.dmg`, the macOS updater archive
    (`linh.app.tar.gz`), a `.sig` for each of the rpm, deb, NSIS exe, and
-   `.app.tar.gz` (four in total; the msix and dmg are never signed),
+   `.app.tar.gz` (four in total; the msix and dmg are not updater-signed),
    `SHA256SUMS`, and GitHub-generated notes from changes since the previous
    tag. Check the files and notes, then publish the draft with an owner
    personal access token using `gh release edit vMAJOR.MINOR.PATCH --draft=false`.
@@ -70,21 +70,118 @@ is not latest and skips the URL check.
 | --- | --- | --- |
 | Secret | `APPLE_CERTIFICATE` | Base64-encoded Developer ID Application `.p12`. |
 | Secret | `APPLE_CERTIFICATE_PASSWORD` | Password for the exported certificate. |
-| Secret | `APPLE_SIGNING_IDENTITY` | Developer ID Application identity for Tauri. |
+| Secret | `APPLE_SIGNING_IDENTITY` | Developer ID Application identity (required for Apple-ID mode; optional for API-key mode). |
 | Secret | `APPLE_ID` | Apple account email for notarization. |
 | Secret | `APPLE_PASSWORD` | Apple app-specific password for notarization. |
 | Secret | `APPLE_TEAM_ID` | Apple Developer Team ID for notarization. |
+| Secret | `APPLE_API_ISSUER` | App Store Connect team API issuer ID. |
+| Secret | `APPLE_API_KEY` | App Store Connect team API key ID. |
+| Secret | `APPLE_API_PRIVATE_KEY` | Downloaded team API `.p8` contents. |
+| Variable | `REQUIRE_MACOS_SIGNING` | Set to `true` after a signed dry run succeeds; release runs then reject unsigned macOS builds. |
 | Variable | `MSIX_IDENTITY_NAME` | Identity Name from Partner Center's Product identity page. |
 | Variable | `MSIX_PUBLISHER` | Exact Publisher distinguished name from that page. |
 | Variable | `MSIX_PUBLISHER_DISPLAY_NAME` | Exact PublisherDisplayName from that page. |
 
-When any Apple secret is absent, the macOS job builds without Developer ID
-signing or notarization and emits a notice; an unsigned DMG must be handled
-accordingly during manual testing. When all six are present, Tauri uses its
-documented Apple environment variables to sign and notarize. Never place
+The macOS job accepts two signed credential modes. **Apple-ID mode** requires
+`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
+`APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID`. **API-key mode** requires
+`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_API_ISSUER`,
+`APPLE_API_KEY`, and `APPLE_API_PRIVATE_KEY`; `APPLE_SIGNING_IDENTITY` is
+optional because Tauri can derive it from the certificate. Use a **team** API
+key: individual API keys cannot authenticate `notarytool`. The workflow writes
+the `.p8` to a mode-600 temporary file for Tauri's `APPLE_API_KEY_PATH` and
+deletes it after each signing step. With no Apple secrets at all, the macOS
+build continues unsigned and emits a notice. Any partial credential set fails
+with the missing secret names. A dry run with `skip_signing=true` overrides
+secrets and tests the unsigned path. Once signed CI has passed, set
+`REQUIRE_MACOS_SIGNING=true`; tag pushes and non-dry-run dispatches then fail
+if there are no Apple secrets. Leave that variable unset until the owner has
+configured the credentials and confirmed a signed dry run. Never place
 secrets in repository variables or in the manifest. The MSIX variables default
 to conspicuous `Placeholder` values for CI verification; replace **all three**
 with the exact Partner Center values before submitting a Store package.
+
+### Set up Developer ID signing on the owner's Mac
+
+1. In **Keychain Access → Certificate Assistant → Request a Certificate From a
+   Certificate Authority**, create a CSR and save it to disk. In
+   [Certificates, Identifiers & Profiles](https://developer.apple.com/account/resources/certificates/list),
+   add a **Developer ID Application** certificate, choose **G2 Sub-CA** when
+   prompted, and upload the CSR. Download the `.cer` and double-click it to
+   install it in **My Certificates** in Keychain Access. Export the certificate
+   **with its private key** from My Certificates as a password-protected `.p12`.
+   Keep the `.p12` and its password private. Use `security find-identity -v -p
+   codesigning` to identify its `Developer ID Application: ...` name.
+2. Set the shared certificate secrets. On the Mac, `base64 -i` reads the `.p12`
+   and pipes it directly to GitHub CLI; the other command prompts privately:
+
+   ```sh
+   base64 -i /path/to/Developer-ID-Application.p12 | gh secret set APPLE_CERTIFICATE -R tkhieu/linh
+   gh secret set APPLE_CERTIFICATE_PASSWORD -R tkhieu/linh
+   ```
+
+3. Choose one notarization mode:
+
+   - **Apple ID:** Create an [app-specific password](https://support.apple.com/en-us/102654)
+     for the Apple account. Set the identity name from step 1, Apple ID email,
+     app-specific password, and Apple Developer Team ID through private prompts:
+
+     ```sh
+     gh secret set APPLE_SIGNING_IDENTITY -R tkhieu/linh
+     gh secret set APPLE_ID -R tkhieu/linh
+     gh secret set APPLE_PASSWORD -R tkhieu/linh
+     gh secret set APPLE_TEAM_ID -R tkhieu/linh
+     ```
+
+   - **App Store Connect API key:** As the individual account's Account Holder,
+     open **App Store Connect → Users and Access → Integrations → App Store
+     Connect API → Team Keys**. Request API access first if prompted. Generate a
+     **team key** with the **Developer** role; record its key ID and the issuer
+     ID, and download the `.p8` once. Use prompts for the IDs and stdin for the
+     file. Remove any incomplete Apple-ID credential group before testing API
+     mode; the gate rejects mixed partial groups.
+
+     ```sh
+     gh secret set APPLE_API_ISSUER -R tkhieu/linh
+     gh secret set APPLE_API_KEY -R tkhieu/linh
+     gh secret set APPLE_API_PRIVATE_KEY -R tkhieu/linh < /path/to/AuthKey_KEYID.p8
+     ```
+
+Run `gh workflow run release.yml -R tkhieu/linh --ref main -f dry_run=true`
+after the secrets are complete. Signed CI verifies the Developer ID app
+signature, hardened runtime, secure timestamp, both binary architectures, app
+ticket, DMG notarization and stapling, and Gatekeeper acceptance. It packages
+the updater `.app.tar.gz` only after these checks. Then require signing for
+release runs:
+
+```sh
+gh variable set REQUIRE_MACOS_SIGNING -R tkhieu/linh --body true
+```
+
+After downloading a signed release DMG on the Mac, verify that exact file and
+the app inside it (replace the DMG path):
+
+```sh
+dmg=/path/to/Linh.dmg
+mount=$(mktemp -d)
+xcrun stapler validate "$dmg"
+spctl -a -vvv -t install "$dmg"
+hdiutil attach "$dmg" -mountpoint "$mount"
+app="$mount/linh.app"
+codesign --verify --deep --strict --verbose=2 "$app"
+codesign -dv --verbose=4 "$app"
+lipo -archs "$app/Contents/MacOS/linh"
+xcrun stapler validate "$app"
+spctl -a -vvv -t exec "$app"
+hdiutil detach "$mount"
+rmdir "$mount"
+```
+
+The `codesign -dv` output must include `Authority=Developer ID Application`,
+`flags=0x10000(runtime)`, and `Timestamp=`; `lipo` must show `x86_64` and
+`arm64`. Both `spctl` commands must say `accepted` and
+`source=Notarized Developer ID`. The workflow uploads the stapled DMG first,
+then generates `SHA256SUMS` from the uploaded installer artifacts.
 
 ## Store build flavour (`LINH_DIST`)
 
