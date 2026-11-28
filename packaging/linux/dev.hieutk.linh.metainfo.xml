@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.hieutk.linh</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <name>Linh</name>
+  <summary>Open each link in the browser that fits</summary>
+  <description>
+    <p>Linh handles HTTP and HTTPS links as your default browser, then opens each link in a browser, browser profile, private window, or supported app. It can also show a picker when you want to choose where a link opens.</p>
+    <p>Configure routing in Settings to decide what happens before the picker is shown. Rules are checked in order, so the first matching rule chooses the destination.</p>
+    <ul>
+      <li>Route links by URL pattern to a browser, profile, private window, or app</li>
+      <li>Choose a browser in the link picker when no rule matches</li>
+      <li>Set a primary browser for links that do not need a prompt</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">linh.desktop</launchable>
+  <developer id="dev.hieutk">
+    <name>Hieu Tran</name>
+  </developer>
+  <url type="homepage">https://github.com/tkhieu/linh</url>
+  <url type="bugtracker">https://github.com/tkhieu/linh/issues</url>
+  <url type="vcs-browser">https://github.com/tkhieu/linh</url>
+  <content_rating type="oars-1.1"/>
+  <provides>
+    <mediatype>x-scheme-handler/http</mediatype>
+    <mediatype>x-scheme-handler/https</mediatype>
+    <binary>linh</binary>
+  </provides>
+  <categories>
+    <category>Network</category>
+    <category>WebBrowser</category>
+  </categories>
+  <branding>
+    <color type="primary" scheme_preference="light">#2563EB</color>
+    <color type="primary" scheme_preference="dark">#60A5FA</color>
+  </branding>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/tkhieu/linh/main/docs/screenshots/settings-rules.png</image>
+      <caption>Configure link routing rules in Settings</caption>
+    </screenshot>
+  </screenshots>
+  <releases>
+    <release version="0.4.1" date="2026-11-27">
+      <description><p>Added signed, user-controlled in-app updates and changed the application ID for store distribution.</p></description>
+    </release>
+    <release version="0.3.2" date="2026-11-27">
+      <description><p>Fixed Linux picker repaint corruption and improved Windows Store integration.</p></description>
+    </release>
+    <release version="0.3.1" date="2026-11-26">
+      <description><p>Released the cross-platform browser picker with macOS and Windows support.</p></description>
+    </release>
+    <release version="0.3.0" date="2026-11-26">
+      <description><p>Introduced the Fedora browser picker, routing rules, and Settings interface.</p></description>
+    </release>
+  </releases>
+</component>

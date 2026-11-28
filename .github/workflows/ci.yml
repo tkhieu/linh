@@ -31,6 +31,8 @@ jobs:
             make \
             pkgconf-pkg-config \
             rpm-build \
+            appstream \
+            desktop-file-utils \
             cpio \
             file \
             git \
@@ -40,6 +42,9 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Validate AppStream metainfo
+        run: appstreamcli validate --no-net --explain packaging/linux/dev.hieutk.linh.metainfo.xml
 
       - name: Install Rust
         run: |
@@ -132,14 +137,21 @@ jobs:
             deb="$(find target/release/bundle/deb -name '*.deb' | head -n1)"
             dpkg-deb -I "$deb"
             dpkg-deb -c "$deb"
+            dpkg-deb -c "$deb" | grep -qF 'usr/share/metainfo/dev.hieutk.linh.metainfo.xml'
             desktop="$(dpkg-deb --fsys-tarfile "$deb" | tar -xO usr/share/applications/linh.desktop)"
             # Check that Ubuntu can resolve the package's runtime dependencies.
             sudo apt-get --simulate install "$PWD/$deb"
           else
             rpm="$(find target/release/bundle/rpm -name '*.rpm' | head -n1)"
+            rpm -qlp "$rpm" | grep -qxF '/usr/share/metainfo/dev.hieutk.linh.metainfo.xml'
             desktop="$(rpm2cpio "$rpm" | cpio -i --to-stdout ./usr/share/applications/linh.desktop 2>/dev/null)"
           fi
           echo "$desktop"
+
+          desktop_file="$(mktemp --suffix=.desktop)"
+          trap 'rm -f "$desktop_file"' EXIT
+          printf '%s\n' "$desktop" > "$desktop_file"
+          desktop-file-validate "$desktop_file"
 
           fail() { echo "::error::$1"; exit 1; }
 
@@ -186,6 +198,7 @@ jobs:
             librsvg2-dev \
             libxdo-dev \
             libssl-dev \
+            desktop-file-utils \
             file
 
       - name: Install Rust
