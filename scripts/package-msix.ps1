@@ -36,6 +36,8 @@ if (-not (Test-Path $sourceExe)) { throw "LINH_STORE_EXE_PATH does not exist: $s
 $expectedMarker = 'LINH_BUILD_MARKER:dist=msstore;self_update=false'
 $stampPath = Join-Path (Split-Path $sourceExe) 'linh.dist-marker.txt'
 if (-not (Test-Path $stampPath)) {
+    Write-Host "Directory listing of $(Split-Path $sourceExe):"
+    Get-ChildItem (Split-Path $sourceExe) | ForEach-Object { Write-Host "  $($_.Name)" }
     throw "Expected a build stamp next to LINH_STORE_EXE_PATH at $stampPath - was $sourceExe actually produced by a normal cargo/cargo-tauri build (build.rs writes this), not copied or renamed from elsewhere?"
 }
 $stampContents = (Get-Content $stampPath -Raw).Trim()

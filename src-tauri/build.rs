@@ -78,11 +78,26 @@ fn main() {
 /// binary itself depends on.
 fn write_dist_stamp(dist: &str, self_update_enabled: bool) {
     let Ok(out_dir) = std::env::var("OUT_DIR") else {
+        println!("cargo:warning=write_dist_stamp: OUT_DIR is not set, skipping stamp file");
         return;
     };
     let Some(profile_dir) = std::path::Path::new(&out_dir).ancestors().nth(3) else {
+        println!(
+            "cargo:warning=write_dist_stamp: OUT_DIR ({out_dir}) has fewer than 3 ancestors, skipping stamp file"
+        );
         return;
     };
+    let stamp_path = profile_dir.join("linh.dist-marker.txt");
     let contents = format!("LINH_BUILD_MARKER:dist={dist};self_update={self_update_enabled}\n");
-    let _ = std::fs::write(profile_dir.join("linh.dist-marker.txt"), contents);
+    match std::fs::write(&stamp_path, &contents) {
+        Ok(()) => println!(
+            "cargo:warning=write_dist_stamp: wrote {} to {}",
+            contents.trim(),
+            stamp_path.display()
+        ),
+        Err(err) => println!(
+            "cargo:warning=write_dist_stamp: failed to write {}: {err}",
+            stamp_path.display()
+        ),
+    }
 }
