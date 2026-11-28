@@ -23,6 +23,7 @@ const FIREFOX_KEYWORDS: [&str; 3] = ["firefox", "librewolf", "zen"];
 /// that handle `x-scheme-handler/http(s)`, and excluding (with a log
 /// line) any browser — native or Flatpak — whose `Exec=` line
 /// `linh-core` rejects.
+#[cfg(test)]
 pub fn scan_browsers(dirs: &Dirs) -> Vec<Browser> {
     scan_browser_discovery(dirs).browsers
 }
@@ -74,7 +75,9 @@ pub fn scan_browser_discovery(dirs: &Dirs) -> BrowserDiscovery {
             a.no_display
                 .cmp(&b.no_display)
                 .then_with(|| b.user_dir.cmp(&a.user_dir))
-                .then_with(|| a.scan_order.cmp(&b.scan_order))
+                // A later directory is the stronger XDG override, as in
+                // collect_entries for entries with the same desktop id.
+                .then_with(|| b.scan_order.cmp(&a.scan_order))
                 .then_with(|| a.browser.id.cmp(&b.browser.id))
         });
         let winner = group.remove(0).browser;
@@ -125,6 +128,10 @@ fn collect_entries(dirs: &Dirs) -> HashMap<String, DesktopEntry> {
             let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
+            // UI target keys reserve '/' and '#private' as separators.
+            if id.contains(['/', '#']) {
+                continue;
+            }
             if let Some(parsed) = desktop::parse_desktop_file(&path, id) {
                 by_id.insert(id.to_string(), parsed);
             }
@@ -456,6 +463,41 @@ mod tests {
         ));
         assert_eq!(found.browsers.len(), 1);
         assert_eq!(found.browsers[0].id, "custom");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn later_equal_tier_directory_wins() {
+        let root = temp_root("equal-tier-order");
+        let first = root.join("system-a");
+        let later = root.join("system-b");
+        write_desktop(
+            &first,
+            "a.desktop",
+            &chrome_entry("/usr/bin/google-chrome-stable %U", ""),
+        );
+        write_desktop(
+            &later,
+            "z.desktop",
+            &chrome_entry("/usr/bin/google-chrome-stable %U", ""),
+        );
+        let found = scan_browser_discovery(&test_dirs(&root, &[first, later]));
+        assert_eq!(found.browsers.len(), 1);
+        assert_eq!(found.browsers[0].id, "z");
+        assert_eq!(found.aliases.get("a").map(String::as_str), Some("z"));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn desktop_id_with_target_key_separator_is_skipped() {
+        let root = temp_root("invalid-id-separator");
+        let apps = root.join("apps");
+        write_desktop(
+            &apps,
+            "chrome#extra.desktop",
+            &chrome_entry("/usr/bin/google-chrome-stable %U", ""),
+        );
+        assert!(scan_browsers(&test_dirs(&root, &[apps])).is_empty());
         fs::remove_dir_all(&root).ok();
     }
 

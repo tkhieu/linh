@@ -69,6 +69,11 @@ pub fn migrate_browser_aliases(
     if aliases.is_empty() {
         return false;
     }
+    // ui/src/targets.ts targetKey/parseTargetKey reserve '/' and '#'.
+    // Discovery only emits desktop ids without either separator.
+    debug_assert!(aliases
+        .iter()
+        .all(|(alias, kept)| { !alias.contains(['/', '#']) && !kept.contains(['/', '#']) }));
     let mut changed = rewrite_target(&mut config.primary, aliases);
     for rule in &mut config.rules {
         changed |= match &mut rule.open_in {

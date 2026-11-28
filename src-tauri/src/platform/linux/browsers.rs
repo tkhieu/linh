@@ -4,14 +4,8 @@ use super::chromium;
 use super::dirs::Dirs;
 use super::scan;
 
-/// Detects installed http(s)-capable browsers, including their Chromium
-/// profiles where applicable.
-pub fn detect_browsers(dirs: &Dirs) -> Vec<linh_core::Browser> {
-    let mut browsers = scan::scan_browsers(dirs);
-    populate_profiles(&mut browsers, dirs);
-    browsers
-}
-
+/// Detects installed http(s)-capable browsers, their Chromium profiles,
+/// and aliases for equivalent desktop entries.
 pub fn detect_browsers_and_aliases(dirs: &Dirs) -> scan::BrowserDiscovery {
     let mut discovery = scan::scan_browser_discovery(dirs);
     populate_profiles(&mut discovery.browsers, dirs);

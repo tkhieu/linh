@@ -116,9 +116,10 @@ export function SettingsApp() {
   const targets = useMemo(() => deriveTargets(browsers, caps?.restrict_profile_private), [browsers, caps])
 
   async function reload() {
-    const [nextConfig, nextBrowsers, nextCaps, isDefault] = await Promise.all([
-      getConfig(), listBrowsers(), getPlatformCaps(), isDefaultBrowser(),
+    const [nextBrowsers, nextCaps, isDefault] = await Promise.all([
+      listBrowsers(), getPlatformCaps(), isDefaultBrowser(),
     ])
+    const nextConfig = await getConfig()
     setConfig(nextConfig)
     setBrowsers(nextBrowsers)
     setCaps(nextCaps)
@@ -127,8 +128,9 @@ export function SettingsApp() {
 
   useEffect(() => {
     let mounted = true
-    Promise.all([getConfig(), listBrowsers(), getPlatformCaps(), isDefaultBrowser()])
-      .then(([nextConfig, nextBrowsers, nextCaps, isDefault]) => {
+    Promise.all([listBrowsers(), getPlatformCaps(), isDefaultBrowser()])
+      .then(async ([nextBrowsers, nextCaps, isDefault]) => {
+        const nextConfig = await getConfig()
         if (!mounted) return
         setConfig(nextConfig)
         setBrowsers(nextBrowsers)
