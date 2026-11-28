@@ -119,21 +119,32 @@ pub fn current_dist() -> Dist {
     parse_dist(env!("LINH_DIST")).expect("build.rs validates LINH_DIST before compilation")
 }
 
-/// The exact line `main.rs`'s `--print-dist` flag prints: the compiled-in
-/// `LINH_DIST` value and whether the `self-update` feature is compiled
-/// into this binary. Packaging a build into a store artifact (see
-/// `scripts/package-msix.ps1`) runs the actual binary with `--print-dist`
-/// and asserts on this line, rather than trusting a file path or a build
-/// step's own bookkeeping to have picked the right one — so packaging the
-/// wrong binary fails loudly instead of silently shipping a self-updater
-/// store policy forbids.
-pub fn print_dist_line() -> String {
-    format!(
-        "dist={} self_update={}",
-        env!("LINH_DIST"),
-        cfg!(feature = "self-update")
-    )
-}
+/// A unique marker baked directly into this binary's data section,
+/// naming its compiled-in `LINH_DIST` and whether the `self-update`
+/// feature is compiled in. Packaging a build into a store artifact (see
+/// `scripts/package-msix.ps1`) searches the built *file*'s raw bytes for
+/// this exact string rather than running the binary and reading its
+/// output: `linh` is a GUI-subsystem binary
+/// (`windows_subsystem = "windows"`), which has no reliable stdout when
+/// spawned non-interactively from a script (observed in CI: `println!`
+/// panicked with "failed printing to stdout: The pipe is being closed"),
+/// and even starting it at all would run its single-instance/plugin
+/// startup code for no reason. `#[used]` stops the release profile's LTO
+/// (`profile.release.lto = true` in the workspace `Cargo.toml`) and
+/// symbol stripping from discarding this static as unreferenced — the
+/// *symbol name* can still be stripped, but `#[used]` keeps the string's
+/// bytes themselves present in the binary, which is all a raw byte
+/// search needs. `self_update=` reads `true`/`false` (whatever `cfg!`
+/// itself expands to), not `on`/`off`: `concat!` only accepts literals,
+/// and `cfg!(...)` expands to a bare boolean literal before `concat!`
+/// sees it, so this is the plain, dependency-free way to embed it.
+#[used]
+pub static BUILD_MARKER: &str = concat!(
+    "LINH_BUILD_MARKER:dist=",
+    env!("LINH_DIST"),
+    ";self_update=",
+    cfg!(feature = "self-update")
+);
 
 /// Where the "Updates" UI says updates come from, for a channel whose
 /// [`Dist::managed_by`] is not `None`.
@@ -1783,13 +1794,19 @@ mod tests {
     }
 
     #[test]
-    fn print_dist_line_names_the_compiled_in_dist_and_self_update_state() {
-        let line = print_dist_line();
-        assert!(line.starts_with("dist=github "), "{line}");
+    fn build_marker_names_the_compiled_in_dist_and_self_update_state() {
         assert_eq!(
-            line,
-            format!("dist=github self_update={}", cfg!(feature = "self-update"))
+            BUILD_MARKER,
+            format!(
+                "LINH_BUILD_MARKER:dist=github;self_update={}",
+                cfg!(feature = "self-update")
+            )
         );
+    }
+
+    #[test]
+    fn build_marker_starts_with_the_fixed_prefix_a_byte_search_looks_for() {
+        assert!(BUILD_MARKER.starts_with("LINH_BUILD_MARKER:dist=github;self_update="));
     }
 
     #[test]
