@@ -161,7 +161,7 @@ p { margin-top: .5rem; }
 .col-name { flex: 1 1 0; display: flex; align-items: center; gap: 10px; font: 400 14px/1.3 var(--font-sans); color: var(--ink); }
 
 .settings .checklist.settings-rows { display: block; }
-.settings .checklist label.settings-row { cursor: pointer; }
+.settings .checklist label.settings-row { position: relative; cursor: pointer; }
 .check-box {
   width: 16px; height: 16px; border-radius: 3px; border: 1px solid var(--control-border-strong);
   display: inline-grid; place-items: center; background: transparent; flex-shrink: 0;

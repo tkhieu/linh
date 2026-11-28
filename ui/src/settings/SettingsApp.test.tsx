@@ -1,3 +1,5 @@
+/// <reference types="node" />
+import { readFileSync } from 'node:fs'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { chrome, config, firefox, work } from '../test/fixtures'
@@ -32,6 +34,29 @@ function openSection(name: 'Browsers' | 'Rules') {
 }
 
 describe('SettingsApp', () => {
+  it('keeps browser checkbox focus inside the scrollable list', async () => {
+    const sheet = document.createElement('style')
+    sheet.textContent = readFileSync('src/styles.css', 'utf8')
+    document.head.append(sheet)
+    try {
+      render(<SettingsApp />)
+      await screen.findByLabelText('Primary browser')
+      openSection('Browsers')
+      const checkbox = screen.getByRole('checkbox', { name: /^Show Google Chrome — Work$/ })
+      const row = checkbox.closest('label')!
+      expect(getComputedStyle(checkbox).position).toBe('absolute')
+      expect(getComputedStyle(row).position).toBe('relative')
+
+      fireEvent.click(checkbox)
+      expect(checkbox).toBeInTheDocument()
+      expect(checkbox).toBeChecked()
+      expect(api.saveConfig).not.toHaveBeenCalled()
+      expect(api.listBrowsers).toHaveBeenCalledOnce()
+    } finally {
+      sheet.remove()
+    }
+  })
+
   it('shows onboarding and rechecks default status after registration', async () => {
     api.isDefaultBrowser.mockResolvedValueOnce(false).mockResolvedValueOnce(true)
     api.setDefaultBrowser.mockResolvedValue(undefined)
