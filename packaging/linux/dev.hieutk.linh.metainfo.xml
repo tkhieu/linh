@@ -42,6 +42,9 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.4.4" date="2026-11-28">
+      <description><p>Merges duplicate Linux browser launchers and keeps the Settings header and Save bar fixed while content scrolls.</p></description>
+    </release>
     <release version="0.4.3" date="2026-11-28">
       <description><p>Fixes browser checkbox rendering in Settings.</p></description>
     </release>
