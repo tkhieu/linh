@@ -191,26 +191,30 @@ a string the plugin's own, already-reachable code emits sidesteps both:
 nothing has to run, and nothing needed inventing had to survive the
 linker on its own.
 
+`package-msix.ps1` runs the byte search *first* (`assert-self-updater-presence.ps1
+-Expect absent`), before it ever reads the stamp. For `github`, `flathub`,
+`copr`, or `ppa` — every dist that keeps the default `self-update` feature
+on — the exe still contains the marker, so pointing `LINH_STORE_EXE_PATH`
+at one of those by mistake fails right there, with the byte search's own
+"self-updater marker present" error; the stamp check below is never
+reached. Only `mas` also compiles without the self-updater, so the byte
+search alone can't distinguish an `mas` exe from a genuine `msstore` one —
+that is the one case the stamp file exists to catch.
+
 A sidecar stamp file, `linh.dist-marker.txt`, written by `build.rs`'s
 `write_dist_stamp` right next to the compiled binary (e.g.
-`LINH_BUILD_MARKER:dist=msstore;self_update=false`), is kept as a
-**second**, independent layer — not because it's load-bearing for the
-self-updater question (the byte search above already answers that
-directly), but because it additionally confirms the exe is the
-*specific* `msstore` channel, not merely "some build without the
-self-updater" (`mas`/`flathub`/`copr`/`ppa` would also pass the byte
-search), with a clearer error message on a plain wrong-`LINH_DIST`
-mistake. Checking only the exe and dropping the stamp entirely was
-considered and rejected: the stamp's extra specificity is cheap to keep,
-and a stamp mismatch is a friendlier first error than a bare "self-updater
-marker present" would be for the common case of someone just getting the
-`LINH_DIST`/`--target-dir`/`LINH_STORE_EXE_PATH` wiring wrong. Because a
-stamp is written before the exe it sits next to is linked, a stale stamp
-next to a *later-replaced* exe would otherwise still read as a confirmed
-build — `release.yml`'s cleanup step deletes `target/msstore` before every
-Windows job build (so the exe and its stamp can only ever come from the
-same build), and `package-msix.ps1` separately refuses to package an exe
-whose `LastWriteTime` is older than its stamp's.
+`LINH_BUILD_MARKER:dist=msstore;self_update=false`), is kept as this
+**second**, narrower layer — not because it's load-bearing for the
+self-updater question (the byte search above already answers that), but
+because it's the only thing that confirms the exe is the *specific*
+`msstore` channel rather than `mas`. Checking only the exe and dropping
+the stamp entirely was considered and rejected for exactly that gap.
+Because a stamp is written before the exe it sits next to is linked, a
+stale stamp next to a *later-replaced* exe would otherwise still read as
+a confirmed build — `release.yml`'s cleanup step deletes `target/msstore`
+before every Windows job build (so the exe and its stamp can only ever
+come from the same build), and `package-msix.ps1` separately refuses to
+package an exe whose `LastWriteTime` is older than its stamp's.
 
 `release.yml` also runs the byte search the other way, as a positive
 control, against the NSIS build's own `target/release/linh.exe`
@@ -235,8 +239,13 @@ time a release is prepared.
 
 CI's `build` job runs `cargo check` and `cargo clippy` a second time with
 `LINH_DIST=msstore` and `--no-default-features` on every push, so the store
-configuration can't silently rot even though no workflow builds and submits
-the actual Store packages yet.
+configuration can't silently rot even outside a release build. Separately,
+`release.yml`'s Windows job already builds and packages the unsigned Store
+MSIX on every run — including a `dry_run`, where it's just a downloadable
+workflow artifact — and includes it in the `linh-windows`/release asset
+set; nothing here submits it anywhere. Getting it in front of Microsoft
+still needs a human: see "Store MSIX" below for the manual Partner Center
+upload.
 
 ## Store MSIX
 
