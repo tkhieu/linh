@@ -30,13 +30,15 @@ if (-not (Test-Path $sourceExe)) { throw "LINH_STORE_EXE_PATH does not exist: $s
 # non-interactively).
 & (Join-Path $PSScriptRoot 'assert-self-updater-presence.ps1') -ExePath $sourceExe -Expect absent
 
-# SECOND layer, kept rather than removed: `mas` is the only other dist
-# that also compiles without the self-updater (flathub/copr/ppa keep
-# `self-update` on and would fail the check above, same as `github`), so
-# the byte search alone can't tell `msstore` and `mas` apart. The stamp
-# additionally confirms the exe is the *specific* `msstore` channel, with
-# a clearer message than a bare "marker absent" would give for that one
-# remaining ambiguity.
+# SECOND layer, kept rather than removed: build.rs only forbids
+# self-update being ON for msstore/mas (build.rs:28) - it doesn't require
+# self-update to be ON for github/flathub/copr/ppa, so any of those can
+# also be built with --no-default-features and would pass the check
+# above just as validly as a real msstore exe. The byte search alone
+# can't tell msstore apart from mas, or from one of those four built
+# without the self-updater. The stamp confirms the exe is the *specific*
+# msstore channel, with a clearer message than a bare "marker absent"
+# would give for any of those remaining cases.
 $expectedMarker = 'LINH_BUILD_MARKER:dist=msstore;self_update=false'
 $stampPath = Join-Path (Split-Path $sourceExe) 'linh.dist-marker.txt'
 if (-not (Test-Path $stampPath)) {

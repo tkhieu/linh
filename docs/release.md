@@ -192,23 +192,27 @@ nothing has to run, and nothing needed inventing had to survive the
 linker on its own.
 
 `package-msix.ps1` runs the byte search *first* (`assert-self-updater-presence.ps1
--Expect absent`), before it ever reads the stamp. For `github`, `flathub`,
-`copr`, or `ppa` — every dist that keeps the default `self-update` feature
-on — the exe still contains the marker, so pointing `LINH_STORE_EXE_PATH`
-at one of those by mistake fails right there, with the byte search's own
-"self-updater marker present" error; the stamp check below is never
-reached. Only `mas` also compiles without the self-updater, so the byte
-search alone can't distinguish an `mas` exe from a genuine `msstore` one —
-that is the one case the stamp file exists to catch.
+-Expect absent`), before it ever reads the stamp. `build.rs` only forbids
+`self-update` being *on* for `msstore`/`mas` (`build.rs:28`) — it doesn't
+require `self-update` to be *on* for `github`/`flathub`/`copr`/`ppa`, so
+any of those four can also be built with `--no-default-features` and
+would pass the byte search exactly as validly as a genuine `msstore` exe
+does. The byte search alone can only rule out a build that still has the
+self-updater (`github`/`flathub`/`copr`/`ppa` built the normal way, with
+`self-update` left on); it can't tell `msstore` apart from `mas`, or from
+one of those four built without the self-updater. The stamp check below
+is what then rejects anything whose `LINH_DIST` isn't exactly `msstore`.
 
 A sidecar stamp file, `linh.dist-marker.txt`, written by `build.rs`'s
 `write_dist_stamp` right next to the compiled binary (e.g.
 `LINH_BUILD_MARKER:dist=msstore;self_update=false`), is kept as this
 **second**, narrower layer — not because it's load-bearing for the
-self-updater question (the byte search above already answers that), but
-because it's the only thing that confirms the exe is the *specific*
-`msstore` channel rather than `mas`. Checking only the exe and dropping
-the stamp entirely was considered and rejected for exactly that gap.
+self-updater question (the byte search above already answers that for
+the common case), but because it's the only thing that confirms the exe
+is the *specific* `msstore` channel, rather than `mas` or a
+`github`/`flathub`/`copr`/`ppa` build that happened to also be built
+without the self-updater. Checking only the exe and dropping the stamp
+entirely was considered and rejected for exactly that gap.
 Because a stamp is written before the exe it sits next to is linked, a
 stale stamp next to a *later-replaced* exe would otherwise still read as
 a confirmed build — `release.yml`'s cleanup step deletes `target/msstore`
