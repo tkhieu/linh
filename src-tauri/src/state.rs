@@ -30,6 +30,8 @@ pub struct AppState {
     pub caps: PlatformCaps,
     pub config: Mutex<Config>,
     pub browsers: Mutex<Vec<Browser>>,
+    /// Current Linux desktop-id aliases; empty on other platforms.
+    pub browser_aliases: Mutex<HashMap<String, String>>,
     pub prompt: PromptState,
     /// The targets listed in the tray's "Primary Browser" submenu, indexed
     /// by the `primary:<index>` menu item id that was built from them.
@@ -73,11 +75,21 @@ impl AppState {
         let dirs = Dirs::from_env();
         #[cfg(target_os = "windows")]
         default_browser::refresh_registration_if_stale(&dirs);
+        #[cfg(target_os = "linux")]
+        let discovery = browsers::detect_browsers_and_aliases(&dirs);
+        #[cfg(target_os = "linux")]
+        let detected = discovery.browsers;
+        #[cfg(not(target_os = "linux"))]
         let detected = browsers::detect_browsers(&dirs);
         let previous_default = default_browser::current_default_browser_id();
         let config_path = dirs.config_path();
-        let (config, status) =
+        #[allow(unused_mut)] // Linux applies desktop-id aliases after loading.
+        let (mut config, status) =
             app_config::load_or_init(&config_path, previous_default.as_deref(), &detected);
+        #[cfg(target_os = "linux")]
+        if status == app_config::ConfigStatus::Loaded {
+            app_config::migrate_browser_aliases(&mut config, &discovery.aliases, &dirs);
+        }
 
         if status == app_config::ConfigStatus::Broken {
             notify::notify_error(
@@ -96,6 +108,10 @@ impl AppState {
             caps: platform_caps_for_dist(updates::current_dist()),
             config: Mutex::new(config),
             browsers: Mutex::new(detected),
+            #[cfg(target_os = "linux")]
+            browser_aliases: Mutex::new(discovery.aliases),
+            #[cfg(not(target_os = "linux"))]
+            browser_aliases: Mutex::new(HashMap::new()),
             prompt: PromptState::new(),
             primary_targets: Mutex::new(Vec::new()),
             primary_items: Mutex::new(Vec::new()),
@@ -109,9 +125,30 @@ impl AppState {
     /// Re-scans installed browsers, updates the cache, and returns the
     /// fresh list.
     pub fn refresh_browsers(&self) -> Vec<Browser> {
-        let detected = browsers::detect_browsers(&self.dirs);
-        *self.browsers.lock().unwrap() = detected.clone();
-        detected
+        #[cfg(target_os = "linux")]
+        {
+            let discovery = browsers::detect_browsers_and_aliases(&self.dirs);
+            let detected = discovery.browsers;
+            let _save_guard = self.save_lock.lock().unwrap();
+            // Publish the browser list and its aliases together. Routing
+            // locks browsers before aliases, so it sees a matching pair.
+            let mut current_browsers = self.browsers.lock().unwrap();
+            *self.browser_aliases.lock().unwrap() = discovery.aliases;
+            *current_browsers = detected.clone();
+            drop(current_browsers);
+            let aliases = self.browser_aliases.lock().unwrap();
+            if !aliases.is_empty() {
+                let mut config = self.config.lock().unwrap();
+                app_config::migrate_browser_aliases(&mut config, &aliases, &self.dirs);
+            }
+            detected
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let detected = browsers::detect_browsers(&self.dirs);
+            *self.browsers.lock().unwrap() = detected.clone();
+            detected
+        }
     }
 
     /// Applies `mutate` to a clone of the *current* in-memory config,
@@ -136,6 +173,12 @@ impl AppState {
         let _guard = self.save_lock.lock().unwrap();
         let mut config = self.config.lock().unwrap().clone();
         mutate(&mut config);
+        #[cfg(target_os = "linux")]
+        app_config::migrate_browser_aliases(
+            &mut config,
+            &self.browser_aliases.lock().unwrap(),
+            &self.dirs,
+        );
         if let Some(degraded) = crate::routing::degrade_target(self.caps, &config.primary) {
             config.primary = degraded;
         }
@@ -186,6 +229,7 @@ impl AppState {
             caps,
             config: Mutex::new(config),
             browsers: Mutex::new(browsers),
+            browser_aliases: Mutex::new(HashMap::new()),
             prompt: PromptState::new(),
             primary_targets: Mutex::new(Vec::new()),
             primary_items: Mutex::new(Vec::new()),
@@ -243,6 +287,117 @@ mod tests {
             profile: None,
             private: false,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_browser_entry(dir: &std::path::Path, id: &str, no_display: bool) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{id}.desktop")),
+            format!(
+                "[Desktop Entry]\nName=Chrome\nExec=/usr/bin/google-chrome-stable %U\nMimeType=x-scheme-handler/http;\nNoDisplay={no_display}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refresh_migrates_new_aliases_in_memory_without_saving() {
+        let root = temp_root("refresh-aliases");
+        let apps = root.join("apps");
+        write_browser_entry(&apps, "google-chrome", true);
+        write_browser_entry(&apps, "com.google.Chrome", false);
+        let mut dirs = test_dirs(&root);
+        dirs.application_dirs = vec![apps];
+        let initial = browsers::detect_browsers_and_aliases(&dirs);
+        assert_eq!(initial.browsers[0].id, "com.google.Chrome");
+        let config = Config {
+            primary: target("com.google.Chrome"),
+            shown_browsers: vec!["com.google.Chrome/Default#private".into()],
+            rules: vec![Rule {
+                name: "work".into(),
+                preset: None,
+                match_patterns: vec!["example.com".into()],
+                source_apps: None,
+                open_in: OpenIn::Target(target("com.google.Chrome")),
+            }],
+            ..Config::default()
+        };
+        let state = AppState::for_test(dirs, config, initial.browsers);
+        *state.browser_aliases.lock().unwrap() = initial.aliases;
+        write_browser_entry(&state.dirs.application_dirs[0], "google-chrome", false);
+        write_browser_entry(&state.dirs.application_dirs[0], "com.google.Chrome", true);
+        let detected = state.refresh_browsers();
+        assert_eq!(detected.len(), 1);
+        assert_eq!(detected[0].id, "google-chrome");
+        let migrated = state.config.lock().unwrap().clone();
+        assert_eq!(migrated.primary.browser, "google-chrome");
+        assert_eq!(
+            migrated.shown_browsers,
+            vec!["google-chrome/Default#private"]
+        );
+        assert!(
+            matches!(&migrated.rules[0].open_in, OpenIn::Target(t) if t.browser == "google-chrome")
+        );
+        assert_eq!(
+            state
+                .browser_aliases
+                .lock()
+                .unwrap()
+                .get("com.google.Chrome")
+                .map(String::as_str),
+            Some("google-chrome")
+        );
+        state.refresh_browsers();
+        assert_eq!(*state.config.lock().unwrap(), migrated);
+        assert!(!state.dirs.config_path().exists());
+        fs_cleanup(&root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refresh_without_alias_change_leaves_config_untouched() {
+        let root = temp_root("refresh-no-change");
+        let apps = root.join("apps");
+        write_browser_entry(&apps, "google-chrome", false);
+        let mut dirs = test_dirs(&root);
+        dirs.application_dirs = vec![apps];
+        let config = Config {
+            primary: target("google-chrome"),
+            shown_browsers: vec!["google-chrome".into(), "google-chrome".into()],
+            ..Config::default()
+        };
+        let state = AppState::for_test(dirs, config.clone(), Vec::new());
+        state.refresh_browsers();
+        state.refresh_browsers();
+        assert_eq!(*state.config.lock().unwrap(), config);
+        assert!(state.browser_aliases.lock().unwrap().is_empty());
+        assert!(!state.dirs.config_path().exists());
+        fs_cleanup(&root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn saving_a_stale_settings_draft_rewrites_current_aliases() {
+        let root = temp_root("save-stale-draft");
+        let state = test_state(&root);
+        state
+            .browser_aliases
+            .lock()
+            .unwrap()
+            .insert("com.google.Chrome".into(), "google-chrome".into());
+        let stale = Config {
+            primary: target("com.google.Chrome"),
+            shown_browsers: vec!["com.google.Chrome#private".into()],
+            ..Config::default()
+        };
+        state.persist_config(stale).unwrap();
+        let saved = app_config::load_or_init(&state.dirs.config_path(), None, &[]).0;
+        assert_eq!(saved.primary.browser, "google-chrome");
+        assert_eq!(saved.shown_browsers, vec!["google-chrome#private"]);
+        assert_eq!(*state.config.lock().unwrap(), saved);
+        fs_cleanup(&root);
     }
 
     #[test]

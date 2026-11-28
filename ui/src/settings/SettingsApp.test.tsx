@@ -34,6 +34,16 @@ function openSection(name: 'Browsers' | 'Rules') {
 }
 
 describe('SettingsApp', () => {
+  it('loads config after browser refresh can migrate aliases', async () => {
+    let resolveBrowsers: ((value: typeof chrome[]) => void) | undefined
+    api.listBrowsers.mockImplementation(() => new Promise((resolve) => { resolveBrowsers = resolve }))
+    render(<SettingsApp />)
+    expect(api.getConfig).not.toHaveBeenCalled()
+    resolveBrowsers?.([chrome, firefox])
+    await screen.findByLabelText('Primary browser')
+    expect(api.getConfig).toHaveBeenCalledOnce()
+  })
+
   it('keeps the document clipped and the tab content scrollable on every Settings tab', async () => {
     expect(readFileSync('settings.html', 'utf8')).toContain('<html lang="en" class="settings-page">')
     const sheet = document.createElement('style')

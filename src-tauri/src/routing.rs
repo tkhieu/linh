@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -225,15 +226,18 @@ fn open_target_with(
     spawn: impl Fn(&LaunchCommand, AsyncOutcomeHandler) -> Result<(), String>,
 ) -> Result<(), String> {
     let browsers = state.browsers.lock().unwrap();
+    let aliases = state.browser_aliases.lock().unwrap();
     let (target, cmd) = build_degraded_launch_command(
         state.caps,
         &state.dirs,
         &state.profile_private_notice_shown,
         &browsers,
+        &aliases,
         target,
         url,
     )?;
     drop(browsers);
+    drop(aliases);
     spawn(
         &cmd,
         direct_open_outcome_handler(state, target, url.to_string()),
@@ -264,10 +268,11 @@ fn build_degraded_launch_command(
     dirs: &Dirs,
     notice_shown: &AtomicBool,
     browsers: &[Browser],
+    aliases: &HashMap<String, String>,
     target: &Target,
     url: &str,
 ) -> Result<(Target, LaunchCommand), String> {
-    let target = match degrade_target(caps, target) {
+    let mut target = match degrade_target(caps, target) {
         Some(degraded) => {
             notify_profile_private_unsupported_once(dirs, notice_shown);
             degraded
@@ -277,7 +282,13 @@ fn build_degraded_launch_command(
     let browser = browsers
         .iter()
         .find(|b| b.id == target.browser)
+        .or_else(|| {
+            aliases
+                .get(&target.browser)
+                .and_then(|kept| browsers.iter().find(|browser| browser.id == *kept))
+        })
         .ok_or_else(|| format!("browser '{}' is not installed", target.browser))?;
+    target.browser.clone_from(&browser.id);
     let cmd = launcher::build_launch_command(browser, &target, url)?;
     Ok((target, cmd))
 }
@@ -383,14 +394,17 @@ fn app_launch_outcome_handler(
     url: String,
 ) -> AsyncOutcomeHandler {
     let dirs = state.dirs.clone();
-    let browsers = state.browsers.lock().unwrap().clone();
+    let browser_guard = state.browsers.lock().unwrap();
+    let aliases = state.browser_aliases.lock().unwrap().clone();
+    let browsers = browser_guard.clone();
+    drop(browser_guard);
     let caps = state.caps;
     let notice_shown = Arc::clone(&state.profile_private_notice_shown);
     Box::new(move |outcome| match outcome {
         LaunchOutcome::Succeeded => {}
         LaunchOutcome::Unconfirmed => notify_could_not_confirm(&dirs, &url, &app_display_name),
         LaunchOutcome::DefiniteFailure => {
-            run_watched_fallback(dirs, browsers, caps, notice_shown, fallback, url)
+            run_watched_fallback(dirs, browsers, aliases, caps, notice_shown, fallback, url)
         }
     })
 }
@@ -408,24 +422,31 @@ fn app_launch_outcome_handler(
 fn run_watched_fallback(
     dirs: Dirs,
     browsers: Vec<Browser>,
+    aliases: HashMap<String, String>,
     caps: PlatformCaps,
     notice_shown: Arc<AtomicBool>,
     fallback: Target,
     url: String,
 ) {
-    let (fallback, cmd) =
-        match build_degraded_launch_command(caps, &dirs, &notice_shown, &browsers, &fallback, &url)
-        {
-            Ok(built) => built,
-            Err(err) => {
-                logging::log_line(
-                    &dirs,
-                    &format!("{url}: fallback {fallback:?} could not even start: {err}"),
-                );
-                notify_could_not_confirm(&dirs, &url, &fallback.browser);
-                return;
-            }
-        };
+    let (fallback, cmd) = match build_degraded_launch_command(
+        caps,
+        &dirs,
+        &notice_shown,
+        &browsers,
+        &aliases,
+        &fallback,
+        &url,
+    ) {
+        Ok(built) => built,
+        Err(err) => {
+            logging::log_line(
+                &dirs,
+                &format!("{url}: fallback {fallback:?} could not even start: {err}"),
+            );
+            notify_could_not_confirm(&dirs, &url, &fallback.browser);
+            return;
+        }
+    };
 
     let dirs_for_outcome = dirs.clone();
     let fallback_for_outcome = fallback.clone();
@@ -635,6 +656,38 @@ mod tests {
 
     fn test_state(root: &std::path::Path, browsers: Vec<Browser>) -> AppState {
         AppState::for_test(test_dirs(root), Config::default(), browsers)
+    }
+
+    #[test]
+    fn stale_aliased_target_launches_the_kept_browser() {
+        let root = temp_root("stale-alias-route");
+        let state = test_state(
+            &root,
+            vec![native_browser(
+                "google-chrome",
+                "/usr/bin/google-chrome-stable %u",
+            )],
+        );
+        state
+            .browser_aliases
+            .lock()
+            .unwrap()
+            .insert("com.google.Chrome".into(), "google-chrome".into());
+        let captured: RefCell<Vec<LaunchCommand>> = RefCell::new(Vec::new());
+        open_target_with(
+            &state,
+            &target("com.google.Chrome"),
+            "https://example.com",
+            |command, _on_outcome| {
+                captured.borrow_mut().push(command.clone());
+                Ok(())
+            },
+        )
+        .expect("alias should resolve to the installed browser");
+        let commands = captured.into_inner();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].program, "/usr/bin/google-chrome-stable");
+        std::fs::remove_dir_all(&root).ok();
     }
 
     // --- `plan_app_open`: pure decision, no filesystem/process I/O ---

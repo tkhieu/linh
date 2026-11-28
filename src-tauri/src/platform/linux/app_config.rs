@@ -1,12 +1,15 @@
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use linh_core::{Browser, Config, Target};
+use linh_core::{Browser, Config, OpenIn, Target};
 
 use super::default_browser;
+use super::dirs::Dirs;
+use crate::platform::logging::log_line;
 
 /// Serializes every `save` call process-wide so two threads (e.g. the
 /// tray's click handler and a `save_config` command) never write
@@ -53,6 +56,70 @@ pub fn load_or_init(
             (config, ConfigStatus::Created)
         }
         Err(_) => (fallback_config(detected), ConfigStatus::Broken),
+    }
+}
+
+/// Rewrites dropped desktop ids in memory. The next normal config save
+/// persists the result; loading alone never modifies an existing file.
+pub fn migrate_browser_aliases(
+    config: &mut Config,
+    aliases: &HashMap<String, String>,
+    dirs: &Dirs,
+) -> bool {
+    if aliases.is_empty() {
+        return false;
+    }
+    // ui/src/targets.ts targetKey/parseTargetKey reserve '/' and '#'.
+    // Discovery only emits desktop ids without either separator.
+    debug_assert!(aliases
+        .iter()
+        .all(|(alias, kept)| { !alias.contains(['/', '#']) && !kept.contains(['/', '#']) }));
+    let mut changed = rewrite_target(&mut config.primary, aliases);
+    for rule in &mut config.rules {
+        changed |= match &mut rule.open_in {
+            OpenIn::Target(target) => rewrite_target(target, aliases),
+            OpenIn::App(app) => app
+                .fallback
+                .as_mut()
+                .is_some_and(|target| rewrite_target(target, aliases)),
+            OpenIn::Prompt => false,
+        };
+    }
+    let mut shown_changed = false;
+    for key in &mut config.shown_browsers {
+        let browser_end = key.find(['/', '#']).unwrap_or(key.len());
+        if let Some(kept) = aliases.get(&key[..browser_end]) {
+            *key = format!("{}{}", kept, &key[browser_end..]);
+            shown_changed = true;
+        }
+    }
+    if shown_changed {
+        let mut seen = HashSet::new();
+        config.shown_browsers.retain(|key| seen.insert(key.clone()));
+        changed = true;
+    }
+    if changed {
+        for (index, rule) in config.rules.iter().enumerate() {
+            if config.rules[..index].contains(rule) {
+                log_line(
+                    dirs,
+                    &format!(
+                        "browser alias migration kept duplicate rule '{}'",
+                        rule.name
+                    ),
+                );
+            }
+        }
+    }
+    changed
+}
+
+fn rewrite_target(target: &mut Target, aliases: &HashMap<String, String>) -> bool {
+    if let Some(kept) = aliases.get(&target.browser) {
+        target.browser.clone_from(kept);
+        true
+    } else {
+        false
     }
 }
 
@@ -132,6 +199,130 @@ mod tests {
     use super::*;
     use linh_core::{BrowserFamily, InstallKind};
     use std::path::PathBuf;
+
+    #[test]
+    fn migrates_saved_chrome_aliases_without_losing_rules_or_writing_on_load() {
+        let root = temp_root("alias-migration");
+        let path = root.join("linh.toml");
+        let original = r##"
+shown_browsers = ["google-chrome", "com.google.Chrome", "com.google.Chrome/Default", "google-chrome/Default", "com.google.Chrome#private", "com.google.Chrome/Default#private"]
+[primary]
+browser = "com.google.Chrome"
+profile = "Default"
+private = true
+[[rules]]
+name = "first"
+match = ["first.example"]
+[rules.open_in]
+browser = "com.google.Chrome"
+profile = "Default"
+[[rules]]
+name = "second"
+match = ["second.example"]
+[rules.open_in]
+browser = "google-chrome"
+[[rules]]
+name = "app fallback"
+match = ["third.example"]
+[rules.open_in]
+app = "zoom"
+[rules.open_in.fallback]
+browser = "com.google.Chrome"
+"##;
+        fs::write(&path, original).unwrap();
+        let dirs = Dirs {
+            home: root.join("home"),
+            config_home: root.join("config"),
+            state_home: root.join("state"),
+            application_dirs: vec![],
+        };
+        let (mut config, status) = load_or_init(&path, None, &[]);
+        assert_eq!(status, ConfigStatus::Loaded);
+        let aliases =
+            HashMap::from([("com.google.Chrome".to_string(), "google-chrome".to_string())]);
+        assert!(migrate_browser_aliases(&mut config, &aliases, &dirs));
+        assert_eq!(config.primary.browser, "google-chrome");
+        assert_eq!(config.primary.profile.as_deref(), Some("Default"));
+        assert!(config.primary.private);
+        assert_eq!(
+            config.shown_browsers,
+            vec![
+                "google-chrome",
+                "google-chrome/Default",
+                "google-chrome#private",
+                "google-chrome/Default#private"
+            ]
+        );
+        assert_eq!(config.rules.len(), 3);
+        assert!(
+            matches!(&config.rules[0].open_in, OpenIn::Target(target) if target.browser == "google-chrome")
+        );
+        assert!(
+            matches!(&config.rules[1].open_in, OpenIn::Target(target) if target.browser == "google-chrome")
+        );
+        assert!(
+            matches!(&config.rules[2].open_in, OpenIn::App(app) if app.fallback.as_ref().is_some_and(|target| target.browser == "google-chrome"))
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        let migrated = config.clone();
+        assert!(!migrate_browser_aliases(&mut config, &aliases, &dirs));
+        assert_eq!(config, migrated);
+        assert!(!migrate_browser_aliases(
+            &mut config,
+            &HashMap::new(),
+            &dirs
+        ));
+        assert_eq!(config, migrated);
+        save(&path, &config).unwrap();
+        assert_eq!(load_or_init(&path, None, &[]).0, migrated);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn migration_keeps_rules_that_become_identical_and_no_aliases_are_noop() {
+        let root = temp_root("duplicate-rules");
+        let dirs = Dirs {
+            home: root.join("home"),
+            config_home: root.join("config"),
+            state_home: root.join("state"),
+            application_dirs: vec![],
+        };
+        let mut config = Config {
+            shown_browsers: vec!["com.google.Chrome".into(), "com.google.Chrome".into()],
+            ..Config::default()
+        };
+        let rule = linh_core::Rule {
+            name: "same".into(),
+            preset: None,
+            match_patterns: vec!["example.com".into()],
+            source_apps: None,
+            open_in: OpenIn::Target(Target {
+                browser: "com.google.Chrome".into(),
+                profile: None,
+                private: false,
+            }),
+        };
+        let mut kept_rule = rule.clone();
+        kept_rule.open_in = OpenIn::Target(Target {
+            browser: "google-chrome".into(),
+            profile: None,
+            private: false,
+        });
+        config.rules = vec![rule, kept_rule.clone()];
+        let original = config.clone();
+        assert!(!migrate_browser_aliases(
+            &mut config,
+            &HashMap::new(),
+            &dirs
+        ));
+        assert_eq!(config, original);
+        let aliases =
+            HashMap::from([("com.google.Chrome".to_string(), "google-chrome".to_string())]);
+        assert!(migrate_browser_aliases(&mut config, &aliases, &dirs));
+        assert_eq!(config.rules, vec![kept_rule.clone(), kept_rule]);
+        assert_eq!(config.shown_browsers, vec!["google-chrome"]);
+        fs::remove_dir_all(&root).ok();
+    }
 
     fn temp_root(tag: &str) -> PathBuf {
         let root =

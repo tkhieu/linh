@@ -1,10 +1,13 @@
 use std::collections::HashMap;
+use std::env;
 use std::fs;
+use std::path::{Path, PathBuf};
 
-use linh_core::{Browser, BrowserFamily, InstallKind, Target};
+use linh_core::{Browser, BrowserFamily, InstallKind, LaunchCommand, Target};
 
 use crate::platform::logging::log_line;
 
+use super::chromium;
 use super::desktop::{self, DesktopEntry};
 use super::dirs::Dirs;
 use super::LINH_DESKTOP_ID;
@@ -20,13 +23,71 @@ const FIREFOX_KEYWORDS: [&str; 3] = ["firefox", "librewolf", "zen"];
 /// that handle `x-scheme-handler/http(s)`, and excluding (with a log
 /// line) any browser — native or Flatpak — whose `Exec=` line
 /// `linh-core` rejects.
+#[cfg(test)]
 pub fn scan_browsers(dirs: &Dirs) -> Vec<Browser> {
-    scan_entries(dirs, |entry| {
-        entry
-            .mime_types
+    scan_browser_discovery(dirs).browsers
+}
+
+/// Browser ids dropped because another desktop entry launches the same install.
+pub struct BrowserDiscovery {
+    pub browsers: Vec<Browser>,
+    pub aliases: HashMap<String, String>,
+}
+
+pub fn scan_browser_discovery(dirs: &Dirs) -> BrowserDiscovery {
+    let entries = collect_entries(dirs);
+    let mut groups: HashMap<EquivalenceKey, Vec<Candidate>> = HashMap::new();
+    for entry in entries.into_values().filter(|entry| {
+        !entry.hidden
+            && !is_self(&entry.id)
+            && entry
+                .mime_types
+                .iter()
+                .any(|m| m == "x-scheme-handler/http" || m == "x-scheme-handler/https")
+    }) {
+        let Some(browser) = finish_entry(entry.clone(), dirs) else {
+            continue;
+        };
+        let Some(command) = identity_command(&entry) else {
+            continue;
+        };
+        let key = equivalence_key(&browser, &command, dirs);
+        let dir = entry.path.parent().unwrap_or(Path::new(""));
+        let scan_order = dirs
+            .application_dirs
             .iter()
-            .any(|m| m == "x-scheme-handler/http" || m == "x-scheme-handler/https")
-    })
+            .position(|p| p == dir)
+            .unwrap_or(usize::MAX);
+        // The first three resolved dirs are system locations; later dirs
+        // include XDG_DATA_HOME even when it is outside HOME.
+        let user_dir = dir.starts_with(&dirs.home) || scan_order >= 3;
+        groups.entry(key).or_default().push(Candidate {
+            browser,
+            no_display: entry.no_display,
+            user_dir,
+            scan_order,
+        });
+    }
+    let mut browsers = Vec::new();
+    let mut aliases = HashMap::new();
+    for mut group in groups.into_values() {
+        group.sort_by(|a, b| {
+            a.no_display
+                .cmp(&b.no_display)
+                .then_with(|| b.user_dir.cmp(&a.user_dir))
+                // A later directory is the stronger XDG override, as in
+                // collect_entries for entries with the same desktop id.
+                .then_with(|| b.scan_order.cmp(&a.scan_order))
+                .then_with(|| a.browser.id.cmp(&b.browser.id))
+        });
+        let winner = group.remove(0).browser;
+        for dropped in group {
+            aliases.insert(dropped.browser.id, winner.id.clone());
+        }
+        browsers.push(winner);
+    }
+    browsers.sort_by(|a, b| a.id.cmp(&b.id));
+    BrowserDiscovery { browsers, aliases }
 }
 
 /// Scans the same `.desktop` directories, with the same override
@@ -43,6 +104,16 @@ pub fn scan_entries_for_mime(dirs: &Dirs, mime: &str) -> Vec<Browser> {
 }
 
 fn scan_entries(dirs: &Dirs, handles: impl Fn(&DesktopEntry) -> bool) -> Vec<Browser> {
+    let mut entries: Vec<Browser> = collect_entries(dirs)
+        .into_values()
+        .filter(|entry| !entry.hidden && !is_self(&entry.id) && handles(entry))
+        .filter_map(|entry| finish_entry(entry, dirs))
+        .collect();
+    entries.sort_by(|a, b| a.id.cmp(&b.id));
+    entries
+}
+
+fn collect_entries(dirs: &Dirs) -> HashMap<String, DesktopEntry> {
     let mut by_id: HashMap<String, DesktopEntry> = HashMap::new();
 
     for dir in &dirs.application_dirs {
@@ -57,19 +128,107 @@ fn scan_entries(dirs: &Dirs, handles: impl Fn(&DesktopEntry) -> bool) -> Vec<Bro
             let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
+            // UI target keys reserve '/' and '#private' as separators.
+            if id.contains(['/', '#']) {
+                continue;
+            }
             if let Some(parsed) = desktop::parse_desktop_file(&path, id) {
                 by_id.insert(id.to_string(), parsed);
             }
         }
     }
 
-    let mut entries: Vec<Browser> = by_id
-        .into_values()
-        .filter(|entry| !entry.hidden && !is_self(&entry.id) && handles(entry))
-        .filter_map(|entry| finish_entry(entry, dirs))
+    by_id
+}
+
+struct Candidate {
+    browser: Browser,
+    no_display: bool,
+    user_dir: bool,
+    scan_order: usize,
+}
+
+#[derive(Hash, PartialEq, Eq)]
+enum EquivalenceKey {
+    Native(PathBuf, Option<PathBuf>, Vec<String>),
+    Flatpak(String, PathBuf, Vec<String>),
+}
+
+const IDENTITY_URL: &str = "https://linh.invalid/identity";
+
+fn identity_command(entry: &DesktopEntry) -> Option<LaunchCommand> {
+    let probe = Browser {
+        id: entry.id.clone(),
+        display_name: String::new(),
+        family: BrowserFamily::Other,
+        install: InstallKind::Native {
+            exec: entry.exec.clone(),
+        },
+        profiles: Vec::new(),
+        supports_private: false,
+        icon: None,
+        desktop_file: None,
+    };
+    linh_core::build_launch_command(
+        &probe,
+        &Target {
+            browser: entry.id.clone(),
+            profile: None,
+            private: false,
+        },
+        IDENTITY_URL,
+    )
+    .ok()
+}
+
+fn canonical_program(program: &str) -> PathBuf {
+    let path = Path::new(program);
+    if path.is_absolute() || program.contains('/') {
+        return fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    }
+    if let Some(found) = env::split_paths(&env::var_os("PATH").unwrap_or_default())
+        .map(|dir| dir.join(program))
+        .find(|candidate| candidate.is_file())
+    {
+        return fs::canonicalize(&found).unwrap_or(found);
+    }
+    path.to_path_buf()
+}
+
+fn equivalence_key(browser: &Browser, command: &LaunchCommand, dirs: &Dirs) -> EquivalenceKey {
+    let args: Vec<String> = command
+        .args
+        .iter()
+        .filter(|arg| arg.as_str() != IDENTITY_URL)
+        .cloned()
         .collect();
-    entries.sort_by(|a, b| a.id.cmp(&b.id));
-    entries
+    match &browser.install {
+        InstallKind::Native { .. } => {
+            let user_data = args
+                .iter()
+                .find_map(|arg| arg.strip_prefix("--user-data-dir="))
+                .map(PathBuf::from)
+                .or_else(|| {
+                    args.windows(2)
+                        .find(|pair| pair[0] == "--user-data-dir")
+                        .map(|pair| PathBuf::from(&pair[1]))
+                });
+            let profile_dir = if browser.family == BrowserFamily::Chromium {
+                user_data.or_else(|| {
+                    chromium::local_state_path(browser, dirs)
+                        .and_then(|p| p.parent().map(Path::to_path_buf))
+                })
+            } else {
+                None
+            };
+            EquivalenceKey::Native(canonical_program(&command.program), profile_dir, args)
+        }
+        InstallKind::Flatpak { app_id } => EquivalenceKey::Flatpak(
+            app_id.clone(),
+            dirs.home.join(".var/app").join(app_id),
+            args,
+        ),
+    }
 }
 
 fn finish_entry(entry: DesktopEntry, dirs: &Dirs) -> Option<Browser> {
@@ -169,6 +328,178 @@ fn is_self(id: &str) -> bool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn chrome_entry(exec: &str, extra: &str) -> String {
+        format!("[Desktop Entry]\nName=Chrome\nExec={exec}\nMimeType=x-scheme-handler/http;x-scheme-handler/https;\n{extra}")
+    }
+
+    #[test]
+    fn equivalent_native_launchers_keep_visible_and_record_alias() {
+        let root = temp_root("equivalent");
+        let apps = root.join("apps");
+        write_desktop(
+            &apps,
+            "google-chrome.desktop",
+            &chrome_entry("/usr/bin/google-chrome-stable %U", ""),
+        );
+        write_desktop(
+            &apps,
+            "com.google.Chrome.desktop",
+            &chrome_entry("/usr/bin/google-chrome-stable %U", "NoDisplay=true\n"),
+        );
+        let found = scan_browser_discovery(&test_dirs(&root, &[apps]));
+        assert_eq!(found.browsers.len(), 1);
+        assert_eq!(found.browsers[0].id, "google-chrome");
+        assert_eq!(
+            found.aliases.get("com.google.Chrome").map(String::as_str),
+            Some("google-chrome")
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_exec_is_equivalent() {
+        let root = temp_root("symlink");
+        let apps = root.join("apps");
+        let binary = root.join("chrome-bin");
+        let link = root.join("chrome-link");
+        fs::write(&binary, "").unwrap();
+        std::os::unix::fs::symlink(&binary, &link).unwrap();
+        write_desktop(
+            &apps,
+            "visible.desktop",
+            &chrome_entry(&format!("{} %U", binary.display()), ""),
+        );
+        write_desktop(
+            &apps,
+            "hidden.desktop",
+            &chrome_entry(&format!("{} %U", link.display()), "NoDisplay=true\n"),
+        );
+        let found = scan_browser_discovery(&test_dirs(&root, &[apps]));
+        assert_eq!(found.browsers.len(), 1);
+        assert_eq!(
+            found.aliases.get("hidden").map(String::as_str),
+            Some("visible")
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn native_flatpak_beta_and_user_data_are_distinct() {
+        let root = temp_root("distinct");
+        let apps = root.join("apps");
+        write_desktop(
+            &apps,
+            "google-chrome.desktop",
+            &chrome_entry("/usr/bin/google-chrome-stable %U", ""),
+        );
+        write_desktop(
+            &apps,
+            "flatpak-chrome.desktop",
+            &chrome_entry(
+                "/usr/bin/flatpak run com.google.Chrome %U",
+                "X-Flatpak=com.google.Chrome\n",
+            ),
+        );
+        write_desktop(
+            &apps,
+            "google-chrome-beta.desktop",
+            &chrome_entry("/usr/bin/google-chrome-beta %U", ""),
+        );
+        write_desktop(
+            &apps,
+            "custom-chrome.desktop",
+            &chrome_entry(
+                "/usr/bin/google-chrome-stable --user-data-dir=/tmp/chrome-custom %U",
+                "",
+            ),
+        );
+        let found = scan_browser_discovery(&test_dirs(&root, &[apps]));
+        assert_eq!(found.browsers.len(), 4);
+        assert!(found.aliases.is_empty());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn user_dir_beats_earlier_system_dir_for_equivalent_ids() {
+        let root = temp_root("user-priority");
+        let system = root.join("system");
+        let user = root.join("home/.local/share/applications");
+        write_desktop(
+            &system,
+            "system.desktop",
+            &chrome_entry("/usr/bin/google-chrome-stable %U", ""),
+        );
+        write_desktop(
+            &user,
+            "user.desktop",
+            &chrome_entry("/usr/bin/google-chrome-stable %U", ""),
+        );
+        let found = scan_browser_discovery(&test_dirs(&root, &[system, user]));
+        assert_eq!(found.browsers.len(), 1);
+        assert_eq!(found.browsers[0].id, "user");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn custom_xdg_user_dir_outside_home_is_preferred() {
+        let root = temp_root("custom-xdg-priority");
+        let system = root.join("system");
+        let custom = root.join("custom-data/applications");
+        write_desktop(
+            &system,
+            "system.desktop",
+            &chrome_entry("/usr/bin/google-chrome-stable %U", ""),
+        );
+        write_desktop(
+            &custom,
+            "custom.desktop",
+            &chrome_entry("/usr/bin/google-chrome-stable %U", ""),
+        );
+        let found = scan_browser_discovery(&test_dirs(
+            &root,
+            &[system, root.join("system2"), root.join("system3"), custom],
+        ));
+        assert_eq!(found.browsers.len(), 1);
+        assert_eq!(found.browsers[0].id, "custom");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn later_equal_tier_directory_wins() {
+        let root = temp_root("equal-tier-order");
+        let first = root.join("system-a");
+        let later = root.join("system-b");
+        write_desktop(
+            &first,
+            "a.desktop",
+            &chrome_entry("/usr/bin/google-chrome-stable %U", ""),
+        );
+        write_desktop(
+            &later,
+            "z.desktop",
+            &chrome_entry("/usr/bin/google-chrome-stable %U", ""),
+        );
+        let found = scan_browser_discovery(&test_dirs(&root, &[first, later]));
+        assert_eq!(found.browsers.len(), 1);
+        assert_eq!(found.browsers[0].id, "z");
+        assert_eq!(found.aliases.get("a").map(String::as_str), Some("z"));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn desktop_id_with_target_key_separator_is_skipped() {
+        let root = temp_root("invalid-id-separator");
+        let apps = root.join("apps");
+        write_desktop(
+            &apps,
+            "chrome#extra.desktop",
+            &chrome_entry("/usr/bin/google-chrome-stable %U", ""),
+        );
+        assert!(scan_browsers(&test_dirs(&root, &[apps])).is_empty());
+        fs::remove_dir_all(&root).ok();
+    }
 
     fn write_desktop(dir: &std::path::Path, name: &str, content: &str) {
         fs::create_dir_all(dir).unwrap();
