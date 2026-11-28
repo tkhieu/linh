@@ -12,6 +12,9 @@ artifact is for Partner Center submission, not direct installation.
    unless all three versions equal the `vMAJOR.MINOR.PATCH` tag. Pre-release
    and build suffixes (`v1.2.3-beta`, `v1.2.3+build`) are rejected too: MSIX
    package versions must be a plain numeric `Major.Minor.Patch`.
+   Add one `<release>` entry for the new version to
+   `packaging/linux/dev.hieutk.linh.metainfo.xml` when the release is
+   published, using its publication date and a brief user-facing description.
 2. Run **Release** with `workflow_dispatch` and `dry_run=true` on a branch
    after the workflow is available on the default branch. Inspect all four
    build jobs and the complete `linh-release-assets` artifact, including
@@ -34,6 +37,14 @@ artifact is for Partner Center submission, not direct installation.
 4. Submit the `.msix` separately in Partner Center and manually test Windows
    default-browser selection and URL forwarding on the Store-installed app.
    Also test the macOS DMG on a Mac before publishing the GitHub draft.
+
+## AppStream metainfo
+
+The RPM and DEB install `packaging/linux/dev.hieutk.linh.metainfo.xml` under
+`/usr/share/metainfo/`. Keep its release list in sync with published tags as
+part of each release bump. Validate edits with
+`appstreamcli validate --no-net --explain packaging/linux/dev.hieutk.linh.metainfo.xml`.
+Real screenshots are still needed; see `docs/screenshots/README.md`.
 
 ## Update manifest
 
