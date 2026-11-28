@@ -7,7 +7,9 @@ plate, tray symbolic, Windows tiles, size previews) is derived from the same
 centre-line definition so the family stays consistent.
 
 Requires PyGObject with Rsvg 2.0 and pycairo.
-Usage: python3 scripts/generate-icon-assets.py [output_dir]
+Usage: python3 scripts/generate-icon-assets.py [variant]
+Variants: indigo-coral (default, soft depth) and blue-green (flat, no shadow).
+The shipped app icon is blue-green; indigo-coral remains an alternative design.
 """
 
 import math
@@ -20,10 +22,35 @@ import gi
 gi.require_version("Rsvg", "2.0")
 from gi.repository import Rsvg  # noqa: E402
 
-OUT = Path(sys.argv[1] if len(sys.argv) > 1 else "design/icon")
-
-PRIMARY_TOP, PRIMARY_BOTTOM, PRIMARY_LIP = "#7477F8", "#4E51DE", "#3436A8"
-ACCENT_TOP, ACCENT_BOTTOM, ACCENT_LIP = "#FF8A6B", "#F2533A", "#B8361F"
+# Each variant: output dir, master colours (a tuple is a top-to-bottom gradient),
+# optional depth lip, and the macOS plate treatment.
+VARIANTS = {
+    "indigo-coral": {
+        "out": "design/icon",
+        "dim": ("#7477F8", "#4E51DE"),
+        "accent": ("#FF8A6B", "#F2533A"),
+        "lip": ("#3436A8", "#B8361F", 22),
+        "plate": ("#7477F8", "#4E51DE"),
+        "mac_dim": ("#FFFFFF", "#E4E5FF"),
+        "mac_accent": ("#FF8A6B", "#F2533A"),
+        "mac_lip": ("#3A3DB4", "#B8361F", 16),
+        "plate_shadow": True,
+    },
+    "blue-green": {
+        "out": "design/icon/blue-green",
+        "dim": "#2563EB",
+        "accent": "#10A35C",
+        "lip": None,
+        "plate": "#2563EB",
+        "mac_dim": "#FFFFFF",
+        "mac_accent": "#4ADE80",
+        "mac_lip": None,
+        "plate_shadow": False,
+    },
+}
+VARIANT_NAME = sys.argv[1] if len(sys.argv) > 1 else "indigo-coral"
+V = VARIANTS[VARIANT_NAME]
+OUT = Path(V["out"])
 
 # Transit-map construction: the incoming line runs left to right and splits at a
 # junction into two lines with 45 degree bends. The chosen line is lit in the
@@ -123,22 +150,34 @@ def squircle(x0, y0, size, n=5.0, steps=360):
 
 def master_svg():
     m, _ = make_transform(860)
-    return svg(mark(m, (PRIMARY_TOP, PRIMARY_BOTTOM), (ACCENT_TOP, ACCENT_BOTTOM), PRIMARY_LIP, ACCENT_LIP, 22, "m"))
+    lip_dim, lip_acc, lip = V["lip"] or (None, None, 0)
+    return svg(mark(m, V["dim"], V["accent"], lip_dim, lip_acc, lip, "m"))
 
 
 def macos_svg():
     # Apple Big Sur grid: 824pt plate centred on a 1024 canvas (100pt margins).
     m, _ = make_transform(560)
     plate = squircle(100, 100, 824)
+    defs, fill, filt = "", V["plate"], ""
+    if isinstance(fill, tuple):
+        defs += (
+            '<linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">'
+            f'<stop offset="0" stop-color="{fill[0]}"/><stop offset="1" stop-color="{fill[1]}"/></linearGradient>'
+        )
+        fill = "url(#plate)"
+    if V["plate_shadow"]:
+        defs += (
+            '<filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">'
+            '<feGaussianBlur in="SourceAlpha" stdDeviation="14"/><feOffset dy="12"/>'
+            '<feComponentTransfer><feFuncA type="linear" slope="0.30"/></feComponentTransfer>'
+            '<feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter>'
+        )
+        filt = ' filter="url(#shadow)"'
+    lip_dim, lip_acc, lip = V["mac_lip"] or (None, None, 0)
     body = (
-        '<defs><linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">'
-        f'<stop offset="0" stop-color="{PRIMARY_TOP}"/><stop offset="1" stop-color="{PRIMARY_BOTTOM}"/></linearGradient>'
-        '<filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">'
-        '<feGaussianBlur in="SourceAlpha" stdDeviation="14"/><feOffset dy="12"/>'
-        '<feComponentTransfer><feFuncA type="linear" slope="0.30"/></feComponentTransfer>'
-        '<feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>'
-        f'<path d="{plate}" fill="url(#plate)" filter="url(#shadow)"/>'
-        + mark(m, ("#FFFFFF", "#E4E5FF"), (ACCENT_TOP, ACCENT_BOTTOM), "#3A3DB4", "#B8361F", 16, "mac")
+        (f"<defs>{defs}</defs>" if defs else "")
+        + f'<path d="{plate}" fill="{fill}"{filt}/>'
+        + mark(m, V["mac_dim"], V["mac_accent"], lip_dim, lip_acc, lip, "mac")
     )
     return svg(body)
 
