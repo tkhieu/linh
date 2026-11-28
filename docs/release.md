@@ -164,43 +164,74 @@ $env:LINH_VERSION = '0.4.1'
 ./scripts/package-msix.ps1
 ```
 
-Every build gets a stamp file, `linh.dist-marker.txt`, written by
-`build.rs`'s `write_dist_stamp` right next to the compiled binary,
-naming its `LINH_DIST`/`self-update` state, e.g.
-`LINH_BUILD_MARKER:dist=msstore;self_update=false`. `package-msix.ps1`
-reads this before packaging a build into the Store MSIX, never the exe
-itself — two earlier approaches both failed in real CI: running
-`linh.exe --print-dist` and capturing its output crashed, because
-`linh` is a GUI-subsystem binary (`windows_subsystem = "windows"`) with
-no reliable stdout when spawned non-interactively ("failed printing to
-stdout: The pipe is being closed"); embedding the marker directly in the
-exe's data section via a `#[used] static` (checked by searching the raw
-bytes, so nothing had to run) also failed, because the MSVC linker's
-default `/OPT:REF` silently stripped the unreferenced static from the
-real Windows build, even though the identical code survived the Linux
-build this was first verified against. `scripts/package-msix.ps1`
-requires `LINH_STORE_EXE_PATH` (no default/guessed path) and refuses to
-package anything whose stamp doesn't say exactly
-`LINH_BUILD_MARKER:dist=msstore;self_update=false` — so pointing it at
-the wrong exe (e.g. the NSIS build's own `target/release/linh.exe`)
-fails the packaging step instead of silently shipping the self-updater
-in a Store submission.
+The packaging step's primary check reads the **exe itself**, not a
+sidecar: `scripts/assert-self-updater-presence.ps1` searches the exe's
+raw bytes for a string `tauri-plugin-updater` only emits when it's
+actually compiled in — `thiserror`'s generated `Display` text for
+`Error::EmptyEndpoints`, *"Updater does not have any endpoints set."*
+(`tauri-plugin-updater-2.14.1/src/error.rs:13`). That impl is reachable
+from `main` through `updates::describe_error`, so the string is part of
+genuinely live code, not an inert marker a linker is free to discard —
+confirmed empirically on Linux: it appears exactly once in a default
+(`github`, self-update on) release build and zero times in an
+`LINH_DIST=msstore --no-default-features` build. `package-msix.ps1`
+refuses to package any exe the string is present in.
 
-A matching stamp alone doesn't prove it describes *this* exe: `build.rs`
-writes the stamp before the final binary is linked, so a stale stamp left
-next to a *later-replaced* exe (e.g. a stale cache restoring an exe and a
-stamp from two different earlier runs) would still read as a confirmed
-`msstore` build. Two independent defenses: `release.yml`'s cleanup step
-deletes `target/msstore` before every Windows job build (so the exe and
-its stamp can only ever come from the same build), and
-`package-msix.ps1` separately refuses to package an exe whose
-`LastWriteTime` is older than its stamp's. Residual risk: both defenses
-rely on the filesystem's own mtimes, which a sufficiently contrived cache
-restore or clock skew could in principle still defeat; a stronger
-guarantee (e.g. a linker-enforced marker inside the exe itself) was tried
-first and abandoned only because the MSVC linker's `/OPT:REF` silently
-discarded it in practice (see above) — revisiting that, or hashing the
-exe into the stamp, is the next step up if this ever proves insufficient.
+Getting to a check that reads the exe itself took three attempts: running
+`linh.exe --print-dist` and capturing its output crashed in real CI,
+because `linh` is a GUI-subsystem binary (`windows_subsystem =
+"windows"`) with no reliable stdout when spawned non-interactively
+("failed printing to stdout: The pipe is being closed"); embedding a
+purpose-built marker in the exe's data section via a `#[used] static`
+(also checked by a raw byte search) also failed in real CI, because the
+MSVC linker's default `/OPT:REF` silently stripped the *unreferenced*
+static from the real Windows build, even though the identical code
+survived the Linux build this was first verified against. Searching for
+a string the plugin's own, already-reachable code emits sidesteps both:
+nothing has to run, and nothing needed inventing had to survive the
+linker on its own.
+
+A sidecar stamp file, `linh.dist-marker.txt`, written by `build.rs`'s
+`write_dist_stamp` right next to the compiled binary (e.g.
+`LINH_BUILD_MARKER:dist=msstore;self_update=false`), is kept as a
+**second**, independent layer — not because it's load-bearing for the
+self-updater question (the byte search above already answers that
+directly), but because it additionally confirms the exe is the
+*specific* `msstore` channel, not merely "some build without the
+self-updater" (`mas`/`flathub`/`copr`/`ppa` would also pass the byte
+search), with a clearer error message on a plain wrong-`LINH_DIST`
+mistake. Checking only the exe and dropping the stamp entirely was
+considered and rejected: the stamp's extra specificity is cheap to keep,
+and a stamp mismatch is a friendlier first error than a bare "self-updater
+marker present" would be for the common case of someone just getting the
+`LINH_DIST`/`--target-dir`/`LINH_STORE_EXE_PATH` wiring wrong. Because a
+stamp is written before the exe it sits next to is linked, a stale stamp
+next to a *later-replaced* exe would otherwise still read as a confirmed
+build — `release.yml`'s cleanup step deletes `target/msstore` before every
+Windows job build (so the exe and its stamp can only ever come from the
+same build), and `package-msix.ps1` separately refuses to package an exe
+whose `LastWriteTime` is older than its stamp's.
+
+`release.yml` also runs the byte search the other way, as a positive
+control, against the NSIS build's own `target/release/linh.exe`
+(`LINH_DIST` unset, `self-update` on): it must contain the marker. This
+is what actually protects the check's own future: if a later
+`tauri-plugin-updater` upgrade ever renames or rewords that error
+message, the positive control fails loudly right there, instead of the
+Store packaging step's negative check silently "passing" for the wrong
+reason (the string being absent because it no longer exists anywhere,
+not because this exe lacks the plugin).
+
+**Residual risk**: the check is a string present in the compiled output
+of a specific crate version, not a structural guarantee — a future
+`tauri-plugin-updater` release could still coincidentally reintroduce an
+identical string for an unrelated reason (vanishingly unlikely for a
+sentence this specific), or change the string in a way the positive
+control catches but requires a human to then update both this marker and
+the one in `assert-self-updater-presence.ps1`. There's no feasible way to
+make "the plugin's code is absent" fully self-verifying without Apple's
+or Microsoft's own store review, which this repeats a version of every
+time a release is prepared.
 
 CI's `build` job runs `cargo check` and `cargo clippy` a second time with
 `LINH_DIST=msstore` and `--no-default-features` on every push, so the store

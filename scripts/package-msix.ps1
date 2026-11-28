@@ -17,22 +17,24 @@ if (-not $sourceExe) {
 $sourceExe = (Resolve-Path $sourceExe).Path
 if (-not (Test-Path $sourceExe)) { throw "LINH_STORE_EXE_PATH does not exist: $sourceExe" }
 
-# Assert the binary is actually what it claims to be before packaging it
-# — by reading the stamp file `build.rs`'s `write_dist_stamp` writes next
-# to the compiled binary, never by running the exe itself or scanning its
-# bytes. Two earlier approaches both failed in real CI: running
-# `$sourceExe --print-dist` and capturing its output crashed, because
-# `linh.exe` is a GUI-subsystem binary (`windows_subsystem = "windows"`)
-# with no reliable stdout when spawned non-interactively ("failed
-# printing to stdout: The pipe is being closed"); searching the exe's raw
-# bytes for a marker embedded via a `#[used] static` also failed, because
-# the MSVC linker's default `/OPT:REF` silently stripped the unreferenced
-# static from the real Windows build (it had survived the Linux build
-# this was first verified against). A plain sibling text file written by
-# the build script itself sidesteps both. Store policy (Microsoft Store,
-# Apple App Store guideline 2.5.2) forbids shipping the self-updater at
-# all, so this fails the packaging step loudly instead of silently
-# shipping it.
+# The PRIMARY check: does the exe itself actually contain the
+# self-updater, regardless of what any sidecar file claims? A stamp
+# file alone can't prove that — build.rs writes it before the exe is
+# linked, so a stale stamp next to a *later-replaced* exe (e.g. a
+# different, newer github-flavour exe dropped at this same path without
+# going through build.rs again) would still read as a confirmed
+# msstore/self-update-off build even though the exe itself is wrong.
+# See assert-self-updater-presence.ps1 for the exact string and why it's
+# reliable (checked by searching the exe's bytes, never by running it —
+# linh.exe is a GUI-subsystem binary with no reliable stdout
+# non-interactively).
+& (Join-Path $PSScriptRoot 'assert-self-updater-presence.ps1') -ExePath $sourceExe -Expect absent
+
+# SECOND layer, kept rather than removed: the stamp additionally confirms
+# the exe is the *specific* `msstore` channel (not just "some build
+# without the self-updater" — `mas`/`flathub`/`copr`/`ppa` would also
+# pass the check above), and catches a wrong LINH_DIST/feature-set build
+# with a clearer message than a bare "marker absent" would give.
 $expectedMarker = 'LINH_BUILD_MARKER:dist=msstore;self_update=false'
 $stampPath = Join-Path (Split-Path $sourceExe) 'linh.dist-marker.txt'
 if (-not (Test-Path $stampPath)) {
@@ -45,14 +47,11 @@ if ($stampContents -ne $expectedMarker) {
     throw "Build stamp at $stampPath says '$stampContents', expected '$expectedMarker' - refusing to package a binary that isn't a confirmed msstore/self-update-off build"
 }
 
-# A matching stamp alone doesn't prove it describes *this* exe: build.rs
-# writes the stamp before the final exe is linked, so a stale stamp left
-# over next to a later-replaced exe (e.g. a different build copied over
-# the same path without going through cargo/build.rs again) would still
-# read correctly. Require the exe to be at least as new as its stamp -
-# release.yml also deletes target/msstore before every Store build so
-# the two are only ever written together in the first place; this is the
-# second, independent check against the same risk.
+# Addresses the stamp's own staleness risk (see above) independently,
+# by requiring the exe to be at least as new as it: release.yml also
+# deletes target/msstore before every Store build so the two are only
+# ever written together in the first place, but this check doesn't rely
+# on that cleanup alone.
 $exeWriteTime = (Get-Item $sourceExe).LastWriteTimeUtc
 $stampWriteTime = (Get-Item $stampPath).LastWriteTimeUtc
 if ($exeWriteTime -lt $stampWriteTime) {

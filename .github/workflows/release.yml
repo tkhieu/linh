@@ -238,6 +238,16 @@ jobs:
         working-directory: src-tauri
         run: cargo tauri build --bundles nsis
 
+      - name: Verify the NSIS build still has the self-updater (positive control)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        # Proves the marker check itself still works, rather than only
+        # ever exercising its "absent" branch: if tauri-plugin-updater
+        # ever renames/removes the string this looks for, this step
+        # fails loudly here instead of the Store packaging step's
+        # "absent" check silently passing for the wrong reason.
+        run: ./scripts/assert-self-updater-presence.ps1 -ExePath target/release/linh.exe -Expect present
+
       - name: Build Windows Store binary (LINH_DIST=msstore)
         if: matrix.platform == 'windows'
         working-directory: src-tauri
