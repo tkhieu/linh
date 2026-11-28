@@ -42,6 +42,9 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.4.3" date="2026-11-28">
+      <description><p>Fixes browser checkbox rendering in Settings.</p></description>
+    </release>
     <release version="0.4.2" date="2026-11-28">
       <description><p>Added the Blue/Green application icon and AppStream software center details.</p></description>
     </release>
