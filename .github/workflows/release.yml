@@ -422,6 +422,19 @@ jobs:
               exit 1
             fi
           done
+          if [[ -n "$APPLE_TEAM_ID" ]] && ! grep -Fxq "TeamIdentifier=$APPLE_TEAM_ID" <<< "$signature"; then
+            echo '::error::App signature TeamIdentifier does not match APPLE_TEAM_ID.' >&2
+            exit 1
+          fi
+          timestamp="$(sed -n 's/^Timestamp=//p' <<< "$signature" | head -n 1)"
+          if [[ -z "$timestamp" || "$timestamp" == none ]]; then
+            echo '::error::App signature has no secure timestamp.' >&2
+            exit 1
+          fi
+          echo 'Authority=Developer ID Application (verified)'
+          if [[ -n "$APPLE_TEAM_ID" ]]; then echo 'TeamIdentifier=<redacted; matches APPLE_TEAM_ID>'; fi
+          echo 'flags=0x10000(runtime) (verified)'
+          echo "Timestamp=$timestamp"
           archs="$(lipo -archs "$app/Contents/MacOS/linh")"
           for arch in x86_64 arm64; do
             if [[ " $archs " != *" $arch "* ]]; then
@@ -429,7 +442,9 @@ jobs:
               exit 1
             fi
           done
+          echo "Architectures=$archs"
           xcrun stapler validate "$app"
+          echo 'App stapler validate: passed'
 
           result="$(mktemp "$RUNNER_TEMP/linh-notary-result.XXXXXX")"
           key_path=''
@@ -452,8 +467,10 @@ jobs:
             if [[ -n "$submission_id" ]]; then xcrun notarytool log "$submission_id" "${auth[@]}" || true; fi
             exit 1
           fi
+          echo "DMG notarization: status=$status id=$submission_id"
           xcrun stapler staple "$dmg"
           xcrun stapler validate "$dmg"
+          echo 'DMG stapler staple and validate: passed'
           for assessment in "install:$dmg" "exec:$app"; do
             kind="${assessment%%:*}"
             path="${assessment#*:}"
@@ -462,6 +479,7 @@ jobs:
               echo "::error::Gatekeeper did not accept the $kind artifact as Notarized Developer ID." >&2
               exit 1
             fi
+            echo "spctl -t $kind: accepted; source=Notarized Developer ID"
           done
           echo 'Verified Developer ID signature, runtime, timestamp, universal binary, app ticket, stapled DMG, and Gatekeeper acceptance.'
 
