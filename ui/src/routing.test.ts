@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { Config } from './api'
 import { parseTraceUrl, patternMatches, resolveAppTarget, traceRoute, zoomAppUrl } from './routing'
 
-const caps = { source_app_rules: false }
+const caps = { source_app_rules: false, restrict_profile_private: false }
 
 function baseConfig(): Config {
   return {
@@ -194,7 +194,7 @@ describe('traceRoute', () => {
       ...baseConfig(),
       rules: [{ name: 'slack-rule', match: ['example.com'], source_apps: ['Slack'], open_in: { browser: 'chrome', private: false } }],
     }
-    const trace = traceRoute(config, { source_app_rules: false }, 'example.com', '/')
+    const trace = traceRoute(config, { source_app_rules: false, restrict_profile_private: false }, 'example.com', '/')
     expect(trace.decision).toEqual({ kind: 'open', target: config.primary })
     expect(trace.steps).toEqual([{ index: 0, name: 'slack-rule', status: 'skip-no-source-app-caps' }])
   })
@@ -204,7 +204,7 @@ describe('traceRoute', () => {
       ...baseConfig(),
       rules: [{ name: 'slack-rule', match: ['example.com'], source_apps: ['Slack'], open_in: { browser: 'chrome', private: false } }],
     }
-    const trace = traceRoute(config, { source_app_rules: true }, 'example.com', '/')
+    const trace = traceRoute(config, { source_app_rules: true, restrict_profile_private: false }, 'example.com', '/')
     expect(trace.decision).toEqual({ kind: 'open', target: { browser: 'chrome', private: false } })
   })
 })

@@ -1,6 +1,7 @@
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use linh_core::{AppTarget, Browser, Decision, LaunchCommand, Target};
+use linh_core::{AppTarget, Browser, Decision, LaunchCommand, PlatformCaps, Target};
 use tauri::{AppHandle, Manager};
 use url::Url;
 
@@ -222,6 +223,11 @@ fn open_target_with(
     url: &str,
     spawn: impl Fn(&LaunchCommand, AsyncOutcomeHandler) -> Result<(), String>,
 ) -> Result<(), String> {
+    let degraded = degrade_target(state.caps, target);
+    let target = degraded.as_ref().unwrap_or(target);
+    if degraded.is_some() {
+        notify_profile_private_unsupported_once(state);
+    }
     let browsers = state.browsers.lock().unwrap();
     let browser = browsers
         .iter()
@@ -233,6 +239,52 @@ fn open_target_with(
         &cmd,
         direct_open_outcome_handler(state, target.clone(), url.to_string()),
     )
+}
+
+/// This is the single chokepoint every launch passes through —
+/// `route_url`'s `Decision::Open`, a rule's `Target` fallback, and an
+/// `AppTarget`'s browser fallback all end up calling [`open_target_with`]
+/// — so stripping `profile`/`private` here, right before a `Browser` is
+/// even looked up, is enough to guarantee `linh_core::decide`'s own
+/// output (which never knows about platform capabilities) never reaches
+/// a launch carrying a flag this platform can't deliver.
+///
+/// Returns `None` when `target` needed no change — including when
+/// `caps.restrict_profile_private` is `false` — so callers can tell a
+/// degradation actually happened (and so only show the user a notice
+/// then) without re-deriving that themselves.
+fn degrade_target(caps: PlatformCaps, target: &Target) -> Option<Target> {
+    if !caps.restrict_profile_private {
+        return None;
+    }
+    if target.profile.is_none() && !target.private {
+        return None;
+    }
+    Some(Target {
+        browser: target.browser.clone(),
+        profile: None,
+        private: false,
+    })
+}
+
+/// Tells the user, once per run, that a profile or private-window target
+/// degraded to the plain browser window because this build can't carry
+/// either to a launch (see [`degrade_target`]) — a config full of rules
+/// that each name one must not notify once per routed link.
+fn notify_profile_private_unsupported_once(state: &AppState) {
+    if state
+        .profile_private_notice_shown
+        .swap(true, Ordering::SeqCst)
+    {
+        return;
+    }
+    notify::notify_info(
+        &state.dirs,
+        "Linh: profile and private windows unavailable",
+        "This Mac App Store build can't open a specific browser profile or \
+         a private/incognito window in another app — opening it normally \
+         instead.",
+    );
 }
 
 /// Outcome handler for a direct (non-app) target open: there's no
@@ -377,6 +429,77 @@ pub fn show_and_focus(app: &AppHandle, label: &str) {
     if let Some(window) = app.get_webview_window(label) {
         let _ = window.show();
         let _ = window.set_focus();
+    }
+}
+
+// `degrade_target` is pure platform-capability logic with no OS-specific
+// I/O, so (unlike the fixtures below) these run on every host, including
+// this repo's Linux CI — the only place `Dist::Mas`'s actual launch path
+// ever gets a unit test at all, since the macOS-only code that builds
+// its `caps.restrict_profile_private = true` is itself untestable off a
+// real Mac (see `platform::macos::command`/`workspace`'s own doc
+// comments).
+#[cfg(test)]
+mod degrade_target_tests {
+    use super::*;
+
+    fn target(browser: &str, profile: Option<&str>, private: bool) -> Target {
+        Target {
+            browser: browser.to_string(),
+            profile: profile.map(str::to_string),
+            private,
+        }
+    }
+
+    fn caps(restrict_profile_private: bool) -> PlatformCaps {
+        PlatformCaps {
+            source_app_rules: false,
+            restrict_profile_private,
+        }
+    }
+
+    #[test]
+    fn unrestricted_platform_never_degrades_anything() {
+        assert_eq!(
+            degrade_target(caps(false), &target("chrome", Some("Work"), true)),
+            None
+        );
+        assert_eq!(
+            degrade_target(caps(false), &target("chrome", None, false)),
+            None
+        );
+    }
+
+    #[test]
+    fn restricted_platform_leaves_a_plain_target_alone() {
+        assert_eq!(
+            degrade_target(caps(true), &target("chrome", None, false)),
+            None
+        );
+    }
+
+    #[test]
+    fn restricted_platform_strips_profile() {
+        assert_eq!(
+            degrade_target(caps(true), &target("chrome", Some("Work"), false)),
+            Some(target("chrome", None, false))
+        );
+    }
+
+    #[test]
+    fn restricted_platform_strips_private() {
+        assert_eq!(
+            degrade_target(caps(true), &target("chrome", None, true)),
+            Some(target("chrome", None, false))
+        );
+    }
+
+    #[test]
+    fn restricted_platform_strips_both_at_once_and_keeps_the_browser_id() {
+        assert_eq!(
+            degrade_target(caps(true), &target("com.google.chrome", Some("Work"), true)),
+            Some(target("com.google.chrome", None, false))
+        );
     }
 }
 

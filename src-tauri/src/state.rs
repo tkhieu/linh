@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 
 use linh_core::{Browser, Config, PlatformCaps, Target};
@@ -8,6 +9,19 @@ use tauri::Wry;
 use crate::platform::current::{app_config, browsers, default_browser, dirs::Dirs, notify};
 use crate::prompt_state::PromptState;
 use crate::updates;
+use crate::updates::Dist;
+
+/// Maps this build's `LINH_DIST` to the `PlatformCaps` it implies.
+/// Deliberately pure and parameterized by `dist` rather than reading
+/// `updates::current_dist()` itself, so it's unit-tested directly on
+/// every CI runner — not just the one real macOS/`LINH_DIST=mas` build
+/// that ever reaches `Dist::Mas` at runtime.
+pub(crate) fn platform_caps_for_dist(dist: Dist) -> PlatformCaps {
+    PlatformCaps {
+        source_app_rules: false,
+        restrict_profile_private: dist == Dist::Mas,
+    }
+}
 
 /// Shared, mutable application state, managed by Tauri and reachable from
 /// every command and from the tray menu's click handler.
@@ -31,6 +45,13 @@ pub struct AppState {
     /// Background update checking and in-place install state (see
     /// [`crate::updates`]).
     pub updates: updates::Updates,
+    /// Set the first time this run shows the "profiles and private
+    /// windows aren't available" notice (only ever true when
+    /// `caps.restrict_profile_private` is), so a config full of rules
+    /// that each name a profile/private target notifies once per run
+    /// instead of once per routed link. See
+    /// `routing::degrade_target`/`routing::notify_profile_private_unsupported_once`.
+    pub profile_private_notice_shown: AtomicBool,
     /// Serializes every config save (whether a whole-config replacement
     /// from `save_config`, or an in-place `update_config` from the tray)
     /// so two concurrent callers can never leave the in-memory `config`
@@ -67,9 +88,7 @@ impl AppState {
 
         AppState {
             dirs,
-            caps: PlatformCaps {
-                source_app_rules: false,
-            },
+            caps: platform_caps_for_dist(updates::current_dist()),
             config: Mutex::new(config),
             browsers: Mutex::new(detected),
             prompt: PromptState::new(),
@@ -77,6 +96,7 @@ impl AppState {
             primary_items: Mutex::new(Vec::new()),
             icon_cache: Mutex::new(HashMap::new()),
             updates: updates::Updates::init(),
+            profile_private_notice_shown: AtomicBool::new(false),
             save_lock: Mutex::new(()),
         }
     }
@@ -123,6 +143,7 @@ impl AppState {
             dirs,
             caps: PlatformCaps {
                 source_app_rules: false,
+                restrict_profile_private: false,
             },
             config: Mutex::new(config),
             browsers: Mutex::new(browsers),
@@ -131,6 +152,7 @@ impl AppState {
             primary_items: Mutex::new(Vec::new()),
             icon_cache: Mutex::new(HashMap::new()),
             updates: updates::Updates::init(),
+            profile_private_notice_shown: AtomicBool::new(false),
             save_lock: Mutex::new(()),
         }
     }
@@ -255,5 +277,27 @@ mod tests {
 
     fn fs_cleanup(root: &std::path::Path) {
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn only_mas_restricts_profile_and_private() {
+        for dist in [
+            Dist::Github,
+            Dist::Msstore,
+            Dist::Flathub,
+            Dist::Copr,
+            Dist::Ppa,
+        ] {
+            assert!(
+                !platform_caps_for_dist(dist).restrict_profile_private,
+                "{dist:?} must not restrict profile/private targets"
+            );
+        }
+        assert!(platform_caps_for_dist(Dist::Mas).restrict_profile_private);
+    }
+
+    #[test]
+    fn mas_capability_mapping_leaves_source_app_rules_untouched() {
+        assert!(!platform_caps_for_dist(Dist::Mas).source_app_rules);
     }
 }

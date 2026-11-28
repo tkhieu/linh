@@ -14,6 +14,7 @@ pub mod dirs;
 pub mod icons;
 mod launch_services;
 pub mod notify;
+pub(crate) mod workspace;
 
 /// Linh's `CFBundleIdentifier`, as declared in `tauri.conf.json`'s
 /// top-level `identifier` (which the macOS bundler writes into the

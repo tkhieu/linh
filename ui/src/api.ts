@@ -64,6 +64,12 @@ export interface Config {
 
 export interface PlatformCaps {
   source_app_rules: boolean
+  /** True only for the Mac App Store build: the sandbox gives no way to
+   * carry a browser profile or a private/incognito flag to another app,
+   * so the backend strips both before launching and this is how the UI
+   * knows to hide those options rather than offer ones that would
+   * silently do nothing. */
+  restrict_profile_private: boolean
 }
 
 export type UpdateKind = 'rpm' | 'deb' | 'nsis' | 'msix' | 'mac_app' | 'dev'

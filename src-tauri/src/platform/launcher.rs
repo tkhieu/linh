@@ -94,6 +94,16 @@ pub fn spawn_detached(
         return super::windows::open_uri(&cmd.args[0]).map_err(io::Error::other);
     }
     #[cfg(target_os = "macos")]
+    if cmd.program == super::macos::command::MAS_OPEN_WITH_APP {
+        super::macos::workspace::open_with_app(&cmd.args[0], &cmd.args[1], on_outcome);
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    if cmd.program == super::macos::command::MAS_OPEN_URL {
+        super::macos::workspace::open_url(&cmd.args[0], on_outcome);
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
     if cmd.program == super::macos::command::OPEN {
         return spawn_macos_open(dirs, cmd, on_outcome);
     }

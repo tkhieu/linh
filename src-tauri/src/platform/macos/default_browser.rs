@@ -2,8 +2,11 @@
 
 use linh_core::Browser;
 
+use crate::updates::{current_dist, Dist};
+
+use super::dirs::Dirs;
 use super::launch_services;
-use super::LINH_BUNDLE_ID;
+use super::{workspace, LINH_BUNDLE_ID};
 
 /// Whichever bundle id is currently registered as `http`'s default
 /// handler (used by `app_config` to carry a previous default forward
@@ -26,7 +29,33 @@ pub fn is_default_browser() -> bool {
 /// so `Ok(())` means the request was accepted, not that the switch has
 /// actually happened; callers must re-check [`is_default_browser`]
 /// rather than assume success from this.
+///
+/// The Mac App Store build (`LINH_DIST=mas`) takes a different path
+/// entirely: `LSSetDefaultHandlerForURLScheme` is a LaunchServices
+/// function that *writes* state, which — unlike the read-only `LSCopy*`
+/// queries the rest of this module still uses — the sandbox does not
+/// let through. `workspace::set_default_application_for_scheme` (built
+/// on `NSWorkspace.setDefaultApplication(at:toOpenURLsWithScheme:completion:)`,
+/// macOS 12+) is used instead, resolving Linh's own bundle path via the
+/// same read-only `app_urls_for_bundle_id` query `browsers.rs` already
+/// relies on. Also fire-and-forget for the same reason: its completion
+/// handler only notices an outright rejection (and then falls back to
+/// opening System Settings' picker directly) rather than confirming
+/// success, which must still be checked via [`is_default_browser`].
 pub fn set_default_browser() -> Result<(), String> {
+    if current_dist() == Dist::Mas {
+        let dirs = Dirs::from_env();
+        let own_bundle = launch_services::app_urls_for_bundle_id(LINH_BUNDLE_ID)
+            .into_iter()
+            .find(|path| path.is_dir())
+            .ok_or_else(|| "could not resolve Linh's own bundle path".to_string())?;
+        let own_bundle = own_bundle.to_string_lossy().into_owned();
+        for scheme in ["http", "https"] {
+            workspace::set_default_application_for_scheme(&dirs, &own_bundle, scheme);
+        }
+        return Ok(());
+    }
+
     for scheme in ["http", "https"] {
         launch_services::set_default_handler_for_scheme(scheme, LINH_BUNDLE_ID)?;
     }
