@@ -17,26 +17,30 @@ if (-not $sourceExe) {
 $sourceExe = (Resolve-Path $sourceExe).Path
 if (-not (Test-Path $sourceExe)) { throw "LINH_STORE_EXE_PATH does not exist: $sourceExe" }
 
-# Assert the binary is actually what it claims to be before packaging it —
-# by searching its raw bytes for the build marker every build embeds
-# (`updates::BUILD_MARKER`), never by running it. `linh.exe` is a
-# GUI-subsystem binary (`windows_subsystem = "windows"`), which has no
-# usable stdout when spawned non-interactively from a script (this used
-# to run `$sourceExe --print-dist` and capture its output, which crashed
-# in CI with "failed printing to stdout: The pipe is being closed"), and
-# even starting it at all would run its single-instance/plugin startup
-# code for no reason. Store policy (Microsoft Store, Apple App Store
-# guideline 2.5.2) forbids shipping the self-updater at all, so this
-# fails the packaging step loudly instead of silently shipping it.
+# Assert the binary is actually what it claims to be before packaging it
+# — by reading the stamp file `build.rs`'s `write_dist_stamp` writes next
+# to the compiled binary, never by running the exe itself or scanning its
+# bytes. Two earlier approaches both failed in real CI: running
+# `$sourceExe --print-dist` and capturing its output crashed, because
+# `linh.exe` is a GUI-subsystem binary (`windows_subsystem = "windows"`)
+# with no reliable stdout when spawned non-interactively ("failed
+# printing to stdout: The pipe is being closed"); searching the exe's raw
+# bytes for a marker embedded via a `#[used] static` also failed, because
+# the MSVC linker's default `/OPT:REF` silently stripped the unreferenced
+# static from the real Windows build (it had survived the Linux build
+# this was first verified against). A plain sibling text file written by
+# the build script itself sidesteps both. Store policy (Microsoft Store,
+# Apple App Store guideline 2.5.2) forbids shipping the self-updater at
+# all, so this fails the packaging step loudly instead of silently
+# shipping it.
 $expectedMarker = 'LINH_BUILD_MARKER:dist=msstore;self_update=false'
-$exeBytes = [System.IO.File]::ReadAllBytes($sourceExe)
-# Latin-1 maps every byte 0-255 to one char losslessly, so this never
-# throws on non-UTF8 bytes elsewhere in the binary — unlike decoding the
-# whole file as UTF-8 would risk — while still finding the marker, which
-# is plain ASCII.
-$exeText = [System.Text.Encoding]::Latin1.GetString($exeBytes)
-if (-not $exeText.Contains($expectedMarker)) {
-    throw "LINH_STORE_EXE_PATH ($sourceExe) does not contain the expected build marker '$expectedMarker' - refusing to package a binary that isn't a confirmed msstore/self-update-off build"
+$stampPath = Join-Path (Split-Path $sourceExe) 'linh.dist-marker.txt'
+if (-not (Test-Path $stampPath)) {
+    throw "Expected a build stamp next to LINH_STORE_EXE_PATH at $stampPath - was $sourceExe actually produced by a normal cargo/cargo-tauri build (build.rs writes this), not copied or renamed from elsewhere?"
+}
+$stampContents = (Get-Content $stampPath -Raw).Trim()
+if ($stampContents -ne $expectedMarker) {
+    throw "Build stamp at $stampPath says '$stampContents', expected '$expectedMarker' - refusing to package a binary that isn't a confirmed msstore/self-update-off build"
 }
 
 $stage = Join-Path $root 'target/release/msix-stage'

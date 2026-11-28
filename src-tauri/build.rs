@@ -36,5 +36,53 @@ fn main() {
 
     println!("cargo:rustc-env=LINH_DIST={dist}");
 
+    write_dist_stamp(&dist, self_update_enabled);
+
     tauri_build::build()
+}
+
+/// Writes a small stamp file next to where Cargo will place the final
+/// compiled binary (same directory, `linh.dist-marker.txt`), naming this
+/// build's `LINH_DIST`/`self-update` state in plain text.
+/// `scripts/package-msix.ps1` reads this to confirm which build it's
+/// about to package into the Store MSIX before doing so.
+///
+/// This is the third approach tried for that check, and the only one
+/// that held up: running the built exe with a `--print-dist` flag
+/// crashed in real CI (`linh.exe` is a GUI-subsystem binary —
+/// `windows_subsystem = "windows"` — with no reliable stdout when
+/// spawned non-interactively: "failed printing to stdout: The pipe is
+/// being closed"). Embedding a marker directly in the exe's data section
+/// via a `#[used] static` (so a packaging script could search the raw
+/// bytes without running it) also failed in real CI: it worked on the
+/// Linux dev build this was first verified against, but the MSVC
+/// linker's default `/OPT:REF` silently stripped the unreferenced static
+/// from the real Windows build. A plain sibling file written by the
+/// build script itself sidesteps both: nothing has to run or link
+/// anything to produce or read it.
+///
+/// The format string here (`"LINH_BUILD_MARKER:dist={dist};self_update={self_update_enabled}\n"`)
+/// must be kept identical to `updates::dist_stamp_contents` by hand —
+/// build scripts compile separately from (and before) the crate they
+/// build, so this can't call that function directly. That function's own
+/// unit test is what a future change to either copy needs to keep
+/// passing.
+///
+/// Derives the binary's directory from `OUT_DIR`
+/// (`<target-dir>/<profile>/build/<pkg>-<hash>/out`) by walking up three
+/// levels to `<target-dir>/<profile>`, which is where Cargo places the
+/// final binary for an ordinary, non-cross-compiled build — every build
+/// in this repo's CI. Best-effort: a failure here (an unexpected
+/// `OUT_DIR` shape, a write error) must never fail the actual build,
+/// since this stamp only serves `package-msix.ps1`, nothing the compiled
+/// binary itself depends on.
+fn write_dist_stamp(dist: &str, self_update_enabled: bool) {
+    let Ok(out_dir) = std::env::var("OUT_DIR") else {
+        return;
+    };
+    let Some(profile_dir) = std::path::Path::new(&out_dir).ancestors().nth(3) else {
+        return;
+    };
+    let contents = format!("LINH_BUILD_MARKER:dist={dist};self_update={self_update_enabled}\n");
+    let _ = std::fs::write(profile_dir.join("linh.dist-marker.txt"), contents);
 }

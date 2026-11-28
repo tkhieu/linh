@@ -119,32 +119,28 @@ pub fn current_dist() -> Dist {
     parse_dist(env!("LINH_DIST")).expect("build.rs validates LINH_DIST before compilation")
 }
 
-/// A unique marker baked directly into this binary's data section,
-/// naming its compiled-in `LINH_DIST` and whether the `self-update`
-/// feature is compiled in. Packaging a build into a store artifact (see
-/// `scripts/package-msix.ps1`) searches the built *file*'s raw bytes for
-/// this exact string rather than running the binary and reading its
-/// output: `linh` is a GUI-subsystem binary
-/// (`windows_subsystem = "windows"`), which has no reliable stdout when
-/// spawned non-interactively from a script (observed in CI: `println!`
-/// panicked with "failed printing to stdout: The pipe is being closed"),
-/// and even starting it at all would run its single-instance/plugin
-/// startup code for no reason. `#[used]` stops the release profile's LTO
-/// (`profile.release.lto = true` in the workspace `Cargo.toml`) and
-/// symbol stripping from discarding this static as unreferenced — the
-/// *symbol name* can still be stripped, but `#[used]` keeps the string's
-/// bytes themselves present in the binary, which is all a raw byte
-/// search needs. `self_update=` reads `true`/`false` (whatever `cfg!`
-/// itself expands to), not `on`/`off`: `concat!` only accepts literals,
-/// and `cfg!(...)` expands to a bare boolean literal before `concat!`
-/// sees it, so this is the plain, dependency-free way to embed it.
-#[used]
-pub static BUILD_MARKER: &str = concat!(
-    "LINH_BUILD_MARKER:dist=",
-    env!("LINH_DIST"),
-    ";self_update=",
-    cfg!(feature = "self-update")
-);
+/// The exact text `build.rs`'s `write_dist_stamp` writes to the
+/// `linh.dist-marker.txt` file it places next to the compiled binary,
+/// naming this build's `LINH_DIST`/`self-update` state.
+/// `scripts/package-msix.ps1` reads that stamp file before packaging a
+/// build into the Store MSIX — not the exe itself: running it crashed in
+/// real CI (`linh` is a GUI-subsystem binary, `windows_subsystem =
+/// "windows"`, with no reliable stdout when spawned non-interactively),
+/// and embedding a marker directly in the exe's own data section (tried
+/// next, via a `#[used] static`) also failed in real CI — it survived
+/// the Linux dev build this was first checked against, but the MSVC
+/// linker's default `/OPT:REF` silently stripped the unreferenced static
+/// from the actual Windows build.
+///
+/// `build.rs` can't call this directly — build scripts compile
+/// separately from (and before) the crate they build — so it keeps its
+/// own copy of this exact format by hand; this function exists only so
+/// that copy has a tested, documented reference to be kept in sync
+/// with (hence `#[cfg(test)]`: nothing at runtime ever calls it).
+#[cfg(test)]
+fn dist_stamp_contents(dist: &str, self_update_enabled: bool) -> String {
+    format!("LINH_BUILD_MARKER:dist={dist};self_update={self_update_enabled}\n")
+}
 
 /// Where the "Updates" UI says updates come from, for a channel whose
 /// [`Dist::managed_by`] is not `None`.
@@ -1794,19 +1790,15 @@ mod tests {
     }
 
     #[test]
-    fn build_marker_names_the_compiled_in_dist_and_self_update_state() {
+    fn dist_stamp_contents_matches_the_exact_format_build_rs_writes_by_hand() {
         assert_eq!(
-            BUILD_MARKER,
-            format!(
-                "LINH_BUILD_MARKER:dist=github;self_update={}",
-                cfg!(feature = "self-update")
-            )
+            dist_stamp_contents("msstore", false),
+            "LINH_BUILD_MARKER:dist=msstore;self_update=false\n"
         );
-    }
-
-    #[test]
-    fn build_marker_starts_with_the_fixed_prefix_a_byte_search_looks_for() {
-        assert!(BUILD_MARKER.starts_with("LINH_BUILD_MARKER:dist=github;self_update="));
+        assert_eq!(
+            dist_stamp_contents("github", true),
+            "LINH_BUILD_MARKER:dist=github;self_update=true\n"
+        );
     }
 
     #[test]

@@ -129,9 +129,9 @@ cargo tauri build --bundles rpm   # or deb/nsis/dmg, per platform
 # Microsoft Store (Windows, PowerShell): `self-update` must be off, and
 # the exe that ends up in the MSIX must not be the same one the NSIS
 # installer just built. Build it into its own --target-dir, then package
-# it — package-msix.ps1 itself verifies the exe by searching its bytes
-# for its build marker before packaging it (see below), so this doesn't
-# have to be done by hand.
+# it — package-msix.ps1 itself verifies the build stamp build.rs writes
+# next to the exe before packaging it (see below), so this doesn't have
+# to be done by hand.
 $env:LINH_DIST = 'msstore'
 cargo tauri build --no-bundle -- --no-default-features --target-dir ../target/msstore
 $env:LINH_STORE_EXE_PATH = 'target/msstore/release/linh.exe'
@@ -154,18 +154,23 @@ LINH_DIST=ppa cargo tauri build --bundles deb
 LINH_DIST=flathub cargo tauri build --bundles rpm
 ```
 
-Every built binary embeds its own compiled-in channel directly in its
-data section as plain bytes: `updates::BUILD_MARKER`, e.g.
-`LINH_BUILD_MARKER:dist=msstore;self_update=false`. This is checked by
-searching the built *file*, never by running it — `linh` is a
-GUI-subsystem binary (`windows_subsystem = "windows"`), which doesn't
-have usable stdout when spawned non-interactively from a script (an
-earlier version of this ran `linh.exe --print-dist` and crashed in CI
-with "failed printing to stdout: The pipe is being closed"), and
-starting the real binary at all would run its single-instance/plugin
-startup code for no reason. `scripts/package-msix.ps1` requires
-`LINH_STORE_EXE_PATH` (no default/guessed path), reads that exe's raw
-bytes, and refuses to package anything that doesn't contain exactly
+Every build gets a stamp file, `linh.dist-marker.txt`, written by
+`build.rs`'s `write_dist_stamp` right next to the compiled binary,
+naming its `LINH_DIST`/`self-update` state, e.g.
+`LINH_BUILD_MARKER:dist=msstore;self_update=false`. `package-msix.ps1`
+reads this before packaging a build into the Store MSIX, never the exe
+itself — two earlier approaches both failed in real CI: running
+`linh.exe --print-dist` and capturing its output crashed, because
+`linh` is a GUI-subsystem binary (`windows_subsystem = "windows"`) with
+no reliable stdout when spawned non-interactively ("failed printing to
+stdout: The pipe is being closed"); embedding the marker directly in the
+exe's data section via a `#[used] static` (checked by searching the raw
+bytes, so nothing had to run) also failed, because the MSVC linker's
+default `/OPT:REF` silently stripped the unreferenced static from the
+real Windows build, even though the identical code survived the Linux
+build this was first verified against. `scripts/package-msix.ps1`
+requires `LINH_STORE_EXE_PATH` (no default/guessed path) and refuses to
+package anything whose stamp doesn't say exactly
 `LINH_BUILD_MARKER:dist=msstore;self_update=false` — so pointing it at
 the wrong exe (e.g. the NSIS build's own `target/release/linh.exe`)
 fails the packaging step instead of silently shipping the self-updater
