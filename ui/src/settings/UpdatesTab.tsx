@@ -4,7 +4,7 @@ import {
   checkForUpdatesNow, getUpdateStatus, installUpdate, openReleasePage,
   UPDATE_DOWNLOAD_PROGRESS_EVENT, UPDATE_STATUS_CHANGED_EVENT,
 } from '../api'
-import type { UpdateDownloadProgress, UpdateKind, UpdateStatus } from '../api'
+import type { ManagedBy, UpdateDownloadProgress, UpdateKind, UpdateStatus } from '../api'
 
 const kindLabels: Record<UpdateKind, string> = {
   rpm: 'Linux RPM package',
@@ -19,6 +19,15 @@ const capabilityLabels: Record<UpdateStatus['capability'], string> = {
   self_install: 'Install from this app',
   download_only: 'Download from the release page',
   none: 'Check only',
+}
+
+/** Where the "Updates for this version come from …" message points, per `managed_by`. */
+const managedByLabels: Record<ManagedBy, string> = {
+  microsoft_store: 'the Microsoft Store',
+  mac_app_store: 'the Mac App Store',
+  flathub: 'Flathub',
+  copr: 'your package manager (Copr)',
+  ppa: 'your package manager (PPA)',
 }
 
 function message(reason: unknown): string {
@@ -147,6 +156,7 @@ export function UpdatesTab({ checkAutomatically, onCheckAutomaticallyChange }: U
     }
   }
 
+  const managedBy = status?.managed_by
   const available = status?.available
   const canInstall = status?.capability === 'self_install' && available
   const canDownload = status?.capability === 'download_only' && available
@@ -159,24 +169,26 @@ export function UpdatesTab({ checkAutomatically, onCheckAutomaticallyChange }: U
   return <>
     <div className="settings-heading">
       <div><h2>Updates</h2><p>Choose when to install a new version.</p></div>
-      <div className="rule-actions"><button type="button" className="secondary" disabled={busy !== null} onClick={() => void check()}>{busy === 'checking' ? 'Checking…' : 'Check now'}</button></div>
+      {!managedBy && <div className="rule-actions"><button type="button" className="secondary" disabled={busy !== null} onClick={() => void check()}>{busy === 'checking' ? 'Checking…' : 'Check now'}</button></div>}
     </div>
     <dl className="updates-details">
       <div><dt>Current version</dt><dd>{status?.current_version ?? 'Loading…'}</dd></div>
       <div><dt>Install type</dt><dd>{status ? kindLabels[status.kind] : 'Loading…'}</dd></div>
-      <div><dt>Update method</dt><dd>{status ? capabilityLabels[status.capability] : 'Loading…'}</dd></div>
+      <div><dt>Update method</dt><dd>{status ? (managedBy ? managedByLabels[managedBy] : capabilityLabels[status.capability]) : 'Loading…'}</dd></div>
       <div><dt>Last checked</dt><dd>{status?.last_checked != null ? dateText(status.last_checked) : 'Never'}</dd></div>
     </dl>
-    <label className="updates-toggle">
+    {!managedBy && <label className="updates-toggle">
       <input type="checkbox" checked={checkAutomatically} onChange={(event) => onCheckAutomaticallyChange(event.target.checked)} />
       Check for updates automatically
-    </label>
-    <p className="hint">This checks for new versions. Installing always needs your choice.</p>
-    {status?.capability === 'none' && <p className="hint">{status.kind === 'msix'
-      ? 'Updates for the Microsoft Store version come from the Store.'
-      : 'Development build. Install a packaged release to update Linh.'}</p>}
-    {status?.capability === 'download_only' && <p className="hint">This copy can download releases but cannot install them itself.</p>}
-    {status?.capability === 'self_install' && (status.kind === 'rpm' || status.kind === 'deb') &&
+    </label>}
+    {!managedBy && <p className="hint">This checks for new versions. Installing always needs your choice.</p>}
+    {managedBy
+      ? <p className="hint">Updates for this version come from {managedByLabels[managedBy]}.</p>
+      : status?.capability === 'none' && <p className="hint">{status.kind === 'msix'
+        ? 'Updates for the Microsoft Store version come from the Store.'
+        : 'Development build. Install a packaged release to update Linh.'}</p>}
+    {!managedBy && status?.capability === 'download_only' && <p className="hint">This copy can download releases but cannot install them itself.</p>}
+    {!managedBy && status?.capability === 'self_install' && (status.kind === 'rpm' || status.kind === 'deb') &&
       <p className="hint">Installing on Linux asks for your password.</p>}
     {available && <section className="updates-available" aria-label="Available update">
       <h3>Version {available.version} available</h3>

@@ -78,6 +78,20 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+      - name: cargo check (store flavour, LINH_DIST=msstore)
+        # Proves the msstore/mas build configuration (self-update feature
+        # off, tauri-plugin-updater compiled out entirely) keeps compiling
+        # on every push, even though no workflow here builds and submits
+        # the actual Store packages yet. See docs/release.md.
+        env:
+          LINH_DIST: msstore
+        run: cargo check -p linh --no-default-features --all-targets
+
+      - name: cargo clippy (store flavour, LINH_DIST=msstore)
+        env:
+          LINH_DIST: msstore
+        run: cargo clippy -p linh --no-default-features --all-targets -- -D warnings
+
       - name: Install UI dependencies
         working-directory: ui
         run: pnpm install

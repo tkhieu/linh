@@ -8,6 +8,14 @@ publish = false
 [build-dependencies]
 tauri-build = { version = "2.7", features = [] }
 
+[features]
+default = ["self-update"]
+# Linh's in-app updater (`tauri-plugin-updater`). Off entirely for the
+# `msstore`/`mas` `LINH_DIST` channels — Microsoft Store policy and Apple's
+# App Store guideline 2.5.2 forbid a self-updating code path, and `build.rs`
+# fails the build if this is left on for either. See docs/release.md.
+self-update = ["dep:tauri-plugin-updater"]
+
 [dependencies]
 base64 = "0.22"
 linh-core = { path = "../crates/linh-core" }
@@ -18,7 +26,7 @@ tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2.5"
 tauri-plugin-deep-link = "2.6"
 tauri-plugin-notification = "2.8"
-tauri-plugin-updater = "2.14"
+tauri-plugin-updater = { version = "2.14", optional = true }
 tokio = { version = "1", default-features = false, features = ["time"] }
 url = "2"
 

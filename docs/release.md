@@ -74,13 +74,195 @@ secrets in repository variables or in the manifest. The MSIX variables default
 to conspicuous `Placeholder` values for CI verification; replace **all three**
 with the exact Partner Center values before submitting a Store package.
 
+## Store build flavour (`LINH_DIST`)
+
+Every build has one distribution channel, `LINH_DIST`, baked in at compile
+time by `src-tauri/build.rs` (default `github` when the variable is unset).
+It is read once, by `build.rs`, not at runtime: `cargo:rustc-env` embeds the
+validated value into the binary, and an unrecognized value fails the build
+immediately with the list of accepted ones. The six values are `github`,
+`msstore`, `mas`, `flathub`, `copr`, `ppa`.
+
+For every value except `github`, Settings → Updates shows "Updates for this
+version come from …" instead of any checking/installing UI, and the
+background scheduler never starts (`updates::scheduler_enabled`) — so a
+store or distro build never contacts the update endpoint at all.
+
+Microsoft Store policy and Apple's App Store guideline 2.5.2 additionally
+forbid shipping a self-updating code path at all, not just disabling it at
+runtime. `tauri-plugin-updater` is gated behind the `self-update` Cargo
+feature (default **on**), so `msstore`/`mas` builds must turn it off
+entirely — the dependency, the plugin registration in `main.rs`, and every
+function in `updates.rs` that calls it are all compiled out. `build.rs`
+enforces the combination: it fails the build if `LINH_DIST` is `msstore` or
+`mas` while `self-update` is still enabled, so this can't be gotten wrong
+silently.
+
+`cargo tauri build` only forwards flags it recognizes itself (`--bundles`,
+`--features`, `--target`, …); anything meant for the underlying `cargo`
+invocation — `--no-default-features`, `--target-dir` — must come after a
+literal `--`, or it's rejected outright:
+
+```
+$ cargo tauri build --no-default-features
+error: unexpected argument '--no-default-features' found
+  tip: to pass '--no-default-features' as a value, use '-- --no-default-features'
+```
+
+(`cargo tauri build --help`, tauri-cli 2.12.4: *"\[ARGS\]... Command line
+arguments passed to the runner. Use `--` to explicitly mark the start of
+the arguments"*.)
+
+Every command below starts from the repository root — `--target-dir`
+resolves against `cargo`'s own current directory, while the exe path,
+`LINH_STORE_EXE_PATH`, and `package-msix.ps1` itself all assume the repo
+root, so a `cd src-tauri` left in effect across the whole sequence (as an
+earlier version of these docs implied) breaks the rest of it. `cd`s back
+out immediately after the one `cargo tauri build` call that needs
+`src-tauri`. The bash commands below (every dist except `mas`, whose `app`
+bundle target only exists in macOS's own `tauri-cli`) were actually run
+from this checkout, start to finish, to confirm both the `--` requirement
+and this directory structure: for the `msstore` sequence specifically,
+after returning to the repo root, `target/msstore/release/linh` (the
+`.exe` on Windows) and its build stamp
+`target/msstore/release/linh.dist-marker.txt` both resolved at exactly the
+paths `LINH_STORE_EXE_PATH` and `package-msix.ps1` expect.
+
+```sh
+# GitHub (default): the in-app updater is this install's update path.
+(cd src-tauri && cargo tauri build --bundles rpm)   # or deb/nsis/dmg, per platform
+
+# Mac App Store: `self-update` must be off, run on macOS.
+(cd src-tauri && LINH_DIST=mas cargo tauri build --bundles app -- --no-default-features)
+
+# Flathub / Copr / PPA: `self-update` stays on (no store policy forbids
+# it here), but it never runs — the distro/Flathub updates these installs,
+# not Linh. Each reuses the existing rpm/deb bundle; the packaging work
+# specific to each channel (the Copr spec, the PPA source package, the
+# Flathub manifest) is tracked separately in the store-submissions plan
+# (phases 4, 5, 7) and isn't built by this command on its own yet.
+(cd src-tauri && LINH_DIST=copr cargo tauri build --bundles rpm)
+(cd src-tauri && LINH_DIST=ppa cargo tauri build --bundles deb)
+(cd src-tauri && LINH_DIST=flathub cargo tauri build --bundles rpm)
+```
+
+Microsoft Store (Windows, PowerShell — this is exactly release.yml's "Build
+Windows Store binary" and "Package unsigned Windows Store MSIX" steps, as
+one sequence): `self-update` must be off, and the exe that ends up in the
+MSIX must not be the same one the NSIS installer just built, so it's built
+into its own `--target-dir`. The build itself needs `src-tauri` as its
+working directory; everything after it — the exe path, `package-msix.ps1`
+— needs the repo root, hence the explicit `Set-Location`s:
+
+```powershell
+Set-Location src-tauri
+$env:LINH_DIST = 'msstore'
+cargo tauri build --no-bundle -- --no-default-features --target-dir ../target/msstore
+Set-Location ..
+$env:LINH_STORE_EXE_PATH = 'target/msstore/release/linh.exe'
+$env:LINH_VERSION = '0.4.1'
+./scripts/package-msix.ps1
+```
+
+The packaging step's primary check reads the **exe itself**, not a
+sidecar: `scripts/assert-self-updater-presence.ps1` searches the exe's
+raw bytes for a string `tauri-plugin-updater` only emits when it's
+actually compiled in — `thiserror`'s generated `Display` text for
+`Error::EmptyEndpoints`, *"Updater does not have any endpoints set."*
+(`tauri-plugin-updater-2.14.1/src/error.rs:13`). That impl is reachable
+from `main` through `updates::describe_error`, so the string is part of
+genuinely live code, not an inert marker a linker is free to discard —
+confirmed empirically on Linux: it appears exactly once in a default
+(`github`, self-update on) release build and zero times in an
+`LINH_DIST=msstore --no-default-features` build. `package-msix.ps1`
+refuses to package any exe the string is present in.
+
+Getting to a check that reads the exe itself took three attempts: running
+`linh.exe --print-dist` and capturing its output crashed in real CI,
+because `linh` is a GUI-subsystem binary (`windows_subsystem =
+"windows"`) with no reliable stdout when spawned non-interactively
+("failed printing to stdout: The pipe is being closed"); embedding a
+purpose-built marker in the exe's data section via a `#[used] static`
+(also checked by a raw byte search) also failed in real CI, because the
+MSVC linker's default `/OPT:REF` silently stripped the *unreferenced*
+static from the real Windows build, even though the identical code
+survived the Linux build this was first verified against. Searching for
+a string the plugin's own, already-reachable code emits sidesteps both:
+nothing has to run, and nothing needed inventing had to survive the
+linker on its own.
+
+`package-msix.ps1` runs the byte search *first* (`assert-self-updater-presence.ps1
+-Expect absent`), before it ever reads the stamp. `build.rs` only forbids
+`self-update` being *on* for `msstore`/`mas` (`build.rs:28`) — it doesn't
+require `self-update` to be *on* for `github`/`flathub`/`copr`/`ppa`, so
+any of those four can also be built with `--no-default-features` and
+would pass the byte search exactly as validly as a genuine `msstore` exe
+does. The byte search alone can only rule out a build that still has the
+self-updater (`github`/`flathub`/`copr`/`ppa` built the normal way, with
+`self-update` left on); it can't tell `msstore` apart from `mas`, or from
+one of those four built without the self-updater. The stamp check below
+is what then rejects anything whose `LINH_DIST` isn't exactly `msstore`.
+
+A sidecar stamp file, `linh.dist-marker.txt`, written by `build.rs`'s
+`write_dist_stamp` right next to the compiled binary (e.g.
+`LINH_BUILD_MARKER:dist=msstore;self_update=false`), is kept as this
+**second**, narrower layer — not because it's load-bearing for the
+self-updater question (the byte search above already answers that for
+the common case), but because it's the only thing that confirms the exe
+is the *specific* `msstore` channel, rather than `mas` or a
+`github`/`flathub`/`copr`/`ppa` build that happened to also be built
+without the self-updater. Checking only the exe and dropping the stamp
+entirely was considered and rejected for exactly that gap.
+Because a stamp is written before the exe it sits next to is linked, a
+stale stamp next to a *later-replaced* exe would otherwise still read as
+a confirmed build — `release.yml`'s cleanup step deletes `target/msstore`
+before every Windows job build (so the exe and its stamp can only ever
+come from the same build), and `package-msix.ps1` separately refuses to
+package an exe whose `LastWriteTime` is older than its stamp's.
+
+`release.yml` also runs the byte search the other way, as a positive
+control, against the NSIS build's own `target/release/linh.exe`
+(`LINH_DIST` unset, `self-update` on): it must contain the marker. This
+is what actually protects the check's own future: if a later
+`tauri-plugin-updater` upgrade ever renames or rewords that error
+message, the positive control fails loudly right there, instead of the
+Store packaging step's negative check silently "passing" for the wrong
+reason (the string being absent because it no longer exists anywhere,
+not because this exe lacks the plugin).
+
+**Residual risk**: the check is a string present in the compiled output
+of a specific crate version, not a structural guarantee — a future
+`tauri-plugin-updater` release could still coincidentally reintroduce an
+identical string for an unrelated reason (vanishingly unlikely for a
+sentence this specific), or change the string in a way the positive
+control catches but requires a human to then update both this marker and
+the one in `assert-self-updater-presence.ps1`. There's no feasible way to
+make "the plugin's code is absent" fully self-verifying without Apple's
+or Microsoft's own store review, which this repeats a version of every
+time a release is prepared.
+
+CI's `build` job runs `cargo check` and `cargo clippy` a second time with
+`LINH_DIST=msstore` and `--no-default-features` on every push, so the store
+configuration can't silently rot even outside a release build. Separately,
+`release.yml`'s Windows job already builds and packages the unsigned Store
+MSIX on every run — including a `dry_run`, where it's just a downloadable
+workflow artifact — and includes it in the `linh-windows`/release asset
+set; nothing here submits it anywhere. Getting it in front of Microsoft
+still needs a human: see "Store MSIX" below for the manual Partner Center
+upload.
+
 ## Store MSIX
 
 Tauri builds the unsigned NSIS installer using its existing Windows build
-command. The release job stages the same `target/release/linh.exe`, GPL license,
-MSIX manifest, and logo assets, then uses the Windows SDK `MakePri.exe` and
-`MakeAppx.exe` to produce an unsigned x64 `.msix`. This keeps the packaging
-step small and uses Microsoft's own package validator. The manifest targets
+command, with the default `github` dist and the self-updater included. The
+MSIX is a *different* binary: the release job separately builds
+`target/msstore/release/linh.exe` with `LINH_DIST=msstore` and
+`--no-default-features` (see "Store build flavour" above), never the NSIS
+build's own `target/release/linh.exe`. The release job stages that msstore
+exe, GPL license, MSIX manifest, and logo assets, then uses the Windows SDK
+`MakePri.exe` and `MakeAppx.exe` to produce an unsigned x64 `.msix`. This
+keeps the packaging step small and uses Microsoft's own package validator.
+The manifest targets
 Windows 10 1809 or later, declares `runFullTrust`, HTTP/HTTPS protocol and
 HTML file associations, and a `linh.exe` execution alias. The MSIX version is
 `MAJOR.MINOR.PATCH.0`; increase the app version for each Store update.

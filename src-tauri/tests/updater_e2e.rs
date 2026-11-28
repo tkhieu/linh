@@ -16,7 +16,12 @@
 //! ever runs. Compiled only on non-Windows until that's worth fixing
 //! (phase 5's CI matrix only needs Linux/macOS/Windows package installs,
 //! not this file).
-#![cfg(not(windows))]
+//!
+//! Also gated on the `self-update` feature: `tauri_plugin_updater` isn't
+//! even a dependency with that feature off (the `msstore`/`mas`
+//! `LINH_DIST` channels — see `Cargo.toml`), so this whole binary has
+//! nothing to test there.
+#![cfg(all(not(windows), feature = "self-update"))]
 
 use base64::Engine;
 use tauri_plugin_updater::UpdaterExt;

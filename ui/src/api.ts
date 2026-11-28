@@ -70,6 +70,9 @@ export type UpdateKind = 'rpm' | 'deb' | 'nsis' | 'msix' | 'mac_app' | 'dev'
 
 export type UpdateCapability = 'self_install' | 'download_only' | 'none'
 
+/** Set when this build's `LINH_DIST` channel is not `github`: the store or distro, not Linh, delivers updates. */
+export type ManagedBy = 'microsoft_store' | 'mac_app_store' | 'flathub' | 'copr' | 'ppa'
+
 export interface AvailableUpdate {
   version: string
   notes?: string | null
@@ -81,6 +84,7 @@ export interface UpdateStatus {
   current_version: string
   kind: UpdateKind
   capability: UpdateCapability
+  managed_by: ManagedBy | null
   /** Milliseconds since the Unix epoch, when a check has run. */
   last_checked?: number | null
   available?: AvailableUpdate | null

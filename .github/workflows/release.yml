@@ -183,11 +183,19 @@ jobs:
           # building, so a stale signature or a stale older-version bundle
           # can never ride along with a fresh, unsigned, or differently
           # versioned build.
+          # target/msstore is wiped too: its binary and the build stamp
+          # next to it (see build.rs's write_dist_stamp) must always come
+          # from the SAME build. A stale cached exe sitting next to a
+          # stale cached stamp from an earlier run would otherwise still
+          # read as "a confirmed msstore build" to package-msix.ps1's
+          # content check, even though neither was produced by the build
+          # this job is about to run.
           rm -rf \
             target/release/bundle/rpm \
             target/release/bundle/deb \
             target/release/bundle/nsis \
             target/release/msix \
+            target/msstore \
             target/universal-apple-darwin/release/bundle/dmg \
             target/universal-apple-darwin/release/bundle/macos
 
@@ -230,11 +238,36 @@ jobs:
         working-directory: src-tauri
         run: cargo tauri build --bundles nsis
 
+      - name: Verify the NSIS build still has the self-updater (positive control)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        # Proves the marker check itself still works, rather than only
+        # ever exercising its "absent" branch: if tauri-plugin-updater
+        # ever renames/removes the string this looks for, this step
+        # fails loudly here instead of the Store packaging step's
+        # "absent" check silently passing for the wrong reason.
+        run: ./scripts/assert-self-updater-presence.ps1 -ExePath target/release/linh.exe -Expect present
+
+      - name: Build Windows Store binary (LINH_DIST=msstore)
+        if: matrix.platform == 'windows'
+        working-directory: src-tauri
+        # A separate binary, into its own `--target-dir`, so it never
+        # clobbers the NSIS installer's own `target/release/linh.exe`
+        # above (which is deliberately the default `github` flavour,
+        # self-updater included). `--no-default-features` turns off the
+        # `self-update` feature here; the leading `--` is required by
+        # `cargo tauri build` to pass cargo-level flags through to the
+        # underlying `cargo` invocation (`cargo tauri build --help`).
+        env:
+          LINH_DIST: msstore
+        run: cargo tauri build --no-bundle -- --no-default-features --target-dir ../target/msstore
+
       - name: Package unsigned Windows Store MSIX
         if: matrix.platform == 'windows'
         shell: pwsh
         env:
           LINH_VERSION: ${{ needs.version.outputs.version }}
+          LINH_STORE_EXE_PATH: target/msstore/release/linh.exe
           MSIX_IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME }}
           MSIX_PUBLISHER: ${{ vars.MSIX_PUBLISHER }}
           MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}

@@ -17,6 +17,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use tauri::utils::config::BundleType;
 use tauri::{AppHandle, Emitter, Manager};
+#[cfg(feature = "self-update")]
 use tauri_plugin_updater::UpdaterExt;
 
 use crate::platform::current::dirs::Dirs;
@@ -60,6 +61,116 @@ pub enum Capability {
     DownloadOnly,
     /// Nothing offered beyond the check itself.
     None,
+}
+
+/// The build-time distribution channel, baked in by `build.rs` from the
+/// `LINH_DIST` environment variable (default `github` when unset) via
+/// `cargo:rustc-env=LINH_DIST=...`; see `docs/release.md` for the exact
+/// build command per channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dist {
+    /// The GitHub release channel: Linh's own in-app updater is this
+    /// install's only update path.
+    Github,
+    Msstore,
+    Mas,
+    Flathub,
+    Copr,
+    Ppa,
+}
+
+impl Dist {
+    /// What the "Updates" UI should attribute update delivery to for this
+    /// channel; `None` only for [`Dist::Github`], the one channel where
+    /// Linh's own updater still runs.
+    pub fn managed_by(self) -> Option<ManagedBy> {
+        match self {
+            Dist::Github => None,
+            Dist::Msstore => Some(ManagedBy::MicrosoftStore),
+            Dist::Mas => Some(ManagedBy::MacAppStore),
+            Dist::Flathub => Some(ManagedBy::Flathub),
+            Dist::Copr => Some(ManagedBy::Copr),
+            Dist::Ppa => Some(ManagedBy::Ppa),
+        }
+    }
+}
+
+/// Parses a `LINH_DIST` value. Takes the raw string as a parameter, rather
+/// than reading the environment itself, so the mapping is unit-tested
+/// directly without depending on how this process was actually built —
+/// [`current_dist`] is the only real caller that reads the compiled-in
+/// value.
+pub fn parse_dist(raw: &str) -> Option<Dist> {
+    match raw {
+        "github" => Some(Dist::Github),
+        "msstore" => Some(Dist::Msstore),
+        "mas" => Some(Dist::Mas),
+        "flathub" => Some(Dist::Flathub),
+        "copr" => Some(Dist::Copr),
+        "ppa" => Some(Dist::Ppa),
+        _ => None,
+    }
+}
+
+/// This build's distribution channel. `build.rs` already validated
+/// `LINH_DIST` before compiling this crate at all (see its own `panic!`),
+/// so the `expect` below only ever fires if that invariant is broken.
+pub fn current_dist() -> Dist {
+    parse_dist(env!("LINH_DIST")).expect("build.rs validates LINH_DIST before compilation")
+}
+
+/// The exact text `build.rs`'s `write_dist_stamp` writes to the
+/// `linh.dist-marker.txt` file it places next to the compiled binary,
+/// naming this build's `LINH_DIST`/`self-update` state.
+/// `scripts/package-msix.ps1` reads that stamp file before packaging a
+/// build into the Store MSIX — not the exe itself: running it crashed in
+/// real CI (`linh` is a GUI-subsystem binary, `windows_subsystem =
+/// "windows"`, with no reliable stdout when spawned non-interactively),
+/// and embedding a marker directly in the exe's own data section (tried
+/// next, via a `#[used] static`) also failed in real CI — it survived
+/// the Linux dev build this was first checked against, but the MSVC
+/// linker's default `/OPT:REF` silently stripped the unreferenced static
+/// from the actual Windows build.
+///
+/// `build.rs` can't call this directly — build scripts compile
+/// separately from (and before) the crate they build — so it keeps its
+/// own copy of this exact format by hand; this function exists only so
+/// that copy has a tested, documented reference to be kept in sync
+/// with (hence `#[cfg(test)]`: nothing at runtime ever calls it).
+#[cfg(test)]
+fn dist_stamp_contents(dist: &str, self_update_enabled: bool) -> String {
+    format!("LINH_BUILD_MARKER:dist={dist};self_update={self_update_enabled}\n")
+}
+
+/// Where the "Updates" UI says updates come from, for a channel whose
+/// [`Dist::managed_by`] is not `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedBy {
+    MicrosoftStore,
+    MacAppStore,
+    Flathub,
+    Copr,
+    Ppa,
+}
+
+/// Forces [`Capability::None`] for any `dist` that isn't [`Dist::Github`],
+/// regardless of what [`capability_for`] would otherwise grant `base` —
+/// a store or distro-managed channel never offers "Update now"/"Download"
+/// from inside Linh, no matter the detected [`UpdateKind`].
+pub fn capability_override_for_dist(dist: Dist, base: Capability) -> Capability {
+    match dist.managed_by() {
+        Some(_) => Capability::None,
+        None => base,
+    }
+}
+
+/// Whether the background scheduler may run at all for this install:
+/// `false` for every managed channel (see [`Dist::managed_by`]), so Linh
+/// never contacts the update endpoint from a build the store or a distro
+/// already updates for.
+pub fn scheduler_enabled(managed_by: Option<ManagedBy>) -> bool {
+    managed_by.is_none()
 }
 
 /// Pure classification behind [`detect_kind`], taking its inputs as
@@ -485,6 +596,10 @@ pub struct UpdateStatus {
     pub current_version: String,
     pub kind: UpdateKind,
     pub capability: Capability,
+    /// `Some` for a store/distro-managed [`Dist`] (see
+    /// [`Dist::managed_by`]); the UI shows this instead of offering any
+    /// checking or installing of its own.
+    pub managed_by: Option<ManagedBy>,
     /// Milliseconds since the Unix epoch, when a check has run.
     pub last_checked: Option<u64>,
     pub available: Option<AvailableUpdate>,
@@ -497,6 +612,9 @@ pub struct UpdateStatus {
 pub struct Updates {
     pub kind: UpdateKind,
     pub capability: Capability,
+    /// This build's `LINH_DIST` managed-channel attribution, if any; see
+    /// [`Dist::managed_by`].
+    pub managed_by: Option<ManagedBy>,
     pub schedule: Mutex<Schedule>,
     pub in_flight: AtomicBool,
     pub state: Mutex<UpdateState>,
@@ -505,9 +623,13 @@ pub struct Updates {
 impl Updates {
     pub fn init() -> Self {
         let kind = detect_kind();
+        let dist = current_dist();
+        let managed_by = dist.managed_by();
+        let base_capability = capability_for(kind, exe_matches_expected_install(kind));
         Updates {
             kind,
-            capability: capability_for(kind, exe_matches_expected_install(kind)),
+            capability: capability_override_for_dist(dist, base_capability),
+            managed_by,
             schedule: Mutex::new(Schedule::new(Instant::now())),
             in_flight: AtomicBool::new(false),
             state: Mutex::new(UpdateState::default()),
@@ -528,6 +650,7 @@ pub fn status_snapshot(updates: &Updates) -> UpdateStatus {
         current_version: env!("CARGO_PKG_VERSION").to_string(),
         kind: updates.kind,
         capability: updates.capability,
+        managed_by: updates.managed_by,
         last_checked: state.last_checked.map(system_time_millis),
         available: state.available.clone(),
         last_error: state.last_error.clone(),
@@ -538,6 +661,7 @@ pub fn status_snapshot(updates: &Updates) -> UpdateStatus {
 /// on `tauri_plugin_updater::Error` means this can never be exhaustive on
 /// our side either, so unrecognized variants fall back to their own
 /// `Display` message rather than a generic one.
+#[cfg(feature = "self-update")]
 pub fn describe_error(err: &tauri_plugin_updater::Error) -> String {
     use tauri_plugin_updater::Error::*;
     match err {
@@ -561,6 +685,7 @@ pub fn describe_error(err: &tauri_plugin_updater::Error) -> String {
 /// touching [`UpdateState`] — that's the caller's job, so this can be
 /// awaited inside the single-flight guard without holding any lock
 /// across the `.await`.
+#[cfg(feature = "self-update")]
 async fn perform_check(app: &AppHandle) -> Result<Option<AvailableUpdate>, String> {
     let updater = app.updater().map_err(|err| describe_error(&err))?;
     match updater.check().await {
@@ -572,6 +697,17 @@ async fn perform_check(app: &AppHandle) -> Result<Option<AvailableUpdate>, Strin
         Ok(None) => Ok(None),
         Err(err) => Err(describe_error(&err)),
     }
+}
+
+/// The `self-update`-off counterpart of the real [`perform_check`] above:
+/// `tauri_plugin_updater` isn't even a dependency in this build (store
+/// policy forbids it — see the feature's doc comment in Cargo.toml), so
+/// there is no updater to call; this always refuses instead of silently
+/// doing nothing, so a caller can't mistake it for "checked, nothing
+/// found".
+#[cfg(not(feature = "self-update"))]
+async fn perform_check(_app: &AppHandle) -> Result<Option<AvailableUpdate>, String> {
+    Err("this build does not check for updates; updates are managed outside Linh".to_string())
 }
 
 /// Records the outcome of a check into `state`, returning the available
@@ -603,6 +739,9 @@ pub async fn check_now(
     app: &AppHandle,
     state: &AppState,
 ) -> Result<Option<AvailableUpdate>, String> {
+    if state.updates.managed_by.is_some() {
+        return Err("updates for this install are managed outside Linh".to_string());
+    }
     if !try_begin_in_flight(&state.updates.in_flight) {
         return Err("an update check or install is already in progress".to_string());
     }
@@ -634,8 +773,10 @@ pub const UPDATE_STATUS_CHANGED_EVENT: &str = "updates://status-changed";
 /// Emitted during `install_update`'s download with `(downloaded_bytes,
 /// total_bytes)`, `total_bytes` being `None` if the server didn't send a
 /// `Content-Length`.
+#[cfg(feature = "self-update")]
 pub const UPDATE_DOWNLOAD_PROGRESS_EVENT: &str = "updates://download-progress";
 
+#[cfg(feature = "self-update")]
 #[derive(Serialize, Clone)]
 struct DownloadProgress {
     downloaded: usize,
@@ -768,6 +909,7 @@ fn confirm_expected_matches_stored(
 /// [`confirm_expected_matches_stored`] already approved
 /// `expected_version` against the last stored check — it exists for the
 /// gap between that approval and this moment, not to replace it.
+#[cfg(feature = "self-update")]
 fn version_mismatch_error(found_version: &str, expected_version: &str) -> Option<String> {
     if found_version == expected_version {
         None
@@ -778,6 +920,7 @@ fn version_mismatch_error(found_version: &str, expected_version: &str) -> Option
     }
 }
 
+#[cfg(feature = "self-update")]
 async fn install_inner(app: &AppHandle, expected_version: &str) -> Result<(), String> {
     let updater = app.updater().map_err(|err| describe_error(&err))?;
     let update = updater
@@ -809,6 +952,18 @@ async fn install_inner(app: &AppHandle, expected_version: &str) -> Result<(), St
     // place and need an explicit relaunch. `restart` never returns, and
     // its `!` coerces to this function's `Result`.
     app.restart()
+}
+
+/// The `self-update`-off counterpart of the real [`install_inner`] above —
+/// see [`perform_check`]'s off counterpart for why this refuses outright
+/// rather than doing nothing. Unreachable in practice: [`install_update`]
+/// only ever calls this once `capability == SelfInstall`, which
+/// [`capability_override_for_dist`] never grants for a channel that would
+/// also force this feature off (see `build.rs`'s own check), but this
+/// still exists so the crate compiles with the feature off at all.
+#[cfg(not(feature = "self-update"))]
+async fn install_inner(_app: &AppHandle, _expected_version: &str) -> Result<(), String> {
+    Err("this build cannot install updates itself; updates are managed outside Linh".to_string())
 }
 
 /// Where "Download" (the UI's action for [`Capability::DownloadOnly`])
@@ -868,6 +1023,11 @@ fn scheduler_tick(
 /// network it's driven with.
 pub async fn run_scheduler(app: AppHandle) {
     let state = app.state::<AppState>();
+    // Never loops, never sleeps, never touches the network for a
+    // store/distro-managed channel — see [`scheduler_enabled`].
+    if !scheduler_enabled(state.updates.managed_by) {
+        return;
+    }
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
         let now = Instant::now();
@@ -1396,12 +1556,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "self-update")]
     fn version_mismatch_refuses_install_of_a_different_version() {
         let err = version_mismatch_error("1.3.0", "1.2.0").expect("must refuse");
         assert!(err.contains("1.3.0"));
     }
 
     #[test]
+    #[cfg(feature = "self-update")]
     fn version_mismatch_allows_install_of_the_expected_version() {
         assert_eq!(version_mismatch_error("1.2.0", "1.2.0"), None);
     }
@@ -1604,23 +1766,121 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "self-update")]
     fn describes_a_cancelled_install_without_the_raw_error_text() {
         let message = describe_error(&tauri_plugin_updater::Error::PackageInstallFailed);
         assert!(message.contains("password prompt"));
     }
 
     #[test]
+    #[cfg(feature = "self-update")]
     fn describes_a_cancelled_authentication_prompt() {
         let message = describe_error(&tauri_plugin_updater::Error::AuthenticationFailed);
         assert!(message.contains("Authentication"));
     }
 
     #[test]
+    #[cfg(feature = "self-update")]
     fn unrecognized_errors_fall_back_to_their_own_message() {
         let message = describe_error(&tauri_plugin_updater::Error::ReleaseNotFound);
         assert_eq!(
             message,
             tauri_plugin_updater::Error::ReleaseNotFound.to_string()
         );
+    }
+
+    #[test]
+    fn dist_stamp_contents_matches_the_exact_format_build_rs_writes_by_hand() {
+        assert_eq!(
+            dist_stamp_contents("msstore", false),
+            "LINH_BUILD_MARKER:dist=msstore;self_update=false\n"
+        );
+        assert_eq!(
+            dist_stamp_contents("github", true),
+            "LINH_BUILD_MARKER:dist=github;self_update=true\n"
+        );
+    }
+
+    #[test]
+    fn parse_dist_accepts_every_documented_value() {
+        assert_eq!(parse_dist("github"), Some(Dist::Github));
+        assert_eq!(parse_dist("msstore"), Some(Dist::Msstore));
+        assert_eq!(parse_dist("mas"), Some(Dist::Mas));
+        assert_eq!(parse_dist("flathub"), Some(Dist::Flathub));
+        assert_eq!(parse_dist("copr"), Some(Dist::Copr));
+        assert_eq!(parse_dist("ppa"), Some(Dist::Ppa));
+    }
+
+    #[test]
+    fn parse_dist_rejects_anything_else() {
+        assert_eq!(parse_dist(""), None);
+        assert_eq!(parse_dist("Github"), None);
+        assert_eq!(parse_dist("snap"), None);
+    }
+
+    #[test]
+    fn only_github_is_unmanaged() {
+        assert_eq!(Dist::Github.managed_by(), None);
+    }
+
+    #[test]
+    fn every_other_dist_maps_to_its_own_managed_by() {
+        assert_eq!(Dist::Msstore.managed_by(), Some(ManagedBy::MicrosoftStore));
+        assert_eq!(Dist::Mas.managed_by(), Some(ManagedBy::MacAppStore));
+        assert_eq!(Dist::Flathub.managed_by(), Some(ManagedBy::Flathub));
+        assert_eq!(Dist::Copr.managed_by(), Some(ManagedBy::Copr));
+        assert_eq!(Dist::Ppa.managed_by(), Some(ManagedBy::Ppa));
+    }
+
+    #[test]
+    fn github_capability_is_untouched_by_the_override() {
+        for base in [
+            Capability::SelfInstall,
+            Capability::DownloadOnly,
+            Capability::None,
+        ] {
+            assert_eq!(capability_override_for_dist(Dist::Github, base), base);
+        }
+    }
+
+    #[test]
+    fn every_managed_dist_forces_capability_none_even_over_self_install() {
+        for dist in [
+            Dist::Msstore,
+            Dist::Mas,
+            Dist::Flathub,
+            Dist::Copr,
+            Dist::Ppa,
+        ] {
+            for base in [
+                Capability::SelfInstall,
+                Capability::DownloadOnly,
+                Capability::None,
+            ] {
+                assert_eq!(
+                    capability_override_for_dist(dist, base),
+                    Capability::None,
+                    "dist {dist:?} with base {base:?} must still end up None"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scheduler_is_enabled_only_when_nothing_manages_updates() {
+        assert!(scheduler_enabled(None));
+    }
+
+    #[test]
+    fn scheduler_is_disabled_for_every_managed_by_value() {
+        for managed in [
+            ManagedBy::MicrosoftStore,
+            ManagedBy::MacAppStore,
+            ManagedBy::Flathub,
+            ManagedBy::Copr,
+            ManagedBy::Ppa,
+        ] {
+            assert!(!scheduler_enabled(Some(managed)));
+        }
     }
 }

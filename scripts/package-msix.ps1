@@ -6,6 +6,62 @@ $version = $env:LINH_VERSION
 if (-not $version -or $version -notmatch '^\d+\.\d+\.\d+$') {
     throw 'LINH_VERSION must be a three-part numeric version'
 }
+# No default/guessed path: the caller (release.yml) must point this at the
+# binary it built specifically for the Store, with LINH_DIST=msstore and
+# the self-update feature off — never the default github-flavour exe that
+# also ships the NSIS installer, which still has the self-updater.
+$sourceExe = $env:LINH_STORE_EXE_PATH
+if (-not $sourceExe) {
+    throw 'LINH_STORE_EXE_PATH must point at the msstore-flavour linh.exe (built with LINH_DIST=msstore and --no-default-features)'
+}
+$sourceExe = (Resolve-Path $sourceExe).Path
+if (-not (Test-Path $sourceExe)) { throw "LINH_STORE_EXE_PATH does not exist: $sourceExe" }
+
+# The PRIMARY check: does the exe itself actually contain the
+# self-updater, regardless of what any sidecar file claims? A stamp
+# file alone can't prove that — build.rs writes it before the exe is
+# linked, so a stale stamp next to a *later-replaced* exe (e.g. a
+# different, newer github-flavour exe dropped at this same path without
+# going through build.rs again) would still read as a confirmed
+# msstore/self-update-off build even though the exe itself is wrong.
+# See assert-self-updater-presence.ps1 for the exact string and why it's
+# reliable (checked by searching the exe's bytes, never by running it —
+# linh.exe is a GUI-subsystem binary with no reliable stdout
+# non-interactively).
+& (Join-Path $PSScriptRoot 'assert-self-updater-presence.ps1') -ExePath $sourceExe -Expect absent
+
+# SECOND layer, kept rather than removed: build.rs only forbids
+# self-update being ON for msstore/mas (build.rs:28) - it doesn't require
+# self-update to be ON for github/flathub/copr/ppa, so any of those can
+# also be built with --no-default-features and would pass the check
+# above just as validly as a real msstore exe. The byte search alone
+# can't tell msstore apart from mas, or from one of those four built
+# without the self-updater. The stamp confirms the exe is the *specific*
+# msstore channel, with a clearer message than a bare "marker absent"
+# would give for any of those remaining cases.
+$expectedMarker = 'LINH_BUILD_MARKER:dist=msstore;self_update=false'
+$stampPath = Join-Path (Split-Path $sourceExe) 'linh.dist-marker.txt'
+if (-not (Test-Path $stampPath)) {
+    Write-Host "Directory listing of $(Split-Path $sourceExe):"
+    Get-ChildItem (Split-Path $sourceExe) | ForEach-Object { Write-Host "  $($_.Name)" }
+    throw "Expected a build stamp next to LINH_STORE_EXE_PATH at $stampPath - was $sourceExe actually produced by a normal cargo/cargo-tauri build (build.rs writes this), not copied or renamed from elsewhere?"
+}
+$stampContents = (Get-Content $stampPath -Raw).Trim()
+if ($stampContents -ne $expectedMarker) {
+    throw "Build stamp at $stampPath says '$stampContents', expected '$expectedMarker' - refusing to package a binary that isn't a confirmed msstore/self-update-off build"
+}
+
+# Addresses the stamp's own staleness risk (see above) independently,
+# by requiring the exe to be at least as new as it: release.yml also
+# deletes target/msstore before every Store build so the two are only
+# ever written together in the first place, but this check doesn't rely
+# on that cleanup alone.
+$exeWriteTime = (Get-Item $sourceExe).LastWriteTimeUtc
+$stampWriteTime = (Get-Item $stampPath).LastWriteTimeUtc
+if ($exeWriteTime -lt $stampWriteTime) {
+    throw "LINH_STORE_EXE_PATH ($sourceExe, last written $exeWriteTime UTC) is older than its build stamp ($stampPath, last written $stampWriteTime UTC) - it may have been replaced without a matching rebuild; refusing to package it"
+}
+
 $stage = Join-Path $root 'target/release/msix-stage'
 $output = Join-Path $root "target/release/msix/Linh_$($version)_x64.msix"
 $assets = Join-Path $stage 'Assets'
@@ -22,7 +78,7 @@ if (-not (Test-Path $makePri)) { throw 'Windows SDK MakePri.exe was not found' }
 Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
 New-Item $assets -ItemType Directory -Force | Out-Null
 New-Item (Split-Path $output) -ItemType Directory -Force | Out-Null
-Copy-Item (Join-Path $root 'target/release/linh.exe') $stage
+Copy-Item $sourceExe (Join-Path $stage 'linh.exe')
 Copy-Item (Join-Path $root 'LICENSE') $stage
 Copy-Item (Join-Path $root 'packaging/windows/assets/*.png') $assets
 
