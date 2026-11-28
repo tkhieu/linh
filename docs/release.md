@@ -13,8 +13,9 @@ artifact is for Partner Center submission, not direct installation.
    and build suffixes (`v1.2.3-beta`, `v1.2.3+build`) are rejected too: MSIX
    package versions must be a plain numeric `Major.Minor.Patch`.
    Add one `<release>` entry for the new version to
-   `packaging/linux/dev.hieutk.linh.metainfo.xml` when the release is
-   published, using its publication date and a brief user-facing description.
+   `packaging/linux/dev.hieutk.linh.metainfo.xml` in this version-bump PR,
+   using the planned release date and a brief user-facing description. If
+   publishing slips to another day, a one-line follow-up corrects the date.
 2. Run **Release** with `workflow_dispatch` and `dry_run=true` on a branch
    after the workflow is available on the default branch. Inspect all four
    build jobs and the complete `linh-release-assets` artifact, including
@@ -41,8 +42,8 @@ artifact is for Partner Center submission, not direct installation.
 ## AppStream metainfo
 
 The RPM and DEB install `packaging/linux/dev.hieutk.linh.metainfo.xml` under
-`/usr/share/metainfo/`. Keep its release list in sync with published tags as
-part of each release bump. Validate edits with
+`/usr/share/metainfo/`. Keep its release list in sync with version bumps.
+Validate edits with
 `appstreamcli validate --no-net --explain packaging/linux/dev.hieutk.linh.metainfo.xml`.
 Real screenshots are still needed; see `docs/screenshots/README.md`.
 
