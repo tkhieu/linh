@@ -15,8 +15,20 @@ mod webkit_tune;
 use std::sync::Mutex;
 use std::time::Instant;
 
+use tauri::image::Image;
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager};
+
+/// Tray icon per platform: macOS reads the black symbolic mark as a
+/// template image (the OS tints it for light/dark menu bars), Linux/GNOME
+/// panels are dark so the white symbolic mark stays legible, and Windows
+/// has no template-image convention so it keeps the full-colour mark.
+#[cfg(target_os = "macos")]
+const TRAY_ICON_BYTES: &[u8] = include_bytes!("../icons/tray/macos.png");
+#[cfg(target_os = "linux")]
+const TRAY_ICON_BYTES: &[u8] = include_bytes!("../icons/tray/linux.png");
+#[cfg(target_os = "windows")]
+const TRAY_ICON_BYTES: &[u8] = include_bytes!("../icons/tray/windows.png");
 
 use platform::url_intake;
 use state::AppState;
@@ -194,13 +206,14 @@ fn main() {
             }
 
             let menu = tray::build_initial(&app_handle, &state_handle)?;
-            TrayIconBuilder::with_id(tray::TRAY_ID)
+            let tray_icon =
+                Image::from_bytes(TRAY_ICON_BYTES).expect("tray icon asset is a valid image");
+            let tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID)
                 .menu(&menu)
-                .icon(
-                    app.default_window_icon()
-                        .cloned()
-                        .expect("app icon configured in tauri.conf.json"),
-                )
+                .icon(tray_icon);
+            #[cfg(target_os = "macos")]
+            let tray_builder = tray_builder.icon_as_template(true);
+            tray_builder
                 .on_menu_event(|app, event| {
                     let id = event.id.as_ref();
                     if let Some(index) = id.strip_prefix("primary:") {
